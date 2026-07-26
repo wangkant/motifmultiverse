@@ -9,6 +9,7 @@ from motifmultiverse.schema import (
 )
 
 from .base import (
+    SPLIT_ARTIFACT_SCHEMA_VERSION,
     AnalysisMode,
     CrossFitFold,
     DecisionSplitArtifact,
@@ -23,6 +24,7 @@ __all__ = [
     "CrossFitFold",
     "DecisionSplitArtifact",
     "PeakSplitManifest",
+    "SPLIT_ARTIFACT_SCHEMA_VERSION",
     "SplitRole",
     "ValidationSplitArtifact",
     "assert_artifact_split_compatibility",

@@ -100,15 +100,36 @@ def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _validated_split_assignments(
+    assignments: Mapping[str, SplitRole],
+) -> dict[str, SplitRole]:
+    if not isinstance(assignments, Mapping) or not assignments:
+        raise SchemaError("peak split manifest assignments must be a non-empty mapping")
+    normalized: dict[str, SplitRole] = {}
+    for peak_id, role in assignments.items():
+        if not _is_nonempty_string(peak_id):
+            raise SchemaError("peak split manifest peak IDs must be non-empty strings")
+        if not isinstance(role, SplitRole):
+            raise SchemaError("peak split manifest assignments must use SplitRole values")
+        normalized[peak_id] = role
+    return normalized
+
+
 def peak_split_manifest_checksum(
     schema_version: str,
     assignments: Mapping[str, SplitRole],
 ) -> str:
     """Hash the complete, canonically ordered primary split declaration."""
+    if schema_version != SPLIT_MANIFEST_SCHEMA_VERSION:
+        raise SchemaError(
+            "peak split manifest schema_version must be "
+            f"{SPLIT_MANIFEST_SCHEMA_VERSION!r}"
+        )
+    normalized = _validated_split_assignments(assignments)
     payload = {
         "assignments": [
             {"peak_id": peak_id, "role": role.value}
-            for peak_id, role in sorted(assignments.items())
+            for peak_id, role in sorted(normalized.items())
         ],
         "schema_version": schema_version,
     }
@@ -131,16 +152,7 @@ class PeakSplitManifest:
                 "peak split manifest schema_version must be "
                 f"{SPLIT_MANIFEST_SCHEMA_VERSION!r}"
             )
-        if not isinstance(self.assignments, Mapping) or not self.assignments:
-            raise SchemaError("peak split manifest assignments must be a non-empty mapping")
-
-        frozen_assignments: dict[str, SplitRole] = {}
-        for peak_id, role in self.assignments.items():
-            if not _is_nonempty_string(peak_id):
-                raise SchemaError("peak split manifest peak IDs must be non-empty strings")
-            if not isinstance(role, SplitRole):
-                raise SchemaError("peak split manifest assignments must use SplitRole values")
-            frozen_assignments[peak_id] = role
+        frozen_assignments = _validated_split_assignments(self.assignments)
         expected = peak_split_manifest_checksum(self.schema_version, frozen_assignments)
         _require_sha256_digest("peak split manifest checksum", self.checksum)
         if self.checksum != expected:
@@ -154,6 +166,8 @@ def build_peak_split_manifest(assignments: Mapping[str, SplitRole | str]) -> Pea
         raise SchemaError("peak split manifest assignments must be a mapping")
     normalized: dict[str, SplitRole] = {}
     for peak_id, role in assignments.items():
+        if not _is_nonempty_string(peak_id):
+            raise SchemaError("peak split manifest peak IDs must be non-empty strings")
         try:
             normalized[peak_id] = SplitRole(role)
         except (TypeError, ValueError) as exc:
