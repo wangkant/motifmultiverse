@@ -168,6 +168,40 @@ def test_four_state_missingness_FALSIFIED_by_wrong_claimed_total():
     assert "claimed coverage" in result.detail
 
 
+def test_four_state_missingness_accepts_a_coverage_rounded_for_display():
+    """A coverage legitimately rounded to 4 decimal places for display must not
+    false-fail against a full-precision recomputation.
+
+    2/3 recomputes to 0.6666666666666666; a report that displays "0.6667" is not
+    lying, and an exact-match tolerance (the old rel_tol=1e-9) would reject it. A
+    guard that cries wolf on correct input gets disabled by the next maintainer,
+    which is worse than a slightly weaker guard.
+    """
+    rows = [{"statistic": 1.0, "missingness": "used"},
+            {"statistic": 1.0, "missingness": "used"},
+            {"statistic": None, "missingness": "no_sequence_match"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.6667, claimed_defined=2, claimed_total=3)
+    assert result.passed
+
+
+def test_four_state_missingness_still_rejects_a_mismatch_beyond_rounding():
+    """The tolerance must not be widened so far that a genuine mismatch slips
+    through. 0.67 is a coarser (2-decimal) rounding of 2/3 than this guard's
+    display convention (4 decimals) admits, and must still be caught -- alongside
+    the project's founding failure (coverage 1.0 claimed when rows say 0.5),
+    which the pre-existing
+    `test_four_state_guard_rejects_coverage_computed_after_fill` already covers.
+    """
+    rows = [{"statistic": 1.0, "missingness": "used"},
+            {"statistic": 1.0, "missingness": "used"},
+            {"statistic": None, "missingness": "no_sequence_match"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.67, claimed_defined=2, claimed_total=3)
+    assert not result.passed
+    assert "claimed coverage" in result.detail
+
+
 # --------------------------------------------------- no_cross_model_cwm_avg
 def test_no_cross_model_cwm_avg_passes():
     ops = [{"op": "mean", "group_by": ["model", "readout", "metacluster", "family_id"]}]

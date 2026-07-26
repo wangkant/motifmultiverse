@@ -170,7 +170,19 @@ def four_state_missingness(
     def _matches(claimed: float, recomputed: float) -> bool:
         if math.isnan(claimed) or math.isnan(recomputed):
             return math.isnan(claimed) and math.isnan(recomputed)
-        return math.isclose(claimed, recomputed, rel_tol=1e-9, abs_tol=1e-9)
+        # Coverage is conventionally reported rounded to 4 decimal places (e.g. a
+        # report or plot label showing "0.6667" for 2/3). An exact-match tolerance
+        # (the previous rel_tol=1e-9) makes this comparison effectively exact, so a
+        # legitimately-rounded claim FALSE-FAILS against a full-precision
+        # recomputation -- and a guard that cries wolf on correct input gets
+        # disabled by the next maintainer, which is worse than a weaker guard. The
+        # largest rounding error a 4-decimal display can introduce is 0.5e-4
+        # (5e-5); abs_tol=1e-4 covers that with a 2x margin. It still catches the
+        # project's founding failure (a claimed coverage of 1.000000 against a
+        # true 0.5 -- four orders of magnitude past this tolerance) and a coarser
+        # 2-decimal-rounded claim (error ~3.3e-3), neither of which is display
+        # rounding.
+        return math.isclose(claimed, recomputed, rel_tol=1e-4, abs_tol=1e-4)
 
     mismatches = []
     if claimed_total != total:
