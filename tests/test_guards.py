@@ -12,7 +12,9 @@ reordering it, and asserts the guard rejects it.
 from __future__ import annotations
 
 import random
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -409,12 +411,125 @@ def test_index_order_matches_loader_FALSIFIED_by_an_empty_side():
 
 
 # ------------------------------------------------------------------ coverage
+def _guard_id_from_test_name(name: str) -> str | None:
+    """Extract the guard id a ``test_<gid>_FALSIFIED...`` function names, or None."""
+    marker = "_FALSIFIED"
+    if not name.startswith("test_") or marker not in name:
+        return None
+    candidate = name[len("test_"):name.index(marker)]
+    return candidate if candidate in guards.ALL_GUARDS else None
+
+
+def _expand_parametrized_calls(test_fn: Any) -> list[Callable[[], None]]:
+    """Return zero-argument callables that run ``test_fn`` for every parameter set.
+
+    A plain test function needs no expansion. A ``@pytest.mark.parametrize``’d
+    one is called directly here (bypassing pytest's own collection), once per
+    row of its argvalues, using the marker's own argnames/argvalues -- so this
+    works without pytest fixtures or a live test session.
+    """
+    marks = [m for m in getattr(test_fn, "pytestmark", ()) if m.name == "parametrize"]
+    if not marks:
+        return [test_fn]
+    argnames, argvalues = marks[0].args[0], marks[0].args[1]
+    names = [n.strip() for n in argnames.split(",")] if isinstance(argnames, str) else list(argnames)
+    calls = []
+    for row in argvalues:
+        values = row if isinstance(row, (tuple, list)) else (row,)
+        kwargs = dict(zip(names, values, strict=True))
+        calls.append(lambda test_fn=test_fn, kwargs=kwargs: test_fn(**kwargs))
+    return calls
+
+
+def _guards_confirmed_failing_by(namespace: Mapping[str, Any], guard_ids: Iterable[str]) -> set[str]:
+    """Run every ``test_<gid>_FALSIFIED*`` callable in ``namespace`` with its guard spied on.
+
+    Returns the subset of ``guard_ids`` for which some such test actually
+    produced a ``GuardResult`` with ``passed=False`` *from that guard's own
+    function* while running. This is the check that distinguishes a real
+    falsification test from a same-named stub: T-15's own standard (a guard
+    that has never been shown to fail is not evidence) applies to the tests
+    that are supposed to prove it, not only to the guards themselves. A test
+    whose body is ``pass``, or that asserts something unrelated and never
+    calls the guard, cannot land its guard id in the returned set no matter
+    what its name promises.
+    """
+    guard_ids = set(guard_ids)
+    confirmed: set[str] = set()
+    for name, obj in namespace.items():
+        gid = _guard_id_from_test_name(name)
+        if gid is None or gid not in guard_ids or gid in confirmed or not callable(obj):
+            continue
+        original = getattr(guards, gid)
+        observed = False
+
+        def _spy(*args, __original=original, **kwargs):
+            nonlocal observed
+            result = __original(*args, **kwargs)
+            if not result.passed:
+                observed = True
+            return result
+
+        setattr(guards, gid, _spy)
+        try:
+            for call in _expand_parametrized_calls(obj):
+                call()
+        finally:
+            setattr(guards, gid, original)
+        if observed:
+            confirmed.add(gid)
+    return confirmed
+
+
 def test_every_guard_has_a_falsification_test():
-    """Meta-test: no guard may ship without a test that makes it fail."""
-    import pathlib
-    src = pathlib.Path(__file__).read_text()
-    missing = [g for g in guards.ALL_GUARDS if f"def test_{g}_FALSIFIED" not in src]
-    assert not missing, f"guards with no falsification test: {missing}"
+    """Meta-test: no guard may ship without a test that DEMONSTRATES a failure.
+
+    A prior version of this check was `f"def test_{g}_FALSIFIED" not in src` --
+    a pure substring search over the file's own text. A reviewer fooled it: they
+    deleted the real body of a falsification test and replaced it with a
+    same-named no-op, and the check still reported `missing=[]`, because the
+    string `"def test_single_scale_FALSIFIED..."` was still on disk. That is
+    exactly the defect class this task exists to close in the guards
+    themselves (a coverage figure that was never compared against anything
+    supplies its own evidence of correctness) -- so it cannot be left standing
+    in the test that is supposed to prove the guards are covered.
+
+    This version actually CALLS every `test_<gid>_FALSIFIED*` function with its
+    guard spied on, and only counts a guard as covered if some call produced a
+    real `GuardResult(passed=False)` from that guard. See
+    `test_meta_test_rejects_a_correctly_named_but_vacuous_falsification_test`
+    for the proof that this version resists the same attack.
+    """
+    confirmed = _guards_confirmed_failing_by(globals(), guards.ALL_GUARDS)
+    missing = sorted(set(guards.ALL_GUARDS) - confirmed)
+    assert not missing, (
+        f"guards with no test that demonstrates a failing GuardResult: {missing}"
+    )
+
+
+def test_meta_test_rejects_a_correctly_named_but_vacuous_falsification_test():
+    """Reproduces the reviewer's attack and proves the CURRENT check rejects it.
+
+    Empirically, before this fix, temporarily replacing the body of
+    `test_single_scale_FALSIFIED_by_mixed_scales` with a bare `pass` left
+    `test_every_guard_has_a_falsification_test` passing -- the old substring
+    check could not tell a real falsification test from a stub with the right
+    name. This test reproduces that exact attack shape (right name, empty
+    body, the guard is never called) as a synthetic namespace entry and
+    asserts the shared verification helper -- the one the real meta-test now
+    calls -- correctly refuses to count it.
+    """
+    def test_single_scale_FALSIFIED_by_mixed_scales():
+        pass  # right name; asserts nothing; never calls guards.single_scale
+
+    attacked_namespace = {
+        "test_single_scale_FALSIFIED_by_mixed_scales": test_single_scale_FALSIFIED_by_mixed_scales,
+    }
+    confirmed = _guards_confirmed_failing_by(attacked_namespace, {"single_scale"})
+    assert "single_scale" not in confirmed, (
+        "a same-named stub that never calls the guard must not count as a "
+        "falsification test"
+    )
 
 
 def test_the_package_passes_its_own_no_key_parsing_guard():
