@@ -12,9 +12,11 @@ reordering it, and asserts the guard rejects it.
 from __future__ import annotations
 
 import random
+from pathlib import Path
 
 import pytest
 
+import motifmultiverse
 from motifmultiverse import guards
 from motifmultiverse.schema import MotifNode
 
@@ -86,21 +88,82 @@ def test_no_key_parsing_FALSIFIED_by_prefix_test():
     assert not guards.no_key_parsing(src).passed
 
 
+def test_no_key_parsing_success_detail_is_labelled_heuristic():
+    """The guard's own success message must not overclaim what an AST scan proves."""
+    src = "def f(table, ident):\n    return table[ident.value]\n"
+    assert guards.no_key_parsing(src).detail == "heuristic scan passed"
+
+
+def test_no_key_parsing_does_not_catch_aliasing_or_dataflow():
+    """Documents a real gap, it does not just assert one.
+
+    This is a syntactic AST scan over literal identifier names, not a dataflow
+    analysis. If the value is renamed before being sliced, or reaches the slice
+    through a parameter or attribute the scan does not track back to one of the
+    watched names, the same defect the guard exists to catch passes silently. A
+    passing result here certifies only "no watched identifier is sliced or
+    prefix-tested directly by its own name" -- it does not certify BA-11 for the
+    file as a whole, which is why the corresponding frozen principle is not
+    classified ENFORCED on the strength of this guard alone.
+    """
+    src = (
+        "def f(variant_id):\n"
+        "    alias = variant_id\n"
+        "    return alias.split('_')[1]\n"
+    )
+    result = guards.no_key_parsing(src)
+    assert result.passed  # the aliased slice is invisible to this heuristic
+
+
 # ------------------------------------------------------ four_state_missingness
 def test_four_state_missingness_passes():
     rows = [{"statistic": 1.0, "missingness": "used"},
             {"statistic": None, "missingness": "not_searched"}]
-    assert guards.four_state_missingness(rows).passed
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2)
+    assert result.passed
 
 
 def test_four_state_missingness_FALSIFIED_by_zero_collapse():
     rows = [{"statistic": 1.0, "missingness": "used"},
             {"statistic": 0, "missingness": "no_sequence_match"}]
-    assert not guards.four_state_missingness(rows).passed
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2)
+    assert not result.passed
 
 
 def test_four_state_missingness_FALSIFIED_by_absent_state():
-    assert not guards.four_state_missingness([{"statistic": 1.0}]).passed
+    result = guards.four_state_missingness(
+        [{"statistic": 1.0}], claimed_coverage=1.0, claimed_defined=1, claimed_total=1)
+    assert not result.passed
+
+
+def test_four_state_guard_rejects_coverage_computed_after_fill():
+    """The project's founding failure: a coverage figure computed AFTER a fill.
+
+    Neither row contains a numeric zero, so the old zero-collapse check would have
+    passed this. The claimed coverage of 1.0 (and claimed_defined=2) can only be
+    caught by recomputing `defined`/`total`/coverage from the raw rows and
+    comparing -- one row is genuinely `not_searched` with no value at all, so the
+    true coverage is 0.5, not 1.0.
+    """
+    rows = [
+        {"missingness": "used", "statistic": 1.0},
+        {"missingness": "not_searched", "statistic": None},
+    ]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=1.0, claimed_defined=2, claimed_total=2)
+    assert not result.passed
+    assert "claimed coverage" in result.detail
+
+
+def test_four_state_missingness_FALSIFIED_by_wrong_claimed_total():
+    rows = [{"statistic": 1.0, "missingness": "used"},
+            {"statistic": None, "missingness": "not_searched"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=3)
+    assert not result.passed
+    assert "claimed coverage" in result.detail
 
 
 # --------------------------------------------------- no_cross_model_cwm_avg
@@ -376,3 +439,25 @@ def test_random_reorder_does_not_silently_change_a_verdict():
     shuffled = ns[:]
     rng.shuffle(shuffled)
     assert guards.variant_id_unique(shuffled).passed == before
+
+
+# ------------------------------------------------------------ package shape
+def test_guards_is_a_package_and_no_shadowing_module_exists():
+    """A `guards.py` beside the `guards/` package would win the import race silently.
+
+    Whichever of the two loads first (an artifact of `sys.path` order, not of
+    anything declared) becomes `motifmultiverse.guards`; new code added to the
+    other one would never run and no import error would announce it. This test
+    fails if `guards.py` and `guards/` ever coexist, and separately fails if the
+    package is ever demoted to a bare module -- it checks the filesystem
+    directly, not what happened to get imported this run.
+    """
+    package_root = Path(motifmultiverse.__file__).parent
+    assert (package_root / "guards" / "__init__.py").is_file(), (
+        "guards must remain a package; guard modules live under guards/ and are "
+        "re-exported from guards/__init__.py"
+    )
+    assert not (package_root / "guards.py").exists(), (
+        "a sibling guards.py alongside the guards/ package makes which module is "
+        "imported depend on path order; only one of the two may ever exist"
+    )

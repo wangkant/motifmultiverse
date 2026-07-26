@@ -95,11 +95,20 @@ def variant_id_unique(nodes: Sequence[Any]) -> GuardResult:
 
 
 def no_key_parsing(source: str) -> GuardResult:
-    """Static check: no semantics may be sliced out of an identifier string.
+    """Heuristic static check: no semantics may be sliced out of an identifier string.
 
     This is the guard for the failure where a hit-caller row number was matched
     against a discovery manifest id, filing one factor's evidence under another's
     name.
+
+    This is a syntactic AST scan, not a dataflow analysis: it only sees a slice
+    or prefix test performed directly on one of a fixed set of watched names. An
+    alias (``x = variant_id; x.split(...)``) or a value that reaches the same
+    operation through a parameter, attribute, or return value is invisible to it.
+    A pass here is evidence about the literal source text scanned, not a proof
+    that no identifier's semantics are parsed anywhere in the call graph -- hence
+    the success detail says "heuristic scan passed", and the frozen principle
+    this guard partially covers is not classified ENFORCED on its strength alone.
     """
     gid = "no_key_parsing"
     try:
@@ -122,26 +131,65 @@ def no_key_parsing(source: str) -> GuardResult:
             offenders.append(f"line {node.lineno}: {name}")
     if offenders:
         return _fail(gid, "semantics parsed from identifiers -> " + "; ".join(offenders))
-    return _ok(gid, "no identifier string is sliced or prefix-tested")
+    return _ok(gid, "heuristic scan passed")
 
 
-def four_state_missingness(rows: Sequence[Mapping[str, Any]],
-                           value_key: str = "statistic",
-                           state_key: str = "missingness") -> GuardResult:
-    """No undefined value may have been collapsed to 0, and coverage is pre-fill."""
+def four_state_missingness(
+    rows: Sequence[Mapping[str, Any]],
+    claimed_coverage: float,
+    claimed_defined: int,
+    claimed_total: int,
+    value_key: str = "statistic",
+    state_key: str = "missingness",
+) -> GuardResult:
+    """The claimed coverage/defined/total are checked, never trusted.
+
+    This is the guard for the project's founding failure: a coverage figure
+    computed AFTER an undefined value had already been filled reported
+    1.000000, and because the number that shipped was never compared against
+    anything, it supplied its own evidence of correctness. Checking rows for a
+    literal 0 cannot catch that failure -- a fill can write any value, not just
+    zero, and the arithmetic that produced 1.000000 ran downstream of the fill,
+    on data that no longer showed which rows had been undefined. The only check
+    that can catch it is an independent recomputation of ``defined``, ``total``
+    and coverage from the raw missingness rows, compared against what the
+    artifact claims. A mismatch fails even when no row contains a numeric zero.
+    """
     gid = "four_state_missingness"
-    bad = [i for i, r in enumerate(rows)
-           if r.get(state_key) not in (None, "used") and r.get(value_key) == 0]
-    if bad:
-        return _fail(gid, f"{len(bad)} undefined values collapsed to 0 (rows {bad[:5]})")
     missing_state = [i for i, r in enumerate(rows) if state_key not in r]
     if missing_state:
         return _fail(gid, f"{len(missing_state)} rows carry no missingness state")
+    bad = [i for i, r in enumerate(rows)
+           if r.get(state_key) != "used" and r.get(value_key) == 0]
+    if bad:
+        return _fail(gid, f"{len(bad)} undefined values collapsed to 0 (rows {bad[:5]})")
+    total = len(rows)
     defined = sum(1 for r in rows if r.get(state_key) == "used")
-    coverage = defined / len(rows) if rows else float("nan")
-    if rows and math.isclose(coverage, 1.0) and defined != len(rows):
-        return _fail(gid, "coverage computed after filling; it reports 1.0 but rows are undefined")
-    return _ok(gid, f"coverage={coverage:.6f} computed pre-fill over {len(rows)} rows")
+    coverage = defined / total if total else float("nan")
+
+    def _matches(claimed: float, recomputed: float) -> bool:
+        if math.isnan(claimed) or math.isnan(recomputed):
+            return math.isnan(claimed) and math.isnan(recomputed)
+        return math.isclose(claimed, recomputed, rel_tol=1e-9, abs_tol=1e-9)
+
+    mismatches = []
+    if claimed_total != total:
+        mismatches.append(f"total: claimed {claimed_total}, recomputed {total}")
+    if claimed_defined != defined:
+        mismatches.append(f"defined: claimed {claimed_defined}, recomputed {defined}")
+    if not _matches(claimed_coverage, coverage):
+        mismatches.append(f"coverage: claimed {claimed_coverage!r}, recomputed {coverage:.6f}")
+    if mismatches:
+        return _fail(
+            gid,
+            "claimed coverage/defined/total do not match a recomputation from the raw "
+            "rows -> " + "; ".join(mismatches),
+        )
+    return _ok(
+        gid,
+        f"claimed coverage={claimed_coverage:.6f}, defined={defined}, total={total} "
+        "match a recomputation from the raw rows",
+    )
 
 
 def no_cross_model_cwm_avg(operations: Iterable[Mapping[str, Any]]) -> GuardResult:
