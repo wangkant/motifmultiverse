@@ -107,7 +107,7 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
     import h5py
     import numpy as np
 
-    from motifmultiverse.compile import _content_hash
+    from motifmultiverse.compile import lexicon_semantic_hash
 
     entry_rows: list[tuple[str, str, str, str]] = []
     manifest_fields = {item.name for item in fields(LexiconManifest)}
@@ -138,7 +138,17 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
             index = payload["index"]
             if not isinstance(index, list) or len(index) != manifest.n_motifs:
                 raise TypeError("manifest index must describe every motif")
-            if [row.get("pattern_tag") for row in index] != manifest.pattern_order:
+            if any(not isinstance(row, Mapping) for row in index):
+                raise TypeError("manifest index rows must be objects")
+            required = {"pattern_tag", "node_id"}
+            if any(not required <= set(row) for row in index):
+                raise TypeError("manifest index rows require pattern_tag and node_id")
+            if any(not isinstance(row["pattern_tag"], str) or not row["pattern_tag"].strip()
+                   or not isinstance(row["node_id"], str) or not row["node_id"].strip() for row in index):
+                raise TypeError("manifest index identities must be non-empty strings")
+            if len({row["node_id"] for row in index}) != len(index):
+                raise TypeError("manifest index has duplicate node_id")
+            if [row["pattern_tag"] for row in index] != manifest.pattern_order:
                 raise TypeError("manifest index pattern order is not authoritative")
             if [row.get("node_id") for row in index] != manifest.node_ids:
                 raise TypeError("manifest index node order is not authoritative")
@@ -159,7 +169,7 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
                         **({"ppm": np.asarray(motif["sequence"])} if "sequence" in motif else {}),
                     }
                     ordered.append((group, pattern, {"node_id": str(row["node_id"])}))
-            recomputed = _content_hash(
+            recomputed = lexicon_semantic_hash(
                 ordered, arrays, schema_version=manifest.schema_version,
                 trim_threshold=manifest.trim_threshold, motif_type=manifest.motif_type,
                 include_rc=manifest.include_rc, loader_backend=manifest.loader_backend,
@@ -565,6 +575,18 @@ def write_stability_artifacts(
         raise ValidationError("stability result decision_id does not match the bound split artifact")
     if not isinstance(provenance, Mapping) or not provenance:
         raise ValidationError("stability artifacts require provenance")
+    backend_identities = [(row.backend, row.backend_version) for row in verification_list]
+    if len(set(backend_identities)) != len(backend_identities):
+        raise ValidationError("backend verification rows must have unique backend identities")
+    result_ids = [row.backend_result_id for row in result_list]
+    if len(set(result_ids)) != len(result_ids):
+        raise ValidationError("stability results must have unique backend_result_id values")
+    verified = [row for row in verification_list if row.status == "VERIFIED"]
+    unverified = [row for row in verification_list if row.status == "UNVERIFIED"]
+    if not result_list and not unverified:
+        raise ValidationError("empty stability artifacts require at least one UNVERIFIED backend row")
+    if len(verified) != len(result_list):
+        raise ValidationError("each VERIFIED backend row requires exactly one stability result")
     for row in result_list:
         matches = [entry for entry in verification_list if (
             entry.status == "VERIFIED" and entry.backend == row.backend
@@ -574,9 +596,11 @@ def write_stability_artifacts(
         )]
         if len(matches) != 1:
             raise ValidationError("every stability result must link to exactly one VERIFIED backend row")
-    verified_ids = {entry.backend_result_id for entry in verification_list if entry.status == "VERIFIED"}
-    if verified_ids != {row.backend_result_id for row in result_list}:
+    verified_ids = [entry.backend_result_id for entry in verified]
+    if set(verified_ids) != set(result_ids) or len(set(verified_ids)) != len(verified_ids):
         raise ValidationError("every VERIFIED backend row must link to exactly one stability result")
+    if any(entry.backend_result_id is not None for entry in unverified):
+        raise ValidationError("UNVERIFIED backend rows cannot claim a stability result")
     if any(entry.lexicon_identity != lexicon.lexicon_identity for entry in verification_list):
         raise ValidationError("backend verification lexicon identity does not match the bound lexicons")
     artifact_id = stability_result_id(

@@ -55,7 +55,7 @@ from motifmultiverse.schema import (
 
 __all__ = [
     "CompileError", "BackendMissing", "TIERS",
-    "compile_lexicons", "load_back", "verify_roundtrip",
+    "compile_lexicons", "lexicon_semantic_hash", "load_back", "verify_roundtrip",
 ]
 
 TIERS = ("core", "expanded", "sensitivity")
@@ -228,7 +228,7 @@ def loader_order(members: list[dict[str, Any]]) -> list[tuple[str, str, dict[str
     return ordered
 
 
-def _content_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any, *,
+def lexicon_semantic_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any, *,
                   schema_version: str, trim_threshold: float, motif_type: str,
                   include_rc: bool, loader_backend: str,
                   loader_parameters: dict[str, Any]) -> str:
@@ -265,6 +265,11 @@ def _content_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any, *
                 h.update(f"{arr.dtype}\t{arr.shape}\n".encode())
                 h.update(arr.tobytes())
     return h.hexdigest()
+
+
+# Compatibility for callers from the initial implementation; validation uses the
+# public function above so compiler and verifier share one authoritative algorithm.
+_content_hash = lexicon_semantic_hash
 
 
 def _write_h5(path: Path, ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any) -> None:
@@ -472,7 +477,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             ordered = ordered_by_tier[tier]
             h5_path = out / f"{tier}.h5"
             _write_h5(h5_path, ordered, arrays)
-            content_hash = _content_hash(
+            content_hash = lexicon_semantic_hash(
                 ordered, arrays,
                 schema_version=LEXICON_MANIFEST_SCHEMA_VERSION,
                 trim_threshold=trim_threshold, motif_type=motif_type,
