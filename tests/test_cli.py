@@ -42,7 +42,6 @@ def test_all_eight_subcommands_are_registered():
 
 
 @pytest.mark.parametrize("argv", [
-    ["annotate", "evidence/"],
     ["adjudicate", "evidence/"],
     ["validate", "lexicons/"],
     ["infer", "instances/"],
@@ -56,20 +55,20 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
 
 
 def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
-    # "align" no longer belongs here (Task 10 implemented it for real); "annotate"
-    # is still a genuine skeleton. Note "annotate" has no --seed flag of its own
+    # "align" and "annotate" no longer belong here (Tasks 10 and 11 implement
+    # them for real); "adjudicate" remains a genuine skeleton. It has no --seed flag
     # (only ingest/compile/interpret/align ever exposed one), so the recorded
     # random_seed is the untouched default (None) rather than a value threaded
     # in from the CLI -- the property under test is that the record exists
     # at all before the body raises, not what value a particular field holds.
     out = tmp_path / "o"
-    assert main(["annotate", "evidence/", "--out", str(out)]) == 3
+    assert main(["adjudicate", "evidence/", "--out", str(out)]) == 3
     recs = json.loads((out / "provenance.json").read_text())
     assert len(recs) == 1
     r = recs[0]
     for field in ("command", "subcommand", "software", "timestamp_utc", "random_seed"):
         assert field in r, field
-    assert r["subcommand"] == "annotate"
+    assert r["subcommand"] == "adjudicate"
     assert r["random_seed"] is None
     assert r["software"]["motifmultiverse"]
 
@@ -95,7 +94,7 @@ def test_cli_threads_the_seed_into_the_provenance_record(tmp_path):
 def test_provenance_appends_rather_than_overwrites(tmp_path):
     out = tmp_path / "o"
     main(["align", "registry/", "--out", str(out)])
-    main(["annotate", "evidence/", "--out", str(out)])
+    main(["adjudicate", "evidence/", "--out", str(out)])
     assert len(json.loads((out / "provenance.json").read_text())) == 2
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from motifmultiverse import __version__
 from motifmultiverse.align import DEFAULT_NULL_SHUFFLES, AlignmentError
+from motifmultiverse.annotate import AnnotationError
 from motifmultiverse.compile import TIERS as COMPILE_TIERS
 from motifmultiverse.compile import BackendMissing, CompileError
 from motifmultiverse.guards import GuardError
@@ -102,13 +103,17 @@ def build_parser() -> argparse.ArgumentParser:
                         "every emitted edge (default: 0)")
     a.set_defaults(func=_run_align)
 
-    a = sub.add_parser("annotate", help="attach database matches and family labels")
+    a = sub.add_parser("annotate", help="retain database-label candidates for later adjudication")
     a.add_argument("evidence", help="evidence/ from align")
+    a.add_argument("--registry", default=None,
+                   help="motif registry; defaults to <evidence>/registry when embedded")
     a.add_argument("--tomtom", action="store_true", help="use TomTom matches")
     a.add_argument("--homer", action="store_true", help="use HOMER matches")
     a.add_argument("--databases", default="config/db.yaml", help="database path config")
+    a.add_argument("--occurrence-null", default=None,
+                   help="precomputed JSON map of candidate IDs to optional occurrence-null values")
     a.add_argument("--out", default="evidence/", help="output directory")
-    a.set_defaults(func=lambda ns: _run("annotate", ns))
+    a.set_defaults(func=_run_annotate)
 
     a = sub.add_parser("adjudicate", help="decide merges, emit a human review file")
     a.add_argument("evidence", help="evidence/ from annotate")
@@ -219,6 +224,44 @@ def _run_align(ns: argparse.Namespace) -> int:
               f"p={e.empirical_p_value:.4f}")
     print(f"written: {summary.edges_path}")
     print(f"written: {summary.null_summary_path}")
+    return 0
+
+
+def _run_annotate(ns: argparse.Namespace) -> int:
+    from motifmultiverse import annotate as annotate_mod
+    from motifmultiverse.annotate.homer import HomerBackend
+    from motifmultiverse.annotate.tomtom import TomTomBackend
+
+    backends = []
+    if ns.tomtom:
+        backends.append(TomTomBackend(ns.databases))
+    if ns.homer:
+        backends.append(HomerBackend(ns.databases))
+    occurrence_nulls = None
+    if ns.occurrence_null:
+        try:
+            import json
+
+            occurrence_nulls = json.loads(Path(ns.occurrence_null).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise AnnotationError(f"--occurrence-null is not valid JSON: {exc}") from exc
+        if not isinstance(occurrence_nulls, dict):
+            raise AnnotationError("--occurrence-null must be a JSON object keyed by candidate ID")
+    registry = ns.registry or str(Path(ns.evidence) / "registry")
+    provenance_inputs = [ns.databases] if backends else []
+    if ns.occurrence_null:
+        provenance_inputs.append(ns.occurrence_null)
+    result = annotate_mod.run(
+        registry, ns.out, backends=backends, occurrence_nulls=occurrence_nulls,
+        provenance_inputs=provenance_inputs,
+    )
+    print(f"annotate: {len(result.candidates)} candidates from {len(result.backend_logs)} backends")
+    for backend in result.backend_logs:
+        detail = f" ({backend.detail})" if backend.detail else ""
+        print(f"  {backend.backend} {backend.backend_version}: {backend.status.value} "
+              f"({backend.candidate_count} candidates){detail}")
+    print(f"written: {Path(ns.out) / 'annotation_candidates.parquet'}")
+    print(f"written: {Path(ns.out) / 'annotation_backend_logs.json'}")
     return 0
 
 
@@ -348,7 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"motifmultiverse: {exc.filename}: no such file", file=sys.stderr)
         return 2
     except (GuardError, InterpretError, IngestError, CompileError,
-            BackendMissing, SchemaError, AlignmentError) as exc:
+            BackendMissing, SchemaError, AlignmentError, AnnotationError) as exc:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.
         print(f"motifmultiverse: refused: {exc}", file=sys.stderr)
