@@ -158,6 +158,30 @@ silently produce an effect size from a comparator that would itself have been re
 query. Failures in `contrast_health.floor_failures` are prefixed `query:` or `comparator:` so
 a reader does not have to re-derive which side is responsible.
 
+### `floor_failures` at the top level is not the same list as `contrast_health.floor_failures`
+
+`Interpretation.floor_failures` (top level) and `contrast_health.floor_failures` (nested,
+`interpret.ContrastHealth`) are allowed to diverge, and the divergence is intentional rather
+than a bug to be "cleaned up":
+
+- `contrast_health.floor_failures` is the **unconditional union**: whatever `query_health` and
+  `comparator_health` individually failed, prefixed and concatenated, regardless of whether the
+  query's selection provenance ever licenses an effect against that comparator. It exists for
+  full transparency about both peak sets as submitted.
+- `Interpretation.floor_failures` (top level) is the **operative** list: only the failures that
+  actually caused *this* interpretation to withhold something. A comparator can be declared but
+  irrelevant — a `DESCRIPTIVE_ONLY`/`EYEBALLED` query never touches its comparator for
+  inference — and an unhealthy-but-irrelevant comparator must not appear in the operative list,
+  because nothing was suppressed on its account. Concretely: on full suppression (the query
+  itself fails) the operative list holds the `query:`-prefixed failures; when the query passes
+  and a comparator is checked (`FULL_INFERENCE`/`FULL_INFERENCE_HELD_OUT` with a declared
+  comparator) and it fails, the operative list holds the `comparator:`-prefixed failures instead;
+  otherwise it is empty.
+
+A caller checking "was anything suppressed?" should read the top-level field, not the nested
+one — `contrast_health.floor_failures` being non-empty does not imply `suppression_reason` is
+set.
+
 **Deprecated:** `Interpretation.health` is kept for one release as an alias of
 `query_health` — readable both as an attribute (`result.health`) and as a `to_dict()` key
 (`blob["health"]`) — so existing readers keyed on the old, single ambiguous `health` field do

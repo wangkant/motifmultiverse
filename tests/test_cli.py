@@ -151,6 +151,34 @@ def _floors(n_blocks=6):
             "--floor-explained", "0.9"]
 
 
+def _bilateral_substrate(tmp_path, n_query_blocks=10, n_comparator_peaks=2):
+    """A query healthy on its own, paired with a comparator too thin to clear
+    the same block floor -- both comparator peaks land in block 0, so the
+    comparator's n_blocks is 1 no matter how many blocks the query spans.
+    """
+    from motifmultiverse.schema import HIT_TABLE_COLUMNS
+    lines = ["\t".join(HIT_TABLE_COLUMNS)]
+    query_ids = []
+    for b in range(n_query_blocks):
+        rid = f"q{b}"
+        query_ids.append(rid)
+        start = b * 1_000_000
+        lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
+                                "UA_FAMA_0", "FAM_A", "1.0", "used", "9999", "lex_v1"]))
+    comparator_ids = []
+    for i in range(n_comparator_peaks):
+        rid = f"c{i}"
+        comparator_ids.append(rid)
+        start = i * 1000
+        lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
+                                "UA_FAMA_1", "FAM_A", "0.2", "used", "9999", "lex_v1"]))
+    hits = tmp_path / "hits.tsv"
+    hits.write_text("\n".join(lines) + "\n")
+    (tmp_path / "q.txt").write_text("\n".join(query_ids) + "\n")
+    (tmp_path / "c.txt").write_text("\n".join(comparator_ids) + "\n")
+    return hits, tmp_path / "q.txt", tmp_path / "c.txt"
+
+
 def test_interpret_runs_end_to_end_and_writes_its_result(tmp_path, capsys):
     hits, q, c = _tiny_substrate(tmp_path)
     out = tmp_path / "o"
@@ -210,6 +238,34 @@ def test_interpret_suppresses_the_reading_when_a_floor_fails(tmp_path):
     blob = json.loads((out / "interpretation.json").read_text())
     assert blob["effects"] is None and blob["composition"] is None
     assert "suppressed" in blob["suppression_reason"]
+
+
+def test_interpret_prints_composition_when_only_the_comparator_fails_health(tmp_path, capsys):
+    """A comparator-only health failure suppresses effects, not composition.
+
+    Regression guard for the CLI printer: it used to be a binary
+    if-suppressed/else-print-composition switch, which assumed
+    ``suppression_reason`` set implied ``composition is None``. Task 2 broke
+    that assumption on purpose (a bad comparator suppresses effects while
+    composition, which never depended on the comparator, still stands), so the
+    printer must report composition whenever it exists, not only when nothing
+    was suppressed at all.
+    """
+    hits, q, c = _bilateral_substrate(tmp_path)
+    out = tmp_path / "o"
+    rc = main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+               "--comparator-id", "thin", "--selection-provenance", "EXTERNAL",
+               "--bootstrap", "20", "--out", str(out),
+               "--floor-blocks", "5", "--floor-coverage", "0.9", "--floor-explained", "0.9"])
+    assert rc == 0
+    blob = json.loads((out / "interpretation.json").read_text())
+    assert blob["composition"] is not None and blob["effects"] is None
+    assert any("comparator" in f for f in blob["floor_failures"])
+
+    printed = capsys.readouterr().out
+    assert "composition:" in printed and "families" in printed
+    assert "not licensed by this selection provenance" not in printed
+    assert blob["suppression_reason"] in printed
 
 
 def test_provenance_records_no_username_or_hostname(tmp_path):

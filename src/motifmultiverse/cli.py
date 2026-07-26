@@ -267,12 +267,22 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     print(f"  n_blocks              : {h['n_blocks']} (block size {h['block_size']})")
     print(f"  explained_fraction    : {h['explained_fraction']} "
           f"({h['n_with_used_hit']}/{h['n_searched']} searched peaks)")
+    # Composition and effects are suppressed independently (Task 2: a bad
+    # comparator withholds effects but not composition, which never depended
+    # on it), so they are reported independently too -- printing one line for
+    # "there is no composition" while the composition line above it lists the
+    # actual families would be exactly the self-corroborating wrongness this
+    # project exists to prevent.
+    if result.composition is not None:
+        if result.effects is not None:
+            effects = str(len(result.effects))
+        elif result.suppression_reason:
+            effects = "suppressed (see below)"
+        else:
+            effects = "not licensed by this selection provenance"
+        print(f"  composition: {len(result.composition)} families; effects: {effects}")
     if result.suppression_reason:
         print(f"  {result.suppression_reason}")
-    else:
-        effects = ("not licensed by this selection provenance" if result.effects is None
-                   else str(len(result.effects)))
-        print(f"  composition: {len(result.composition or [])} families; effects: {effects}")
     for note in result.notes:
         print(f"  note: {note}")
     print(f"written: {dest}")
