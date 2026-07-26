@@ -154,16 +154,37 @@ def read_peak_set(path: str | os.PathLike[str]) -> list[str]:
 # --------------------------------------------------------------------------- #
 @dataclass
 class Peak:
-    """One peak, aggregated from its hit rows (``BA-07``: instances are not samples)."""
+    """One peak, aggregated from its hit rows (``BA-07``: instances are not samples).
+
+    Occupancy (``family_hit_count``) and signed coefficient mass
+    (``family_coefficient_sum``) are tracked separately: opposite-signed hits in
+    the same family cancel the mass to zero without erasing the occupancy, which
+    is the scientific point of separating them. ``family_abs_coefficient_sum`` is
+    the unsigned counterpart, so magnitude is not lost to cancellation either.
+    """
 
     region_id: str
+    chrom: str
+    start: int
+    end: int
     block: tuple[str, int]
-    searched: bool
-    by_family: dict[str, float] = field(default_factory=dict)
+    searched: bool = True
+    family_hit_count: dict[str, int] = field(default_factory=dict)
+    family_coefficient_sum: dict[str, float] = field(default_factory=dict)
+    family_abs_coefficient_sum: dict[str, float] = field(default_factory=dict)
 
     @property
     def has_used_hit(self) -> bool:
-        return bool(self.by_family)
+        return any(n > 0 for n in self.family_hit_count.values())
+
+    def add_used_hit(self, family_id: str, coefficient: float) -> None:
+        self.family_hit_count[family_id] = self.family_hit_count.get(family_id, 0) + 1
+        self.family_coefficient_sum[family_id] = (
+            self.family_coefficient_sum.get(family_id, 0.0) + coefficient
+        )
+        self.family_abs_coefficient_sum[family_id] = (
+            self.family_abs_coefficient_sum.get(family_id, 0.0) + abs(coefficient)
+        )
 
 
 def peak_universe(hits: Sequence[HitRecord], block_size: int) -> dict[str, Peak]:
@@ -177,19 +198,39 @@ def peak_universe(hits: Sequence[HitRecord], block_size: int) -> dict[str, Peak]
     ``NOT_SEARCHED`` is not a zero: such peaks are excluded from every denominator
     rather than counted as having no motif. ``NO_SEQUENCE_MATCH`` and
     ``HIT_BELOW_FLOOR`` *are* measurements, and contribute 0.
+
+    A region is rejected outright, before any hit is aggregated, if its rows
+    disagree about what the region *is*: ``NOT_SEARCHED`` mixed with any measured
+    state means the table cannot decide whether the region was looked at, and
+    coordinates that move mean it is not clear it is the same region at all.
     """
-    peaks: dict[str, Peak] = {}
+    by_region: dict[str, list[HitRecord]] = {}
     for h in hits:
-        peak = peaks.get(h.region_id)
-        if peak is None:
-            peak = Peak(region_id=h.region_id, block=h.block(block_size), searched=True)
-            peaks[h.region_id] = peak
-        if h.missingness is Missingness.NOT_SEARCHED:
-            peak.searched = False
-        elif h.missingness is Missingness.USED:
-            peak.by_family[h.family_id] = (
-                peak.by_family.get(h.family_id, 0.0) + float(h.hit_coefficient or 0.0)
+        by_region.setdefault(h.region_id, []).append(h)
+
+    peaks: dict[str, Peak] = {}
+    for region_id, rows in by_region.items():
+        first = rows[0]
+        for h in rows[1:]:
+            if (h.chrom, h.start, h.end) != (first.chrom, first.start, first.end):
+                raise InterpretError(
+                    f"{region_id}: inconsistent coordinates across its rows "
+                    f"({first.chrom}:{first.start}-{first.end} vs {h.chrom}:{h.start}-{h.end})"
+                )
+        states = {h.missingness for h in rows}
+        if Missingness.NOT_SEARCHED in states and len(states) > 1:
+            raise InterpretError(
+                f"{region_id}: mixes NOT_SEARCHED and measured rows; a region cannot be both "
+                "unsearched and observed"
             )
+        peak = Peak(
+            region_id=region_id, chrom=first.chrom, start=first.start, end=first.end,
+            block=first.block(block_size), searched=Missingness.NOT_SEARCHED not in states,
+        )
+        for h in rows:
+            if h.missingness is Missingness.USED:
+                peak.add_used_hit(h.family_id, float(h.hit_coefficient))
+        peaks[region_id] = peak
     return peaks
 
 
@@ -274,11 +315,11 @@ def compose(peaks: dict[str, Peak], region_ids: Sequence[str]) -> list[FamilyCom
     searched = [peaks[r] for r in dict.fromkeys(region_ids) if r in peaks and peaks[r].searched]
     if not searched:
         return []
-    families = sorted({fam for p in searched for fam in p.by_family})
+    families = sorted({fam for p in searched for fam in p.family_hit_count})
     out = []
     for fam in families:
-        vals = [p.by_family.get(fam, 0.0) for p in searched]
-        n_with = sum(1 for v in vals if v != 0.0)
+        vals = [p.family_coefficient_sum.get(fam, 0.0) for p in searched]
+        n_with = sum(1 for p in searched if p.family_hit_count.get(fam, 0) > 0)
         out.append(FamilyComposition(
             family_id=fam,
             n_peaks_with_family=n_with,
@@ -344,7 +385,7 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
             f"effects need searched peaks on both sides: query={len(q_peaks)}, "
             f"comparator={len(c_peaks)}"
         )
-    families = sorted({fam for p in (*q_peaks, *c_peaks) for fam in p.by_family})
+    families = sorted({fam for p in (*q_peaks, *c_peaks) for fam in p.family_coefficient_sum})
     if not families:
         return []
 
@@ -365,15 +406,15 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
             continue
         for k, fam in enumerate(families):
             replicates[k].append(
-                _mean([p.by_family.get(fam, 0.0) for p in q_draw])
-                - _mean([p.by_family.get(fam, 0.0) for p in c_draw])
+                _mean([p.family_coefficient_sum.get(fam, 0.0) for p in q_draw])
+                - _mean([p.family_coefficient_sum.get(fam, 0.0) for p in c_draw])
             )
 
     p_values: list[float] = []
     effects: list[FamilyEffect] = []
     for k, fam in enumerate(families):
-        point = (_mean([p.by_family.get(fam, 0.0) for p in q_peaks])
-                 - _mean([p.by_family.get(fam, 0.0) for p in c_peaks]))
+        point = (_mean([p.family_coefficient_sum.get(fam, 0.0) for p in q_peaks])
+                 - _mean([p.family_coefficient_sum.get(fam, 0.0) for p in c_peaks]))
         reps = sorted(replicates[k])
         n_valid = len(reps)
         if n_valid:

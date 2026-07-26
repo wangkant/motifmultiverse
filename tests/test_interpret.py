@@ -89,7 +89,9 @@ def test_universe_includes_peaks_that_produced_no_hit():
     peaks = interpret.peak_universe(_rows(), BLOCK)
     assert NO_MATCH_PEAK in peaks
     assert peaks[NO_MATCH_PEAK].searched is True
-    assert peaks[NO_MATCH_PEAK].by_family == {}
+    assert peaks[NO_MATCH_PEAK].family_hit_count == {}
+    assert peaks[NO_MATCH_PEAK].family_coefficient_sum == {}
+    assert peaks[NO_MATCH_PEAK].family_abs_coefficient_sum == {}
 
 
 def test_not_searched_peak_is_excluded_from_denominators_rather_than_counted_as_zero():
@@ -108,6 +110,77 @@ def test_hit_record_refuses_a_zero_for_an_undefined_value():
         HitRecord(region_id="r", chrom="chr1", start=0, end=10,
                   missingness=Missingness.NO_SEQUENCE_MATCH,
                   input_scale=SCALE, lexicon_id=LEXICON, hit_coefficient=0.0)
+
+
+def test_one_region_cannot_mix_used_and_not_searched():
+    rows = [
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.NOT_SEARCHED,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_01",
+                  family_id="FAM_A", hit_coefficient=1.0,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+    ]
+    with pytest.raises(interpret.InterpretError, match="mixes NOT_SEARCHED and measured rows"):
+        interpret.peak_universe(rows, BLOCK)
+
+
+def test_one_region_cannot_change_coordinates():
+    rows = [
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.NO_SEQUENCE_MATCH,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=1, end=11,
+                  missingness=Missingness.NO_SEQUENCE_MATCH,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+    ]
+    with pytest.raises(interpret.InterpretError, match="inconsistent coordinates"):
+        interpret.peak_universe(rows, BLOCK)
+
+
+def test_opposite_hits_cancel_mass_but_not_occupancy():
+    rows = [
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_01",
+                  family_id="FAM_A", hit_coefficient=1.0,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_02",
+                  family_id="FAM_A", hit_coefficient=-1.0,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+    ]
+    peak = interpret.peak_universe(rows, BLOCK)["r"]
+    assert peak.family_hit_count["FAM_A"] == 2
+    assert peak.family_coefficient_sum["FAM_A"] == 0.0
+    assert peak.family_abs_coefficient_sum["FAM_A"] == 2.0
+    assert peak.has_used_hit
+
+
+def test_compose_counts_occupancy_not_cancelled_mass():
+    """A regression guard on ``compose()``'s call path, not just ``Peak`` itself.
+
+    ``compose()`` used to derive ``n_peaks_with_family`` from a nonzero coefficient
+    sum, which undercounts exactly when a family's coefficients cancel at a peak.
+    It must read occupancy (``family_hit_count``) instead, independently of the
+    mean signed coefficient, which is still allowed to be 0.0.
+    """
+    rows = [
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_01",
+                  family_id="FAM_A", hit_coefficient=1.0,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_02",
+                  family_id="FAM_A", hit_coefficient=-1.0,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+    ]
+    peaks = interpret.peak_universe(rows, BLOCK)
+    composition = interpret.compose(peaks, ["r"])
+    fam_a = next(c for c in composition if c.family_id == "FAM_A")
+    assert fam_a.n_peaks_with_family == 1
+    assert fam_a.peak_share == 1.0
+    assert fam_a.mean_coefficient_per_peak == 0.0
 
 
 # --------------------------------------------------------------------- health
