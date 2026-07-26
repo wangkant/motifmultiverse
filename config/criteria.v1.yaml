@@ -1,0 +1,96 @@
+# Executable adjudication criteria (schema.criteria.load_criteria).
+#
+# See docs/CONSTRAINTS.md (FP-04, FP-08, FP-13) and docs/CONCEPT.md ("A merge is
+# validated downstream, not by similarity"). A criterion whose predicates would
+# need a magnitude threshold the frozen design does not state stays
+# CRITERION_NOT_YET_DEFINED -- the same discipline schema.MERGE_CONFIDENCE_CRITERIA
+# already applies to MergeConfidence grades ("the alternative was a numeric
+# cut-off, which would have invented a scalar the design does not contain",
+# FP-13). Evaluating a CRITERION_NOT_YET_DEFINED criterion always returns
+# DEFERRED; it never falls back to a plausible number.
+#
+# Bump schema_version deliberately if this file's shape changes.
+schema_version: "1"
+
+criteria:
+  # ---------------------------------------------------------------------------
+  # TRUE_DUPLICATE -- Concept principle 2: "Two motifs are 'the same' when
+  # collapsing them does not degrade reconstruction -- a testable claim." FP-08
+  # names the two evidence fields a redundancy claim needs (coefficient share,
+  # reconstruction gain). No document states how much reconstruction loss is
+  # tolerable before a collapse stops being safe, so the magnitude stays
+  # undefined rather than guessed. predicates is deliberately empty: there is no
+  # placeholder threshold to write down that would not be an invention.
+  - criterion_id: TRUE_DUPLICATE
+    version: "1"
+    status: CRITERION_NOT_YET_DEFINED
+    relationship: TRUE_DUPLICATE
+    required_evidence:
+      - paired_delta_reconstruction_affected
+      - family_coefficient_share
+    predicates: []
+    insufficient_evidence_action: deferred
+
+  # ---------------------------------------------------------------------------
+  # FRAGMENT_MATCH -- one motif registers (align/__init__.py's AlignmentEvidence)
+  # as a bilateral-overlap sub-window of another. Collapsing a fragment into its
+  # parent is still a collapse, so it inherits Concept principle 2's
+  # downstream-validation requirement, and FP-05's remaining clause ("single
+  # linkage is admissible only with a declared distance ceiling") -- no overlap
+  # ceiling is declared anywhere in the frozen design, so this stays undefined.
+  - criterion_id: FRAGMENT_MATCH
+    version: "1"
+    status: CRITERION_NOT_YET_DEFINED
+    relationship: FRAGMENT_MATCH
+    required_evidence:
+      - overlap_frac_source
+      - overlap_frac_target
+      - paired_delta_reconstruction_affected
+    predicates: []
+    insufficient_evidence_action: deferred
+
+  # ---------------------------------------------------------------------------
+  # SAME_FAMILY_VARIANT -- FP-03: cross-model identity travels by family_id /
+  # variant_id. Two nodes agreeing on family_id but keeping distinct variant_ids
+  # are legitimately separate detectors, not a merge candidate. This is a
+  # structural equality check over identity fields, not a magnitude comparison --
+  # both evidence fields are booleans the caller derives from MotifNode identity
+  # (never a raw similarity score) -- so it can be FROZEN without inventing a
+  # threshold.
+  - criterion_id: SAME_FAMILY_VARIANT
+    version: "1"
+    status: FROZEN
+    relationship: SAME_FAMILY_VARIANT
+    required_evidence:
+      - same_family
+      - distinct_variant_ids
+    predicates:
+      - field: same_family
+        operator: is_true
+      - field: distinct_variant_ids
+        operator: is_true
+    insufficient_evidence_action: deferred
+    decision_if_matched: refuse_merge
+
+  # ---------------------------------------------------------------------------
+  # AMBIGUOUS_CROSS_FAMILY -- two annotation backends propose conflicting,
+  # non-flagged family_id for nodes that align has already registered as a
+  # candidate pair (schema/annotation.py's AnnotationCandidate rows never
+  # overwrite one another by design, so a conflict is visible as two rows, not a
+  # missing one). "Was this pair registered as a candidate at all" is a presence
+  # fact upstream already established, not a similarity magnitude this criterion
+  # invents. Structural, so FROZEN.
+  - criterion_id: AMBIGUOUS_CROSS_FAMILY
+    version: "1"
+    status: FROZEN
+    relationship: AMBIGUOUS_CROSS_FAMILY
+    required_evidence:
+      - family_conflict
+      - alignment_registered
+    predicates:
+      - field: family_conflict
+        operator: is_true
+      - field: alignment_registered
+        operator: is_true
+    insufficient_evidence_action: deferred
+    decision_if_matched: refuse_merge

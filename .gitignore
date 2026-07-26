@@ -22,3 +22,5 @@ htmlcov/
 *.h5
 *.npz
 *.parquet
+# local scratch working artifacts; never tracked
+/.superpowers/
