@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+# outputs (anchored to the repo root: an unanchored `report/` would also
+# match the src/motifmultiverse/report/ module)
+/registry/
+/evidence/
+/lexicons/
+/validation/
+/inference/
+/report/
+*.h5
+*.npz
+*.parquet

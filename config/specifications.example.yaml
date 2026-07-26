@@ -1,0 +1,35 @@
+# Specification axes for `motifmultiverse infer` (the multiverse).
+#
+# ARCHITECTURE CONSTRAINT: every specification is a SUBSET of one frozen hit
+# substrate. The hit caller is not input-scale invariant, so re-calling per
+# specification would confound the specification with the caller. Adding peaks
+# requires re-running every specification; there is no incremental top-up.
+
+substrate:
+  run_id: frozen_run_v1
+  input_scale: 33917          # carried as provenance on every result
+  caller_rerun_allowed: false
+
+axes:
+  lexicon_tier: [core, expanded]
+  unit_of_analysis: [peak, instance]
+  outcome: [absolute_retained_mass, within_peak_share]
+  baseline_population:        # ALWAYS explicit: a frozen lexicon transfers, a comparator does not
+    - unselected_universe
+    - matched_background
+  covariate_adjustment: [none, gc_content, peak_width]
+
+pruning:
+  # A specification is dropped only for a reason stated in advance.
+  drop_if:
+    - reason: NOT_ESTIMABLE_UNDERPOWERED
+      rule: "n < 30"
+    - reason: SINGLE_FAMILY_LAYER
+      rule: "within-peak share undefined by construction"
+  report_dropped: true        # dropped cells are reported, never silently absent
+
+inference:
+  block_size_bp: 1000000
+  n_bootstrap: 2000
+  seed: 20260725
+  # q floors at 1/(B+1). Report the floor, never a rounded point value.

@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check src tests
+      # NOT COVERED HERE: the `finemo` backend is not installed, so
+      # test_roundtrip_against_the_real_loader SKIPS. A skipped test is unverified,
+      # not verified -- do not read a green run as evidence that a compiled lexicon
+      # loads. That check has been run manually against a real TF-MoDISco output;
+      # see src/motifmultiverse/compile/README.md.
+      - name: Test
+        run: pytest

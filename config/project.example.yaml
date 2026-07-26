@@ -1,0 +1,60 @@
+# motifmultiverse project configuration (example).
+# Nothing here is inferred from a filename or an identifier string; every semantic
+# attribute of an analysis is an explicit field. `ingest` refuses a config that
+# leaves one of them to be guessed.
+
+project: example-project
+peak_universe_id: example_universe_v1     # frozen BEFORE the specification set (see docs/ARCHITECTURE.md)
+
+# T-01: this list is UNBOUNDED. Between-model heterogeneity is refused at runtime
+# when fewer than three distinct models are present; with N<3 the tool reports
+# sign consistency and leave-one-model-out only, and the registry carries
+# cross_model_claims_restricted: true so a later step cannot forget to ask.
+analyses:
+  - id: modelA_readout1
+    model: modelA
+    readout: readout1                     # e.g. counts head, or an output track index
+    union_id: MA                          # REQUIRED, alphanumeric. The shared-lexicon
+                                          # namespace for this model/readout. Declared,
+                                          # never derived: slicing it out of a filename
+                                          # or out of `id` is the BA-11 failure.
+    context: promoter                     # REQUIRED. Discovery is per context (FP-01).
+    readout_celltype: EXAMPLE_CELLTYPE    # the cell type the readout REPORTS ON
+    training_celltype: EXAMPLE_CELLTYPE   # what the weights were trained on; may differ
+    input_width: 2114
+    context_window: 2114
+    modisco_h5: path/to/modelA/modisco.h5
+    contributions: path/to/modelA/attr.npy
+    one_hot: path/to/modelA/ohe.npy
+    regions_bed: path/to/peaks.bed
+
+  - id: modelB_readout1
+    model: modelB
+    readout: readout1
+    union_id: MB
+    context: distal
+    readout_celltype: EXAMPLE_CELLTYPE
+    training_celltype: MULTI_TRACK_SHARED   # a multi-celltype model has no single value
+    input_width: 2048
+    context_window: 16384                   # differs from input_width: recorded, not hidden
+    modisco_h5: path/to/modelB/modisco.h5
+    contributions: path/to/modelB/attr.npy
+    one_hot: path/to/modelB/ohe.npy
+    regions_bed: path/to/peaks.bed
+
+    # Which metaclusters this discovery run looked for AT ALL. Default: both.
+    # This is the only thing that can distinguish `not_searched` from the two
+    # absences the file itself can show (`group_absent`, `group_empty`) -- and
+    # those three are three different claims, none of which is "no motifs".
+    search_metaclusters:
+      pos_patterns: true
+      neg_patterns: true
+
+# Two analyses may share one attribution array. If so, declare it: they are NOT
+# independent observations, and any count of corroborating evidence must use the
+# number of distinct sources, not the number of analyses.
+shared_attribution_groups:
+  - [modelB_readout1]
+
+provenance:
+  random_seed: 20260725

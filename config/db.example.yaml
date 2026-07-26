@@ -1,0 +1,27 @@
+# External annotation databases. Paths are site-specific and intentionally relative.
+# A missing backend must produce a clear "backend not installed" message.
+
+tomtom:
+  enabled: true
+  binary: tomtom                 # MEME suite; not a Python dependency
+  motif_db: path/to/motif_db.meme
+  q_threshold: 0.05              # above this -> low_confidence_annotation
+
+homer:
+  enabled: false
+  binary: findMotifsGenome.pl
+  known_motifs: path/to/knownResults.txt
+
+jaspar:
+  enabled: false
+  release: "2024"
+  path: path/to/JASPAR2024_CORE.meme
+
+hocomoco:
+  enabled: false
+  version: "v11"
+  path: path/to/HOCOMOCOv11_HUMAN.meme
+
+# Annotation is evidence about a LABEL, never an identity claim about a protein.
+# Default output is family-level identity plus a confidence.
+family_level_output: true

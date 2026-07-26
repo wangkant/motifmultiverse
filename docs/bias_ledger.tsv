@@ -1,0 +1,21 @@
+axis_id	bias	mechanism	control
+BA-01	Lexicon ascertainment	local lexicon 未包含 motif，未搜索被误当成零贡献	模型/输出内部 shared union；显式编码 not-searched
+BA-02	Redundancy	相似 CWM 重复计数或分裂 coefficient	family/variant ontology；merged-vs-split sensitivity
+BA-03	Alignment	短 overlap 和 offset-maximization 造成虚假高相似	双侧 overlap；null calibration；PPM/CWM 同窗口
+BA-04	Annotation	top database hit 被误当成具体 TF identity	family 与 putative TF 分开；source/confidence 字段
+BA-05	Model scale	不同模型 raw contribution 单位不可比	每个模型内估计 effect；第二层 meta-analysis
+BA-06	Selection	同一 peaks 同时 discovery 与 validation	held-out chromosome、cross-fitting 或外部数据
+BA-07	Pseudo-replication	同一 peak 多 instance 被当成独立样本	peak-level aggregation 或 cluster-robust bootstrap
+BA-08	Threshold/specification	lambda、FIMO p、trimming、lexicon tier 改变结论	multiverse/specification curve
+BA-09	Multiple testing	family、variant、pair、方法同时检验	分三层且不得互相代替：主族检验用 hierarchical FDR，检验数量在冻结时写死，敏感性分析不得事后并入；规格格点不做逐格 BH，改报规格曲线的联合零分布（§9.6）；峰集查询的输出模式由选择来源决定（§9.8）
+BA-10	Missingness	no sequence、no hit、not searched、low score 混为零	多状态编码与两部分模型
+BA-11	Identifier namespace	局部命名空间内的索引跨边界使用，证据被接到错误的 motif 或 peak 上	显式翻译表与 raise-on-unknown；禁止从 key 字符串解析语义；测试断言取回对象的身份
+BA-12	Cluster-size	metacluster 的形成有绝对 seqlet 数门槛。同一模型在全基因组上可形成负向 metacluster，在按 cluster 切分的子集上则不能。规模门槛是近端机制；每-peak 速率是否相同须实测，不得假定	按 cluster 分别做 discovery 时，词典组成随 cluster 大小系统性变化；应报告每-peak 速率而非仅报告有无，并在跨 cluster 比较前核对子集规模。速率经实测不同时，缺失不得归因于 peak 数不足；终极成因未经排他性证明前记 UNEXPLAINED
+BA-13	Attribution sign	同一序列元件在不同 readout 宽度下可能被归入相反的 metacluster；符号是模型与 readout 组合的属性，不必然是元件的属性	正负分离规则在单一 readout 内成立；跨 readout 比较符号前需显式核验
+BA-14	Instrument context dependence	hit caller 的离散输出随输入规模变化；同一 peak 在不同规模的运行中可以得到不同的保留决定	全部规格共用一次全宇宙运行；规格间不得重跑 caller；输入规模作为 provenance 字段随每个结果携带
+BA-15	Annotation false salience	短 motif 在 chance level 上获得数据库匹配与生物学 family 名，随后以极高保留率主导某一层	长度/q/seqlet 三条 flag 规则；偶然出现期望与观测保留率并列；flagged 变体只以 variant_id 出现
+BA-16	Selection provenance	峰集的选择准则若来自被测量的同一信号，推断可以统计有效而语义循环	provenance 分级决定输出模式；attribution 派生特征聚类标 SUBSTRATE_CIRCULAR；块级拆分且拆分先于聚类
+BA-17	Missingness coercion	库默认（如 pivot 聚合）把全缺失组静默转为零，使已写定的四态编码在建表阶段被绕过	未定义值使用显式哨兵；零填充可执行断言；覆盖率在任何填充之前计算
+BA-18	Comparator defect propagation	以先前结果作门禁或比较基准时，该结果自身的缺陷会转移为当前判定的偏差	比较基准标注 basis 与来源；门禁引用源表的 path + column，不引用四舍五入后的散文区间
+BA-19	Stratum definition parity	同一分层变量在不同子集由不同规则生成，交互项混入定义差异，无法与真实组间差异分离	主分析对全部单元使用同一套定义；另一套只作敏感性对照并单独命名。看任何效应之前先出分层交叉表
+BA-20	Estimability floor	样本量或事件数不足时，区间宽到无信息的结果被写成方向性结论，与已测得方向不可区分	预注册样本量下限；区间同时包含零与参照点估计时记 NOT_ESTIMABLE_UNDERPOWERED，不记方向
