@@ -117,6 +117,25 @@ def _assert_members_known(decisions: list[DecisionRecord], known_ids: set[str]) 
                 )
 
 
+def _assert_tier_overrides_known(tiers: dict[str, dict[str, str]], known_ids: set[str]) -> None:
+    """Every node a ``tiers`` override names must exist somewhere in this registry.
+
+    Mirrors ``_assert_members_known``: ``DecisionBundle.from_dict`` validates that
+    an override's *value* names a real Tier, but has no registry to check its
+    *key* -- the node id -- against. Before this check, an override naming a node
+    that has since been dropped from the registry (a stale re-ingest) was simply
+    never looked up by ``_apply_tiers`` and silently did nothing (round-1 review
+    finding 1a).
+    """
+    for node_id in tiers:
+        if node_id not in known_ids:
+            raise CompileError(
+                f"tier override names unknown node {node_id!r}; it is not a "
+                "node_id anywhere in this registry. A stale override naming a "
+                "node that no longer exists is refused, not silently ignored."
+            )
+
+
 def _members_for_tier(nodes: list[dict[str, Any]], decisions: list[dict[str, Any]],
                       tier: str) -> list[dict[str, Any]]:
     """Which nodes make up one tier's lexicon, after applicable collapses."""
@@ -307,7 +326,9 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             bundle = DecisionBundle.from_dict(payload)
         except SchemaError as exc:
             raise CompileError(str(exc)) from exc
-        _assert_members_known(bundle.decisions, {n["node_id"] for n in nodes})
+        known_ids = {n["node_id"] for n in nodes}
+        _assert_members_known(bundle.decisions, known_ids)
+        _assert_tier_overrides_known(bundle.tiers, known_ids)
         # `_members_for_tier` / `triggers_by_cluster` predate `DecisionBundle` and
         # still work over plain dicts; converting once here keeps them unchanged.
         decisions = [asdict(d) for d in bundle.decisions]

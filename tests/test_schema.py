@@ -163,6 +163,30 @@ def test_decision_bundle_rejects_a_node_claimed_by_two_collapse_clusters():
         DecisionBundle.from_dict(payload)
 
 
+# ---- round-1 review findings: tier overrides and the decision value ---------
+def test_decision_record_rejects_a_mistyped_decision_value():
+    """finding 2: a wrong-case/typo'd decision must not silently compare unequal
+    to every recognised value and be read downstream as a no-op.
+    """
+    with pytest.raises(SchemaError, match="is not one of"):
+        DecisionRecord("c0", "COLLAPSE", ["a"], rationale="ok", decided_by="x",
+                       representative="a")
+
+
+def test_decision_bundle_rejects_an_invalid_analysis_tier_value():
+    """finding 1b: `_apply_tiers` matches `analysis_tier` by exact string equality
+    against `Tier.CORE.value` / `Tier.EXPANDED.value`; a typo'd value matches
+    neither and the node it names silently vanishes from every tier at once.
+    """
+    with pytest.raises(SchemaError, match="not a valid Tier"):
+        DecisionBundle.from_dict({"tiers": {"n0": {"analysis_tier": "coree"}}})
+
+
+def test_decision_bundle_rejects_an_unknown_tier_override_key():
+    with pytest.raises(SchemaError, match="unknown key"):
+        DecisionBundle.from_dict({"tiers": {"n0": {"anaysis_tier": "core"}}})   # typo'd key
+
+
 # ---- T-13: two tier fields, and a reason when they disagree -----------------
 def test_diverging_tiers_require_a_reason():
     with pytest.raises(SchemaError):

@@ -248,6 +248,18 @@ class DecisionRecord:
     threshold_sensitive: bool = False
 
     def __post_init__(self) -> None:
+        # Coerce/validate unconditionally, not just for `str`: `Decision` is a
+        # `StrEnum`, so a member is *also* `isinstance(..., str)` and this call
+        # is idempotent for one. A mistyped or wrong-case value (``"COLLAPSE"``)
+        # would otherwise compare unequal to every real `Decision` value
+        # downstream and be silently treated as a no-op decision (round-1 review).
+        try:
+            self.decision = Decision(self.decision)
+        except ValueError as exc:
+            raise SchemaError(
+                f"decision {self.decision!r} is not one of "
+                f"{[d.value for d in Decision]}"
+            ) from exc
         if not self.rationale.strip():
             raise SchemaError("every decision, including a refusal, requires a rationale")
         if not self.decided_by.strip():
@@ -300,6 +312,41 @@ DECISION_BUNDLE_SCHEMA_VERSION = "1"
 #: than ignored, per the same rule as ``DecisionRecord.from_dict``.
 _DECISION_BUNDLE_KEYS = frozenset({"schema_version", "decisions", "tiers"})
 
+#: The only keys one node's `tiers` override may declare.
+_TIER_OVERRIDE_KEYS = frozenset({"discovery_tier", "analysis_tier", "tier_reason"})
+
+#: What `discovery_tier` / `analysis_tier` may legally say.
+_VALID_TIER_VALUES = frozenset(t.value for t in Tier)
+
+
+def _validate_tier_overrides(tiers: Mapping[str, Any]) -> None:
+    """Every ``tiers`` override must be a recognised key naming a real Tier value.
+
+    ``compile._apply_tiers`` copies an override's ``analysis_tier`` /
+    ``discovery_tier`` onto the node it names and then matches it by exact
+    string equality against ``Tier.CORE.value`` / ``Tier.EXPANDED.value`` in
+    ``_members_for_tier``. A typo'd value (``"coree"`` for ``"core"``) matches
+    neither branch, so the node it names silently disappears from every tier
+    at once with no error -- the same silent-content-change failure this
+    schema exists to refuse for decisions, just reached through the sibling
+    field (round-1 review finding 1b).
+    """
+    for node_id, override in tiers.items():
+        if not isinstance(override, Mapping):
+            raise SchemaError(
+                f"tier override for node {node_id!r} must be a mapping, got "
+                f"{type(override).__name__}"
+            )
+        _reject_unknown_keys(
+            override, set(_TIER_OVERRIDE_KEYS), f"tier override for node {node_id!r}"
+        )
+        for key in ("discovery_tier", "analysis_tier"):
+            if key in override and override[key] not in _VALID_TIER_VALUES:
+                raise SchemaError(
+                    f"tier override for node {node_id!r}: {key} {override[key]!r} "
+                    f"is not a valid Tier ({sorted(_VALID_TIER_VALUES)})"
+                )
+
 
 @dataclass
 class DecisionBundle:
@@ -350,10 +397,13 @@ class DecisionBundle:
                     )
                 member_owner[member] = d.cluster_id
 
+        tiers = dict(payload.get("tiers") or {})
+        _validate_tier_overrides(tiers)
+
         return cls(
             schema_version=str(payload.get("schema_version") or DECISION_BUNDLE_SCHEMA_VERSION),
             decisions=decisions,
-            tiers=dict(payload.get("tiers") or {}),
+            tiers=tiers,
         )
 
 

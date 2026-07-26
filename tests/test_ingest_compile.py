@@ -358,6 +358,44 @@ def test_representative_missing_from_tier_is_refused(tmp_path):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
 
 
+def test_tier_override_naming_an_unknown_node_is_refused(tmp_path):
+    """A `tiers` override is a decisions-payload member too: a stale one is refused,
+    not a silent no-op (round-1 review finding 1a).
+    """
+    registry = _registry(tmp_path)
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"tiers": {"missing-node": {"analysis_tier": "expanded"}}}))
+    with pytest.raises(compile_mod.CompileError, match="unknown node"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
+
+
+def test_tier_override_with_an_invalid_analysis_tier_value_is_refused(tmp_path):
+    """A typo'd tier value (round-1 review finding 1b) must not silently drop a node
+    out of every tier at once. Before the fix this dropped `nodes[0]` from core,
+    expanded AND sensitivity with `n_motifs` going 5 -> 4 and no error raised.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    node_id = nodes[0]["node_id"]
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"tiers": {node_id: {"analysis_tier": "coree"}}}))
+    with pytest.raises(compile_mod.CompileError, match="not a valid Tier"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
+
+
+def test_a_mistyped_decision_value_is_refused(tmp_path):
+    """A mistyped `decision` (round-1 review finding 2) must not silently become a
+    no-op collapse: before the fix this decision was compared against
+    `Decision.COLLAPSE.value` byte-for-byte, matched nothing, and both members
+    survived uncollapsed with no error raised.
+    """
+    registry = _registry(tmp_path)
+    decisions = _decisions(tmp_path, registry, decision="COLLAPSE")   # wrong case
+    with pytest.raises(compile_mod.CompileError, match="is not one of"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
+
+
 def test_a_refused_compile_still_writes_provenance(tmp_path):
     """T-09: every subcommand writes provenance, including the ones that refuse.
 
