@@ -9,7 +9,7 @@ from motifmultiverse.cli import build_parser, main
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
-IMPLEMENTED = ["ingest", "compile", "interpret"]
+IMPLEMENTED = ["ingest", "compile", "interpret", "align"]
 
 
 def test_version_flag():
@@ -42,7 +42,6 @@ def test_all_eight_subcommands_are_registered():
 
 
 @pytest.mark.parametrize("argv", [
-    ["align", "registry/"],
     ["annotate", "evidence/"],
     ["adjudicate", "evidence/"],
     ["validate", "lexicons/"],
@@ -57,16 +56,40 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
 
 
 def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
+    # "align" no longer belongs here (Task 10 implemented it for real); "annotate"
+    # is still a genuine skeleton. Note "annotate" has no --seed flag of its own
+    # (only ingest/compile/interpret/align ever exposed one), so the recorded
+    # random_seed is the untouched default (None) rather than a value threaded
+    # in from the CLI -- the property under test is that the record exists
+    # at all before the body raises, not what value a particular field holds.
     out = tmp_path / "o"
-    assert main(["align", "registry/", "--out", str(out), "--seed", "7"]) == 3
+    assert main(["annotate", "evidence/", "--out", str(out)]) == 3
     recs = json.loads((out / "provenance.json").read_text())
     assert len(recs) == 1
     r = recs[0]
     for field in ("command", "subcommand", "software", "timestamp_utc", "random_seed"):
         assert field in r, field
-    assert r["subcommand"] == "align"
-    assert r["random_seed"] == 7
+    assert r["subcommand"] == "annotate"
+    assert r["random_seed"] is None
     assert r["software"]["motifmultiverse"]
+
+
+def test_cli_threads_the_seed_into_the_provenance_record(tmp_path):
+    """align is implemented and exposes --seed; its provenance is written before
+    the registry is even opened (same T-09 pattern as the skeletons), so a
+    nonexistent registry path is enough to reach that write without needing
+    the run to succeed end to end. This is the concrete-seed counterpart to
+    test_provenance_is_written_even_though_body_is_unimplemented: together
+    they prove the CLI carries --seed into provenance on both the
+    implemented and the still-skeleton paths. A seed that silently fails to
+    be recorded would make a stochastic run unreproducible while looking fine.
+    """
+    out = tmp_path / "o"
+    main(["align", "registry/", "--out", str(out), "--seed", "7"])
+    recs = json.loads((out / "provenance.json").read_text())
+    assert len(recs) == 1
+    assert recs[0]["subcommand"] == "align"
+    assert recs[0]["random_seed"] == 7
 
 
 def test_provenance_appends_rather_than_overwrites(tmp_path):
