@@ -661,10 +661,13 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)]
                 emitted.append("effects")
                 guards.comparator_declared(effects).raise_if_failed()
-                if CAPABILITY is InferenceCapability.ESTIMATION_ONLY:
+                if effects and CAPABILITY is InferenceCapability.ESTIMATION_ONLY:
                     # Once per interpretation, not once per family: the withheld
                     # p/q values are a property of the estimator this run used,
-                    # not of any one effect.
+                    # not of any one effect. `effects` can legally be `[]` (query
+                    # and comparator share no family at all), and the note is
+                    # about a limitation of effects that exist -- with none, it
+                    # has nothing to describe and must not fire.
                     notes.append(
                         "The implemented percentile block bootstrap supports estimation only. "
                         "Hypothesis-test p and q values are withheld until the preregistered "

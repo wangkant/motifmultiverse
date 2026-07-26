@@ -331,6 +331,31 @@ def test_estimation_only_note_appears_exactly_once_per_interpretation():
     assert result.notes.count(note) == 1
 
 
+def test_no_withheld_pq_note_when_there_are_no_effects_to_withhold_them_from():
+    """When query and comparator share no family at all, `estimate_effects` returns
+    `effects=[]` (there is nothing to compute a per-family difference over). The
+    withheld-p/q note describes a limitation of effects that exist; with none, it
+    must not fire -- unlike `test_estimation_only_note_appears_exactly_once_per_interpretation`,
+    which requires it fire exactly once when effects DO exist.
+    """
+    rows = []
+    for i in range(4):
+        common = dict(chrom="chr1", input_scale=SCALE, lexicon_id=LEXICON)
+        rows.append(HitRecord(region_id=f"q{i}", start=i * 1000, end=i * 1000 + 500,
+                              missingness=Missingness.NO_SEQUENCE_MATCH, **common))
+        rows.append(HitRecord(region_id=f"c{i}", start=500_000 + i * 1000,
+                              end=500_000 + i * 1000 + 500,
+                              missingness=Missingness.HIT_BELOW_FLOOR, **common))
+    query = PeakSetQuery(
+        query_id="q_nofam", region_ids=[f"q{i}" for i in range(4)],
+        selection_provenance=SelectionProvenance.EXTERNAL,
+        comparator_id="c_nofam", comparator_region_ids=[f"c{i}" for i in range(4)])
+    floors = HealthFloors(min_intersection_coverage=0.0, min_blocks=1, min_explained_fraction=0.0)
+    result = interpret.interpret_query(rows, query, floors=floors, n_bootstrap=20, seed=1)
+    assert result.effects == []
+    assert not any("withheld" in n for n in result.notes)
+
+
 def test_same_seed_reproduces_the_interval_exactly():
     a = interpret.interpret_query(_rows(), _query(), n_bootstrap=64, seed=5)
     b = interpret.interpret_query(_rows(), _query(), n_bootstrap=64, seed=5)
