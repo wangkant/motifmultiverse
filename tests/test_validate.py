@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 import motifmultiverse.adjudicate as adjudicate
+from motifmultiverse.provenance import ProvenanceRecord
 from motifmultiverse.schema import SchemaError, SplitRole, peak_split_manifest_checksum
 from motifmultiverse.validate import (
     AnalysisMode,
@@ -18,6 +19,7 @@ from motifmultiverse.validate import (
     LexiconBinding,
     PeakSplitManifest,
     StabilityBackend,
+    StabilityProvenance,
     StabilityResult,
     ValidationSplitArtifact,
     assert_artifact_split_compatibility,
@@ -661,6 +663,101 @@ def test_stability_coefficient_cancellation_and_none_similarity_semantics():
     assert unchanged.coefficient_conservation is None
 
 
+def test_stability_coefficient_share_uses_absolute_mass_under_real_signed_cancellation():
+    before = pd.DataFrame([
+        {"peak_id": "affected", "hit_id": "plus", "coefficient": 0.5, "reconstruction": 0.0},
+        {"peak_id": "affected", "hit_id": "minus", "coefficient": -0.5, "reconstruction": 0.0},
+        {"peak_id": "unchanged", "hit_id": "other", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+    after = pd.DataFrame([
+        {"peak_id": "affected", "hit_id": "plus", "coefficient": 1.0, "reconstruction": 1.0},
+        {"peak_id": "affected", "hit_id": "minus", "coefficient": -1.0, "reconstruction": 1.0},
+        {"peak_id": "unchanged", "hit_id": "other", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+
+    result = evaluate_stability("decision:signed-cancellation", before, after)
+
+    assert after.loc[after["peak_id"] == "affected", "coefficient"].sum() == 0.0
+    assert result.family_coefficient_share == 0.5
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        frozenset({"p-validation-a"}),
+        frozenset({"p-validation-a", "p-validation-b", "p-discovery"}),
+    ],
+    ids=["missing-validation-peak", "extra-nonvalidation-peak"],
+)
+def test_frozen_backend_refuses_both_missing_and_extra_validation_peaks(
+    tmp_path, observed,
+):
+    from motifmultiverse.validate import _FrozenHitTableBackend
+
+    rows = [
+        {
+            "peak_id": peak_id,
+            "hit_id": "family",
+            "coefficient": 1.0,
+            "reconstruction": 0.0,
+            "substrate_id": "a" * 64,
+        }
+        for peak_id in sorted(observed)
+    ]
+    before = tmp_path / "before.parquet"
+    after = tmp_path / "after.parquet"
+    pd.DataFrame(rows).to_parquet(before, index=False)
+    pd.DataFrame(rows).to_parquet(after, index=False)
+    backend = _FrozenHitTableBackend(
+        before, after, frozenset({"p-validation-a", "p-validation-b"}),
+    )
+
+    with pytest.raises(SchemaError, match="exactly the split-bound validation peaks"):
+        backend.compare(object(), "decision:peaks")
+
+
+@pytest.mark.parametrize(
+    ("before_substrates", "after_substrates", "match"),
+    [
+        (None, ["a" * 64, "a" * 64], "substrate_id"),
+        (["not-a-digest", "not-a-digest"], ["a" * 64, "a" * 64], "substrate_id"),
+        (["a" * 64, "b" * 64], ["a" * 64, "a" * 64], "one substrate"),
+        (["a" * 64, "a" * 64], ["b" * 64, "b" * 64], "same substrate"),
+    ],
+    ids=["missing", "malformed", "mixed", "before-after-mismatch"],
+)
+def test_frozen_backend_requires_one_shared_canonical_substrate_identity(
+    tmp_path, before_substrates, after_substrates, match,
+):
+    from motifmultiverse.validate import _FrozenHitTableBackend
+
+    def rows(substrates):
+        values = [
+            {
+                "peak_id": peak_id,
+                "hit_id": "family",
+                "coefficient": 1.0,
+                "reconstruction": 0.0,
+            }
+            for peak_id in ("p-validation-a", "p-validation-b")
+        ]
+        if substrates is not None:
+            for row, substrate_id in zip(values, substrates, strict=True):
+                row["substrate_id"] = substrate_id
+        return values
+
+    before = tmp_path / "before.parquet"
+    after = tmp_path / "after.parquet"
+    pd.DataFrame(rows(before_substrates)).to_parquet(before, index=False)
+    pd.DataFrame(rows(after_substrates)).to_parquet(after, index=False)
+    backend = _FrozenHitTableBackend(
+        before, after, frozenset({"p-validation-a", "p-validation-b"}),
+    )
+
+    with pytest.raises(SchemaError, match=match):
+        backend.compare(object(), "decision:substrate")
+
+
 class _UnavailableBackend(StabilityBackend):
     name = "optional-missing"
     version = "1"
@@ -712,7 +809,9 @@ def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
         validation_peak_ids=frozenset({"p-validation-a"}),
     )
     results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
-    provenance = {"stage": "test", "input": "fixed", "lexicon": binding.to_dict()}
+    provenance = _stability_provenance(
+        binding, manifest, decision, provisional,
+    )
     validation = ValidationSplitArtifact.create(
         manifest=manifest, decision_id=decision.decision_id,
         result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),
@@ -736,6 +835,14 @@ def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
     assert metadata[b"motifmultiverse.split_manifest_checksum"] == manifest.checksum.encode()
     assert metadata[b"motifmultiverse.decision_artifact_id"] == decision.artifact_id.encode()
     assert metadata[b"motifmultiverse.validation_artifact_id"] == validation.artifact_id.encode()
+    assert json.loads(metadata[b"motifmultiverse.provenance"]) == provenance.to_dict()
+    result_rows = pq.read_table(results_path).to_pandas()
+    assert json.loads(result_rows.loc[0, "provenance"]) == provenance.to_dict()
+    assert json.loads((results_path.parent / "provenance.json").read_text()) == [
+        provenance.to_dict(),
+    ]
+    verification_rows = pd.read_csv(verification_path, sep="\t")
+    assert json.loads(verification_rows.loc[0, "provenance"]) == provenance.to_dict()
     assert "UNVERIFIED" not in verification_path.read_text(encoding="utf-8")
 
 
@@ -768,31 +875,300 @@ def test_stability_artifact_writer_refuses_a_manifest_mismatch(tmp_path):
         )
 
 
-def _lexicons(tmp_path, *, content_hash="a" * 64):
+def _lexicons(tmp_path):
     import h5py
     import numpy as np
 
-    from motifmultiverse.compile import _content_hash
+    from motifmultiverse.compile import lexicon_semantic_hash
 
     lexicons = tmp_path / "lexicons"
     lexicons.mkdir()
+    motif_arrays = {
+        "node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])},
+        "node-1": {"cwm": np.asarray([[0.0, 1.0, 0.0, 0.0]])},
+    }
     with h5py.File(lexicons / "core.h5", "w") as h5:
-        motif = h5.create_group("pos").create_group("pattern_0")
-        motif.create_dataset("contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]]))
-    content_hash = _content_hash(
-        [("pos", "pattern_0", {"node_id": "node-0"})],
-        {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
+        patterns = h5.create_group("pos_patterns")
+        for number, node_id in enumerate(motif_arrays):
+            patterns.create_group(f"pattern_{number}").create_dataset(
+                "contrib_scores", data=motif_arrays[node_id]["cwm"],
+            )
+    ordered = [
+        ("pos_patterns", f"pattern_{number}", {"node_id": node_id})
+        for number, node_id in enumerate(motif_arrays)
+    ]
+    content_hash = lexicon_semantic_hash(
+        ordered,
+        motif_arrays,
         schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
-        loader_backend="finemo", loader_parameters={},
+        loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
     )
     (lexicons / "core.manifest.json").write_text(json.dumps({
-        "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
-        "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
-        "index": [{"pattern_tag": "pos.pattern_0", "node_id": "node-0"}],
+        "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 2,
+        "pattern_order": ["pos_patterns.pattern_0", "pos_patterns.pattern_1"],
+        "node_ids": ["node-0", "node-1"],
+        "index": [
+            {
+                "index": number,
+                "pattern_tag": f"pos_patterns.pattern_{number}",
+                "node_id": node_id,
+                "variant_id": f"MA_FAM_{number + 1:02d}",
+                "metacluster": "pos",
+            }
+            for number, node_id in enumerate(motif_arrays)
+        ],
         "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
-        "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
+        "include_rc": False, "loader_backend": "finemo",
+        "loader_parameters": {"motif_lambda_default": 0.7},
+        "comparisons": {}, "source_registry": "registry", "sensitivity_triggers": {},
+        "project": "test-project", "cross_model_claims_restricted": True,
     }), encoding="utf-8")
     return lexicons
+
+
+@pytest.mark.parametrize("extra_kind", ["root_group", "motif", "dataset"])
+def test_lexicon_binding_rejects_every_extra_hdf5_object(tmp_path, extra_kind):
+    """Deleting exact HDF5-universe comparison makes each mutation pass."""
+    import h5py
+    import numpy as np
+
+    lexicons = _lexicons(tmp_path)
+    with h5py.File(lexicons / "core.h5", "a") as h5:
+        if extra_kind == "root_group":
+            h5.create_group("unindexed_root")
+        elif extra_kind == "motif":
+            h5["pos_patterns"].create_group("pattern_2").create_dataset(
+                "contrib_scores", data=np.asarray([[0.0, 0.0, 1.0, 0.0]]),
+            )
+        else:
+            h5["pos_patterns"]["pattern_0"].create_dataset(
+                "unindexed_scores", data=np.asarray([[9.0, 9.0, 9.0, 9.0]]),
+            )
+
+    with pytest.raises(SchemaError, match="compiled lexicon|HDF5|universe"):
+        load_lexicon_binding(lexicons)
+
+
+def test_lexicon_binding_rejects_a_manifest_that_omits_a_real_hdf5_motif(tmp_path):
+    """An internally consistent one-row manifest cannot hide the second loader motif."""
+    import numpy as np
+
+    from motifmultiverse.compile import lexicon_semantic_hash
+
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["n_motifs"] = 1
+    payload["pattern_order"] = payload["pattern_order"][:1]
+    payload["node_ids"] = payload["node_ids"][:1]
+    payload["index"] = payload["index"][:1]
+    payload["lexicon_content_hash"] = lexicon_semantic_hash(
+        [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
+        {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
+        schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
+        loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="index|universe|motif"):
+        load_lexicon_binding(lexicons)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda payload: payload.update(unknown_top_level="silently ignored"),
+        lambda payload: payload.pop("project"),
+        lambda payload: payload.update(cross_model_claims_restricted=1),
+        lambda payload: payload["index"][0].update(unknown_index_field="silently ignored"),
+        lambda payload: payload["index"][0].pop("variant_id"),
+        lambda payload: payload["index"][0].update(index=True),
+    ],
+    ids=[
+        "unknown-top-level", "missing-top-level", "wrong-top-level-type",
+        "unknown-index-field", "missing-index-field", "wrong-index-type",
+    ],
+)
+def test_lexicon_binding_requires_the_exact_compiler_manifest_schema(tmp_path, mutation):
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutation(payload)
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="manifest|index|schema"):
+        load_lexicon_binding(lexicons)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("comparisons", {"expanded": []}),
+        ("comparisons", {"core": {"positive_sets_identical": True}}),
+        ("sensitivity_triggers", {"cluster": "threshold_sensitive"}),
+        ("sensitivity_triggers", {"cluster": ["threshold_sensitive", 7]}),
+    ],
+    ids=[
+        "comparison-not-object",
+        "comparison-wrong-shape",
+        "triggers-not-array",
+        "trigger-not-string",
+    ],
+)
+def test_lexicon_binding_requires_exact_nested_manifest_schemas(tmp_path, field, value):
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="comparisons|sensitivity_triggers|schema"):
+        load_lexicon_binding(lexicons)
+
+
+@pytest.mark.parametrize("identity", ["pattern", "node", "variant"])
+def test_lexicon_binding_rejects_duplicate_manifest_identities(tmp_path, identity):
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if identity == "pattern":
+        payload["pattern_order"][1] = payload["pattern_order"][0]
+        payload["index"][1]["pattern_tag"] = payload["index"][0]["pattern_tag"]
+    elif identity == "node":
+        payload["node_ids"][1] = payload["node_ids"][0]
+        payload["index"][1]["node_id"] = payload["index"][0]["node_id"]
+    else:
+        payload["index"][1]["variant_id"] = payload["index"][0]["variant_id"]
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match=f"duplicate.*{identity}"):
+        load_lexicon_binding(lexicons)
+
+
+def test_lexicon_binding_rejects_a_malformed_variant_identity(tmp_path):
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["index"][0]["variant_id"] = "semantic identity with spaces"
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="variant"):
+        load_lexicon_binding(lexicons)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["motif-is-dataset", "contrib-is-group", "nonnumeric-contrib", "wrong-float-dtype"],
+)
+def test_lexicon_binding_rejects_malformed_hdf5_structure(tmp_path, mutation):
+    import h5py
+    import numpy as np
+
+    lexicons = _lexicons(tmp_path)
+    with h5py.File(lexicons / "core.h5", "a") as h5:
+        patterns = h5["pos_patterns"]
+        if mutation == "motif-is-dataset":
+            del patterns["pattern_1"]
+            patterns.create_dataset("pattern_1", data=np.asarray([1.0]))
+        elif mutation == "contrib-is-group":
+            motif = patterns["pattern_1"]
+            del motif["contrib_scores"]
+            motif.create_group("contrib_scores")
+        elif mutation == "nonnumeric-contrib":
+            motif = patterns["pattern_1"]
+            del motif["contrib_scores"]
+            motif.create_dataset(
+                "contrib_scores", data=np.asarray([["a", "b", "c", "d"]], dtype="S1"),
+            )
+        else:
+            motif = patterns["pattern_1"]
+            values = motif["contrib_scores"][:]
+            del motif["contrib_scores"]
+            motif.create_dataset("contrib_scores", data=values.astype("float32"))
+
+    with pytest.raises(SchemaError, match="HDF5|dataset|numeric|float64|compiled lexicon"):
+        load_lexicon_binding(lexicons)
+
+
+@pytest.mark.parametrize("link_kind", ["external", "soft", "hard-alias"])
+def test_lexicon_binding_rejects_nonlocal_or_aliased_hdf5_links(tmp_path, link_kind):
+    import h5py
+    import numpy as np
+
+    from motifmultiverse.compile import lexicon_semantic_hash
+
+    lexicons = _lexicons(tmp_path)
+    h5_path = lexicons / "core.h5"
+    manifest_path = lexicons / "core.manifest.json"
+    if link_kind == "external":
+        external = tmp_path / "external.h5"
+        with h5py.File(h5_path, "r") as source, h5py.File(external, "w") as target:
+            source.copy("pos_patterns", target)
+        with h5py.File(h5_path, "a") as h5:
+            del h5["pos_patterns"]
+            h5["pos_patterns"] = h5py.ExternalLink(str(external), "/pos_patterns")
+    else:
+        with h5py.File(h5_path, "a") as h5:
+            del h5["pos_patterns"]["pattern_1"]
+            if link_kind == "soft":
+                h5["pos_patterns"]["pattern_1"] = h5py.SoftLink(
+                    "/pos_patterns/pattern_0",
+                )
+            else:
+                h5["pos_patterns"]["pattern_1"] = h5["pos_patterns"]["pattern_0"]
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        arrays = {
+            "node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])},
+            "node-1": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])},
+        }
+        payload["lexicon_content_hash"] = lexicon_semantic_hash(
+            [
+                ("pos_patterns", "pattern_0", {"node_id": "node-0"}),
+                ("pos_patterns", "pattern_1", {"node_id": "node-1"}),
+            ],
+            arrays,
+            schema_version="1.0",
+            trim_threshold=0.3,
+            motif_type="cwm",
+            include_rc=False,
+            loader_backend="finemo",
+            loader_parameters={"motif_lambda_default": 0.7},
+        )
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="link|alias|compiler-emitted"):
+        load_lexicon_binding(lexicons)
+
+
+def test_lexicon_binding_requires_the_dataset_selected_by_motif_type(tmp_path):
+    import numpy as np
+
+    from motifmultiverse.compile import lexicon_semantic_hash
+
+    lexicons = _lexicons(tmp_path)
+    manifest_path = lexicons / "core.manifest.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["motif_type"] = "hcwm"
+    payload["lexicon_content_hash"] = lexicon_semantic_hash(
+        [
+            ("pos_patterns", "pattern_0", {"node_id": "node-0"}),
+            ("pos_patterns", "pattern_1", {"node_id": "node-1"}),
+        ],
+        {
+            "node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])},
+            "node-1": {"cwm": np.asarray([[0.0, 1.0, 0.0, 0.0]])},
+        },
+        schema_version="1.0",
+        trim_threshold=0.3,
+        motif_type="hcwm",
+        include_rc=False,
+        loader_backend="finemo",
+        loader_parameters={"motif_lambda_default": 0.7},
+    )
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="motif_type|hypothetical_contribs"):
+        load_lexicon_binding(lexicons)
 
 
 def test_lexicon_binding_requires_a_real_content_addressed_compiled_lexicon(tmp_path):
@@ -803,7 +1179,7 @@ def test_lexicon_binding_requires_a_real_content_addressed_compiled_lexicon(tmp_
     assert isinstance(binding, LexiconBinding)
     assert binding.lexicon_identity.startswith("lexicons:")
     (lexicons / "core.h5").write_bytes(b"tampered")
-    with pytest.raises(SchemaError, match="verified compiled lexicon"):
+    with pytest.raises(SchemaError, match="valid compiled lexicon|readable HDF5"):
         load_lexicon_binding(lexicons)
 
 
@@ -818,6 +1194,439 @@ def test_backend_results_are_bound_to_the_backend_and_lexicon_identity(tmp_path)
     assert results[0].lexicon_identity == verification[0].lexicon_identity == binding.lexicon_identity
 
 
+def _stability_provenance(binding, manifest, decision, validation, **changes):
+    base = ProvenanceRecord(
+        command="motifmultiverse validate fixture",
+        subcommand="validate",
+        inputs={
+            "before.parquet": "1" * 64,
+            "after.parquet": "2" * 64,
+            "split-manifest.json": "3" * 64,
+            "decision-split.json": "4" * 64,
+        },
+        software={"motifmultiverse": "0.test", "python": "3.test"},
+        random_seed=17,
+        input_scale=2,
+        substrate_id="d" * 64,
+        timestamp_utc="2026-07-26T12:00:00Z",
+        schema_version="1",
+        redaction_policy="basenames_only_except_command",
+    )
+    provenance = StabilityProvenance.from_record(
+        base,
+        lexicon=binding,
+        manifest=manifest,
+        decision=decision,
+        validation=validation,
+    )
+    return replace(provenance, **changes) if changes else provenance
+
+
+def _identity_context(tmp_path, *, decision_id="decision:canonical"):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    manifest = _manifest()
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id=decision_id,
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision_id, result_id="pending",
+        decision_peak_ids=decision.decision_peak_ids,
+        validation_peak_ids=decision.validation_peak_ids,
+    )
+    provenance = _stability_provenance(
+        binding, manifest, decision, provisional,
+    )
+    return binding, manifest, decision, provisional, provenance
+
+
+def _valid_artifact_bundle(tmp_path, *, decision_id="decision:publication"):
+    binding, manifest, decision, provisional, provenance = _identity_context(
+        tmp_path, decision_id=decision_id,
+    )
+    results, verification = run_backend_validation(
+        binding, decision.decision_id, [_AvailableBackend()],
+    )
+    validation = replace(
+        provisional,
+        result_id=stability_result_id(
+            results, verification, provenance,
+            binding, manifest, decision, provisional,
+        ),
+        artifact_id="",
+    )
+    return (
+        binding, manifest, decision, validation, provenance,
+        list(results), list(verification),
+    )
+
+
+def test_stability_result_id_canonicalizes_complete_records_when_partial_keys_tie(tmp_path):
+    binding, manifest, decision, provisional, provenance = _identity_context(tmp_path)
+    first = replace(
+        _stability_result(),
+        decision_id=decision.decision_id,
+        backend_result_id="",
+        paired_delta_reconstruction_all=0.0,
+    )
+    second = replace(
+        first,
+        paired_delta_reconstruction_all=2.0,
+        power_statement=first.power_statement + " Distinct complete record.",
+    )
+    verification = [
+        BackendVerification(
+            "tied", "1", "VERIFIED", "same partial key",
+            backend_result_id="result:a", lexicon_identity=binding.lexicon_identity,
+        ),
+        BackendVerification(
+            "tied", "1", "VERIFIED", "same partial key",
+            backend_result_id="result:b", lexicon_identity=binding.lexicon_identity,
+        ),
+    ]
+
+    forward = stability_result_id(
+        [first, second], verification, provenance,
+        binding, manifest, decision, provisional,
+    )
+    reversed_inputs = stability_result_id(
+        [second, first], list(reversed(verification)), provenance,
+        binding, manifest, decision, provisional,
+    )
+
+    assert reversed_inputs == forward
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("command", "motifmultiverse validate changed"),
+        ("timestamp_utc", "2026-07-26T12:00:01Z"),
+        ("random_seed", 18),
+        ("input_scale", 3),
+        ("substrate_id", "e" * 64),
+        ("software", {"motifmultiverse": "0.other", "python": "3.test"}),
+        ("inputs", {"before.parquet": "f" * 64}),
+    ],
+)
+def test_stability_result_id_binds_every_full_provenance_field(tmp_path, field, value):
+    binding, manifest, decision, provisional, provenance = _identity_context(tmp_path)
+
+    original = stability_result_id(
+        [], [], provenance, binding, manifest, decision, provisional,
+    )
+    changed = stability_result_id(
+        [], [], replace(provenance, **{field: value}),
+        binding, manifest, decision, provisional,
+    )
+
+    assert changed != original
+
+
+def test_stability_result_id_refuses_unvalidated_public_inputs_before_hashing(tmp_path):
+    binding, manifest, decision, provisional, provenance = _identity_context(tmp_path)
+
+    with pytest.raises(SchemaError, match="StabilityResult"):
+        stability_result_id(
+            [object()], [], provenance, binding, manifest, decision, provisional,
+        )
+    with pytest.raises(SchemaError, match="provenance"):
+        stability_result_id(
+            [], [], {"stage": "validate"}, binding, manifest, decision, provisional,
+        )
+    with pytest.raises(SchemaError, match="LexiconBinding"):
+        stability_result_id(
+            [], [], provenance, "not-a-binding", manifest, decision, provisional,
+        )
+
+
+def test_stability_provenance_rejects_tamper_missing_and_wrong_types(tmp_path):
+    binding, manifest, decision, provisional, provenance = _identity_context(tmp_path)
+
+    with pytest.raises(SchemaError, match="lexicon"):
+        stability_result_id(
+            [], [], replace(provenance, lexicon_identity="lexicons:" + "f" * 64),
+            binding, manifest, decision, provisional,
+        )
+    for field, value in (
+        ("split_manifest_checksum", "f" * 64),
+        ("decision_artifact_id", "decision-split:" + "f" * 64),
+        ("validation_split_identity", "f" * 64),
+    ):
+        with pytest.raises(SchemaError, match="split identity|manifest identity"):
+            stability_result_id(
+                [], [], replace(provenance, **{field: value}),
+                binding, manifest, decision, provisional,
+            )
+    with pytest.raises(SchemaError, match="command"):
+        replace(provenance, command="")
+    with pytest.raises(SchemaError, match="inputs"):
+        replace(provenance, inputs={"before.parquet": 7})
+    for substrate_id in (None, "not-a-substrate-digest"):
+        with pytest.raises(SchemaError, match="substrate_id"):
+            replace(provenance, substrate_id=substrate_id)
+
+
+def test_stability_writer_rejects_a_reduced_mapping_even_when_nonempty(tmp_path):
+    (
+        binding, manifest, decision, validation, _provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+
+    with pytest.raises(SchemaError, match="exact StabilityProvenance"):
+        write_stability_artifacts(
+            tmp_path / "out",
+            results,
+            verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance={"stage": "validate"},
+            lexicon=binding,
+        )
+
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation,match",
+    [
+        (
+            lambda results, verification, lexicon: (
+                results,
+                [*verification, verification[0]],
+            ),
+            "unique backend identities",
+        ),
+        (
+            lambda results, verification, lexicon: (
+                [*results, results[0]],
+                verification,
+            ),
+            "unique backend_result_id",
+        ),
+        (
+            lambda results, verification, lexicon: (
+                results,
+                [
+                    *verification,
+                    BackendVerification(
+                        "orphan", "1", "VERIFIED",
+                        backend_result_id="backend-result:orphan",
+                        lexicon_identity=lexicon.lexicon_identity,
+                    ),
+                ],
+            ),
+            "each VERIFIED backend row",
+        ),
+        (
+            lambda results, verification, lexicon: (results, []),
+            "each VERIFIED backend row",
+        ),
+        (
+            lambda results, verification, lexicon: (
+                results,
+                [
+                    *verification,
+                    BackendVerification(
+                        "ambiguous", "1", "UNVERIFIED", "not run",
+                        backend_result_id="backend-result:claimed",
+                        lexicon_identity=lexicon.lexicon_identity,
+                    ),
+                ],
+            ),
+            "UNVERIFIED backend rows cannot claim",
+        ),
+    ],
+    ids=[
+        "duplicate-backend-identity",
+        "duplicate-result-identity",
+        "orphan-verified-association",
+        "missing-verified-association",
+        "unverified-claims-result",
+    ],
+)
+def test_stability_writer_refuses_duplicate_or_ambiguous_backend_associations(
+    tmp_path, mutation, match,
+):
+    (
+        binding, manifest, decision, validation, provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    mutated_results, mutated_verification = mutation(
+        results, verification, binding,
+    )
+
+    with pytest.raises(SchemaError, match=match):
+        write_stability_artifacts(
+            tmp_path / "out",
+            mutated_results,
+            mutated_verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance=provenance,
+            lexicon=binding,
+        )
+
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["parquet", "tsv", "provenance", "rename"],
+)
+def test_stability_publication_failure_cleans_only_its_unique_owned_stage(
+    tmp_path, monkeypatch, failure_point,
+):
+    import csv
+    from pathlib import Path
+
+    import pyarrow.parquet as pq
+
+    import motifmultiverse.validate as validate_mod
+
+    (
+        binding, manifest, decision, validation, provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    out = tmp_path / "publication"
+    unrelated_stage = tmp_path / ".publication.stage-unrelated"
+    unrelated_stage.mkdir()
+    (unrelated_stage / "owner.txt").write_text("someone else", encoding="utf-8")
+    unrelated_sibling = tmp_path / "unrelated-sibling"
+    unrelated_sibling.write_text("preserve", encoding="utf-8")
+
+    def injected_failure(*_args, **_kwargs):
+        raise OSError(f"injected {failure_point} failure")
+
+    if failure_point == "parquet":
+        monkeypatch.setattr(pq, "write_table", injected_failure)
+    elif failure_point == "tsv":
+        monkeypatch.setattr(csv.DictWriter, "writeheader", injected_failure)
+    elif failure_point == "provenance":
+        original_write_text = Path.write_text
+
+        def fail_provenance(path, *args, **kwargs):
+            if path.name == "provenance.json":
+                raise OSError("injected provenance failure")
+            return original_write_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_provenance)
+    else:
+        monkeypatch.setattr(
+            validate_mod, "_publish_directory_noreplace", injected_failure,
+        )
+
+    with pytest.raises(OSError, match=f"injected {failure_point} failure"):
+        write_stability_artifacts(
+            out,
+            results,
+            verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance=provenance,
+            lexicon=binding,
+        )
+
+    assert not out.exists()
+    assert (unrelated_stage / "owner.txt").read_text(encoding="utf-8") == "someone else"
+    assert unrelated_sibling.read_text(encoding="utf-8") == "preserve"
+    assert list(tmp_path.glob(".publication.stage-*")) == [unrelated_stage]
+
+
+def test_stability_writer_never_touches_an_existing_output(tmp_path):
+    (
+        binding, manifest, decision, validation, provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    out = tmp_path / "publication"
+    out.mkdir()
+    sentinel = out / "existing.txt"
+    sentinel.write_text("original", encoding="utf-8")
+    unrelated_stage = tmp_path / ".publication.stage-unrelated"
+    unrelated_stage.mkdir()
+
+    with pytest.raises(SchemaError, match="will not be overwritten"):
+        write_stability_artifacts(
+            out,
+            results,
+            verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance=provenance,
+            lexicon=binding,
+        )
+
+    assert sentinel.read_text(encoding="utf-8") == "original"
+    assert list(out.iterdir()) == [sentinel]
+    assert unrelated_stage.is_dir()
+
+
+def test_stability_writer_does_not_clobber_an_output_created_at_publish_time(
+    tmp_path, monkeypatch,
+):
+    import motifmultiverse.validate as validate_mod
+
+    (
+        binding, manifest, decision, validation, provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    out = tmp_path / "publication"
+    original_publish = validate_mod._publish_directory_noreplace
+
+    def racing_publish(stage, target):
+        out.mkdir()
+        return original_publish(stage, target)
+
+    monkeypatch.setattr(
+        validate_mod, "_publish_directory_noreplace", racing_publish,
+    )
+
+    with pytest.raises(SchemaError, match="will not be overwritten|already exists"):
+        write_stability_artifacts(
+            out,
+            results,
+            verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance=provenance,
+            lexicon=binding,
+        )
+
+    assert out.is_dir()
+    assert list(out.iterdir()) == []
+    assert not list(tmp_path.glob(".publication.stage-*"))
+
+
+def test_stability_writer_treats_a_dangling_output_symlink_as_existing(tmp_path):
+    (
+        binding, manifest, decision, validation, provenance,
+        results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    out = tmp_path / "publication"
+    out.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+
+    with pytest.raises(SchemaError, match="will not be overwritten|already exists"):
+        write_stability_artifacts(
+            out,
+            results,
+            verification,
+            manifest=manifest,
+            decision=decision,
+            validation=validation,
+            provenance=provenance,
+            lexicon=binding,
+        )
+
+    assert out.is_symlink()
+    assert out.readlink() == tmp_path / "missing-target"
+
+
 def test_stability_result_id_changes_with_lexicon_identity_and_cannot_match_an_arbitrary_result_id(tmp_path):
     binding = load_lexicon_binding(_lexicons(tmp_path))
     manifest = _manifest()
@@ -830,7 +1639,9 @@ def test_stability_result_id_changes_with_lexicon_identity_and_cannot_match_an_a
         decision_peak_ids=frozenset({"p-discovery"}), validation_peak_ids=frozenset({"p-validation-a"}),
     )
     results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
-    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    provenance = _stability_provenance(
+        binding, manifest, decision, validation,
+    )
     expected = stability_result_id(results, verification, provenance, binding, manifest, decision, validation)
 
     assert expected.startswith("stability:")
@@ -856,7 +1667,9 @@ def test_empty_stability_artifact_has_explicit_schema_and_unverified_backend_row
     verification = [BackendVerification(
         "missing", "1", "UNVERIFIED", "missing backend", lexicon_identity=binding.lexicon_identity,
     )]
-    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    provenance = _stability_provenance(
+        binding, manifest, decision, provisional,
+    )
     validation = ValidationSplitArtifact.create(
         manifest=manifest, decision_id=decision.decision_id,
         result_id=stability_result_id([], verification, provenance, binding, manifest, decision, provisional),
@@ -887,7 +1700,9 @@ def test_unlinked_backend_result_refuses_before_any_artifact_is_published(tmp_pa
         decision_peak_ids=decision.decision_peak_ids, validation_peak_ids=decision.validation_peak_ids,
     )
     results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
-    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    provenance = _stability_provenance(
+        binding, manifest, decision, provisional,
+    )
     validation = ValidationSplitArtifact.create(
         manifest=manifest, decision_id=decision.decision_id,
         result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),

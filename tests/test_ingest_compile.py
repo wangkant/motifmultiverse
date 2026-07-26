@@ -245,6 +245,18 @@ def test_compile_writes_one_lexicon_per_tier_with_a_manifest(tmp_path):
     assert (tmp_path / "lex" / "manifest.tsv").exists()
 
 
+def test_validation_accepts_the_compiler_public_output_contract(tmp_path):
+    """The strict validator must consume real compile output, not a parallel fixture format."""
+    from motifmultiverse.validate import load_lexicon_binding
+
+    lexicons = tmp_path / "lex"
+    compile_mod.compile_lexicons(_registry(tmp_path), lexicons, verify="skip")
+
+    binding = load_lexicon_binding(lexicons)
+
+    assert {entry[0] for entry in binding.entries} == set(compile_mod.TIERS)
+
+
 def test_index_is_written_in_loader_order_positives_first(tmp_path):
     manifests = compile_mod.compile_lexicons(_registry(tmp_path), tmp_path / "lex")
     assert manifests["core"].pattern_order == [
@@ -642,6 +654,24 @@ def test_a_lexicon_of_mixed_motif_lengths_is_refused(tmp_path):
         h5[node_id].create_dataset("cwm", data=np.zeros((MOTIF_LEN + 3, 4)))
     with pytest.raises(compile_mod.CompileError, match="mixes motif lengths"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex")
+
+
+def test_compile_refuses_a_motif_type_whose_loader_dataset_is_missing(tmp_path):
+    registry = _registry(tmp_path)
+    with h5py.File(registry / "arrays.h5", "a") as h5:
+        node_id = sorted(h5.keys())[0]
+        del h5[node_id]["hypothetical_cwm"]
+
+    with pytest.raises(
+        compile_mod.CompileError,
+        match="motif_type.*hcwm|hypothetical",
+    ):
+        compile_mod.compile_lexicons(
+            registry,
+            tmp_path / "lex",
+            motif_type="hcwm",
+            verify="skip",
+        )
 
 
 # ------------------------------------------------- the real loader, or a skip

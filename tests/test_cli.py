@@ -1,22 +1,16 @@
 """CLI tests: all eight subcommands expose real --help and record provenance (T-08/T-09)."""
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pandas as pd
 import pytest
 
 from motifmultiverse.cli import build_parser, main
-from motifmultiverse.provenance import record, sha256_file
 from motifmultiverse.schema import build_peak_split_manifest
 from motifmultiverse.validate import (
     DecisionSplitArtifact,
-    StabilityBackend,
     ValidationSplitArtifact,
-    load_lexicon_binding,
-    run_backend_validation,
-    stability_result_id,
 )
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
@@ -68,34 +62,73 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
     import h5py
     import numpy as np
 
-    from motifmultiverse.compile import _content_hash
+    from motifmultiverse.compile import lexicon_semantic_hash
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest as build_substrate_manifest
+    from motifmultiverse.substrate import write_manifest as write_substrate_manifest
 
     lexicons = tmp_path / "lexicons"
     lexicons.mkdir()
     with h5py.File(lexicons / "core.h5", "w") as h5:
-        h5.create_group("pos").create_group("pattern_0").create_dataset(
+        h5.create_group("pos_patterns").create_group("pattern_0").create_dataset(
             "contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]])
         )
-    content_hash = _content_hash(
-        [("pos", "pattern_0", {"node_id": "node-0"})],
+    content_hash = lexicon_semantic_hash(
+        [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
         {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
         schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
-        loader_backend="finemo", loader_parameters={},
+        loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
     )
     (lexicons / "core.manifest.json").write_text(json.dumps({
         "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
-        "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
-        "index": [{"pattern_tag": "pos.pattern_0", "node_id": "node-0"}],
+        "pattern_order": ["pos_patterns.pattern_0"], "node_ids": ["node-0"],
+        "index": [{
+            "index": 0, "pattern_tag": "pos_patterns.pattern_0", "node_id": "node-0",
+            "variant_id": "MA_FAM_01", "metacluster": "pos",
+        }],
         "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
-        "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
+        "include_rc": False, "loader_backend": "finemo",
+        "loader_parameters": {"motif_lambda_default": 0.7},
+        "comparisons": {}, "source_registry": "registry", "sensitivity_triggers": {},
+        "project": "test-project", "cross_model_claims_restricted": True,
     }), encoding="utf-8")
+    substrate = build_substrate_manifest(
+        peak_universe_hash="a" * 64,
+        n_regions=2,
+        caller_specification=CallerSpecification(
+            caller_name="finemo",
+            caller_version="0.test",
+            lexicon_content_hash=content_hash,
+            parameters={"motif_type": "cwm"},
+            preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.bed": "c" * 64},
+        created_at="2026-07-26T12:00:00Z",
+    )
+    substrate_path = write_substrate_manifest(
+        substrate, tmp_path / "substrate.manifest.json",
+    )
     rows = [
-        {"peak_id": "p-validation", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0},
+        {
+            "peak_id": "p-validation",
+            "hit_id": "old",
+            "coefficient": 1.0,
+            "reconstruction": 0.0,
+            "substrate_id": substrate.substrate_id,
+        },
     ]
-    before = tmp_path / "before.parquet"
-    after = tmp_path / "after.parquet"
+    before = tmp_path / "before" / "hits.parquet"
+    after = tmp_path / "after" / "hits.parquet"
+    before.parent.mkdir()
+    after.parent.mkdir()
     pd.DataFrame(rows).to_parquet(before, index=False)
-    rows[0] = {"peak_id": "p-validation", "hit_id": "new", "coefficient": 2.0, "reconstruction": 1.0}
+    rows[0] = {
+        "peak_id": "p-validation",
+        "hit_id": "new",
+        "coefficient": 2.0,
+        "reconstruction": 1.0,
+        "substrate_id": substrate.substrate_id,
+    }
     pd.DataFrame(rows).to_parquet(after, index=False)
     manifest = build_peak_split_manifest({
         "p-discovery": "DISCOVERY", "p-validation": "VALIDATION",
@@ -120,63 +153,90 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
     validation_path = tmp_path / "validation-split.json"
     decision_path.write_text(json.dumps(decision.to_dict()), encoding="utf-8")
     validation_path.write_text(json.dumps(provisional.to_dict()), encoding="utf-8")
-    binding = load_lexicon_binding(lexicons)
-
-    class _FrozenBackend(StabilityBackend):
-        name = "frozen-hit-table"
-        version = "1"
-
-        def compare(self, bound_lexicons, decision_id):
-            return pd.read_parquet(before), pd.read_parquet(after)
-
-    results, verification = run_backend_validation(binding, decision.decision_id, [_FrozenBackend()])
-    input_hashes = {
-        path.name: sha256_file(path)
-        for path in (before, after, manifest_path, decision_path, lexicons / "core.manifest.json", lexicons / "core.h5")
-    }
-    validation_binding = {
-        "decision_artifact_id": decision.artifact_id,
-        "manifest_checksum": manifest.checksum,
-        "validation": {
-            "cross_fit_folds": [], "decision_id": provisional.decision_id,
-            "decision_peak_ids": sorted(provisional.decision_peak_ids), "mode": provisional.mode.value,
-            "schema_version": provisional.schema_version,
-            "validation_peak_ids": sorted(provisional.validation_peak_ids),
-        },
-    }
-    input_hashes["validation_split_binding"] = hashlib.sha256(
-        json.dumps(validation_binding, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    provenance = {"stage": "validate", "inputs": input_hashes,
-                  "software": record("validate").software,
-                  "lexicon": binding.to_dict()}
-    validation = ValidationSplitArtifact.create(
-        manifest=manifest, decision_id="decision:cli",
-        result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),
-        decision_peak_ids=provisional.decision_peak_ids,
-        validation_peak_ids=provisional.validation_peak_ids,
-    )
-    validation_path.write_text(json.dumps(validation.to_dict()), encoding="utf-8")
     out = tmp_path / "validation"
 
     argv = [
         "validate", str(lexicons), "--before-hits", str(before), "--after-hits", str(after),
+        "--substrate-manifest", str(substrate_path),
         "--split-manifest", str(manifest_path), "--decision-artifact", str(decision_path),
         "--validation-artifact", str(validation_path), "--out", str(out),
     ]
     assert main(argv) == 0
     assert (out / "stability_results.parquet").exists()
     assert (out / "backend_verification.tsv").exists()
+    provenance = json.loads((out / "provenance.json").read_text(encoding="utf-8"))[0]
+    assert provenance["command"] and provenance["subcommand"] == provenance["stage"] == "validate"
+    assert provenance["timestamp_utc"] and provenance["schema_version"] == "1"
+    assert provenance["redaction_policy"] == "basenames_only_except_command"
+    assert provenance["random_seed"] is None and provenance["input_scale"] == 1
+    assert provenance["substrate_id"] == substrate.substrate_id
+    assert provenance["software"] and provenance["inputs"]
+    assert {
+        "before_hits",
+        "after_hits",
+        "substrate_manifest",
+        "split_manifest",
+        "decision_artifact",
+        "validation_split_binding",
+        "lexicon_manifest:core",
+        "lexicon_h5:core",
+    } <= set(provenance["inputs"])
+    assert provenance["inputs"]["before_hits"] != provenance["inputs"]["after_hits"]
+    assert "hits.parquet" not in provenance["inputs"]
+    assert provenance["lexicon_identity"].startswith("lexicons:")
+    assert provenance["split_manifest_checksum"] == manifest.checksum
+    assert provenance["decision_artifact_id"] == decision.artifact_id
+    assert len(provenance["validation_split_identity"]) == 64
 
     unsupported_out = tmp_path / "unsupported-backend"
     unsupported_argv = [str(unsupported_out) if value == str(out) else value for value in argv]
     assert main([*unsupported_argv, "--fimo-heldout"]) == 4
     assert not unsupported_out.exists()
 
+    mismatched_substrate = build_substrate_manifest(
+        peak_universe_hash="a" * 64,
+        n_regions=2,
+        caller_specification=CallerSpecification(
+            caller_name="finemo",
+            caller_version="0.test",
+            lexicon_content_hash="f" * 64,
+            parameters={"motif_type": "cwm"},
+            preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.bed": "c" * 64},
+        created_at="2026-07-26T12:00:00Z",
+    )
+    mismatched_substrate_path = write_substrate_manifest(
+        mismatched_substrate, tmp_path / "mismatched-substrate.manifest.json",
+    )
+    for hit_path in (before, after):
+        hit_rows = pd.read_parquet(hit_path)
+        hit_rows["substrate_id"] = mismatched_substrate.substrate_id
+        hit_rows.to_parquet(hit_path, index=False)
+    mismatch_out = tmp_path / "mismatched-substrate-output"
+    mismatch_argv = [
+        str(mismatched_substrate_path)
+        if value == str(substrate_path)
+        else str(mismatch_out)
+        if value == str(out)
+        else value
+        for value in argv
+    ]
+    assert main(mismatch_argv) == 4
+    assert not mismatch_out.exists()
+    for hit_path in (before, after):
+        hit_rows = pd.read_parquet(hit_path)
+        hit_rows["substrate_id"] = substrate.substrate_id
+        hit_rows.to_parquet(hit_path, index=False)
+
     # A split-bound validation command must not silently include decision peaks.
     corrupt = pd.read_parquet(after)
     corrupt.loc[len(corrupt)] = {
-        "peak_id": "p-discovery", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0,
+        "peak_id": "p-discovery",
+        "hit_id": "old",
+        "coefficient": 1.0,
+        "reconstruction": 0.0,
+        "substrate_id": substrate.substrate_id,
     }
     corrupt.to_parquet(after, index=False)
     refused_out = tmp_path / "refused-validation"

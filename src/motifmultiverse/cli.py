@@ -164,6 +164,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="frozen pre-merge standardized hit table (.parquet or .tsv)")
     a.add_argument("--after-hits", required=True,
                    help="frozen post-merge standardized hit table (.parquet or .tsv)")
+    a.add_argument("--substrate-manifest", required=True,
+                   help="validated manifest for the one frozen caller substrate")
     a.add_argument("--split-manifest", required=True,
                    help="exact frozen PeakSplitManifest JSON")
     a.add_argument("--decision-artifact", required=True,
@@ -372,6 +374,7 @@ def _run_validate(ns: argparse.Namespace) -> int:
         ns.out,
         before_hits=ns.before_hits,
         after_hits=ns.after_hits,
+        substrate_manifest=ns.substrate_manifest,
         split_manifest=ns.split_manifest,
         decision_artifact=ns.decision_artifact,
         validation_artifact=ns.validation_artifact,

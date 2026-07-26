@@ -15,14 +15,14 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, replace
 from numbers import Real
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
-from motifmultiverse.provenance import record, sha256_file
+from motifmultiverse.provenance import ProvenanceRecord, record, sha256_file
 from motifmultiverse.schema import (
-    LexiconManifest,
     PeakSplitManifest,
     SchemaError,
     SplitRole,
@@ -44,7 +44,7 @@ from .base import (
 __all__ = [
     "AnalysisMode", "BackendUnavailable", "BackendVerification", "CrossFitFold",
     "DecisionSplitArtifact", "LexiconBinding", "PeakSplitManifest", "SPLIT_ARTIFACT_SCHEMA_VERSION",
-    "STABILITY_SCHEMA_VERSION", "StabilityBackend", "StabilityResult", "SplitRole",
+    "STABILITY_SCHEMA_VERSION", "StabilityBackend", "StabilityProvenance", "StabilityResult", "SplitRole",
     "ValidationError", "ValidationSplitArtifact", "assert_artifact_split_compatibility",
     "assert_cross_fit_compatibility", "assert_split_compatibility",
     "build_peak_split_manifest", "evaluate_stability", "load_lexicon_binding",
@@ -54,6 +54,7 @@ __all__ = [
 ]
 
 STABILITY_SCHEMA_VERSION = "1"
+STABILITY_PROVENANCE_CONTRACT_VERSION = "stability-provenance-1"
 MIN_AFFECTED_PEAKS = 30
 _REQUIRED_COLUMNS = ("peak_id", "hit_id", "coefficient", "reconstruction")
 _PERSISTED_RESULT_COLUMNS = (
@@ -94,6 +95,174 @@ class LexiconBinding:
                 "schema_version": self.schema_version}
 
 
+@dataclass(frozen=True)
+class StabilityProvenance:
+    """Full, immutable validation provenance plus non-circular artifact identities.
+
+    ``validation_split_identity`` hashes the complete validation split semantics
+    while deliberately excluding only ``ValidationSplitArtifact.result_id`` and
+    its derived ``artifact_id``.  Those two values point back to the stability
+    identity being computed; excluding anything broader would discard real
+    provenance, while including either would make the identity impossible to
+    construct.
+    """
+
+    command: str
+    subcommand: str
+    stage: str
+    inputs: Mapping[str, str]
+    software: Mapping[str, str]
+    random_seed: int | None
+    input_scale: int | None
+    substrate_id: str
+    timestamp_utc: str
+    schema_version: str
+    redaction_policy: str
+    lexicon_identity: str
+    split_manifest_checksum: str
+    decision_artifact_id: str
+    validation_split_identity: str
+    contract_version: str = STABILITY_PROVENANCE_CONTRACT_VERSION
+
+    def __post_init__(self) -> None:
+        for name in (
+            "command", "subcommand", "stage", "timestamp_utc", "schema_version",
+            "redaction_policy", "lexicon_identity", "split_manifest_checksum",
+            "decision_artifact_id", "validation_split_identity", "contract_version",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError(f"stability provenance {name} must be a non-empty string")
+        if self.subcommand != "validate" or self.stage != "validate":
+            raise ValidationError("stability provenance subcommand and stage must both be 'validate'")
+        if self.schema_version != "1":
+            raise ValidationError("stability provenance recorder schema_version must be '1'")
+        if self.contract_version != STABILITY_PROVENANCE_CONTRACT_VERSION:
+            raise ValidationError("stability provenance contract_version is unsupported")
+        if self.redaction_policy != "basenames_only_except_command":
+            raise ValidationError("stability provenance redaction_policy is unsupported")
+        if (
+            not self.lexicon_identity.startswith("lexicons:")
+            or not _is_sha256(self.lexicon_identity.removeprefix("lexicons:"))
+        ):
+            raise ValidationError("stability provenance lexicon_identity is malformed")
+        for name in ("split_manifest_checksum", "validation_split_identity"):
+            if not _is_sha256(getattr(self, name)):
+                raise ValidationError(f"stability provenance {name} must be a SHA-256 digest")
+        if (
+            not self.decision_artifact_id.startswith("decision-split:")
+            or not _is_sha256(self.decision_artifact_id.removeprefix("decision-split:"))
+        ):
+            raise ValidationError(
+                "stability provenance decision_artifact_id must be a decision-split identity"
+            )
+        if isinstance(self.random_seed, bool) or (
+            self.random_seed is not None and not isinstance(self.random_seed, int)
+        ):
+            raise ValidationError("stability provenance random_seed must be an integer or None")
+        if isinstance(self.input_scale, bool) or (
+            self.input_scale is not None
+            and (not isinstance(self.input_scale, int) or self.input_scale < 0)
+        ):
+            raise ValidationError(
+                "stability provenance input_scale must be a non-negative integer or None"
+            )
+        if not _is_sha256(self.substrate_id):
+            raise ValidationError(
+                "stability provenance substrate_id must be a lowercase SHA-256 digest"
+            )
+        frozen_inputs = _validated_string_mapping(self.inputs, "inputs", digests=True)
+        frozen_software = _validated_string_mapping(self.software, "software", digests=False)
+        if not frozen_inputs:
+            raise ValidationError("stability provenance inputs cannot be empty")
+        if not frozen_software:
+            raise ValidationError("stability provenance software cannot be empty")
+        object.__setattr__(self, "inputs", MappingProxyType(frozen_inputs))
+        object.__setattr__(self, "software", MappingProxyType(frozen_software))
+
+    @classmethod
+    def from_record(
+        cls,
+        source: ProvenanceRecord,
+        *,
+        lexicon: LexiconBinding,
+        manifest: PeakSplitManifest,
+        decision: DecisionSplitArtifact,
+        validation: ValidationSplitArtifact,
+    ) -> StabilityProvenance:
+        """Preserve every recorder field and add exact validation-stage identities."""
+        if type(source) is not ProvenanceRecord:
+            raise ValidationError("stability provenance source must be an exact ProvenanceRecord")
+        _validate_identity_context(lexicon, manifest, decision, validation)
+        return cls(
+            command=source.command,
+            subcommand=source.subcommand,
+            stage="validate",
+            inputs=dict(source.inputs),
+            software=dict(source.software),
+            random_seed=source.random_seed,
+            input_scale=source.input_scale,
+            substrate_id=source.substrate_id,
+            timestamp_utc=source.timestamp_utc,
+            schema_version=source.schema_version,
+            redaction_policy=source.redaction_policy,
+            lexicon_identity=lexicon.lexicon_identity,
+            split_manifest_checksum=manifest.checksum,
+            decision_artifact_id=decision.artifact_id,
+            validation_split_identity=_validation_split_identity(
+                manifest, decision, validation,
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "subcommand": self.subcommand,
+            "stage": self.stage,
+            "inputs": dict(self.inputs),
+            "software": dict(self.software),
+            "random_seed": self.random_seed,
+            "input_scale": self.input_scale,
+            "substrate_id": self.substrate_id,
+            "timestamp_utc": self.timestamp_utc,
+            "schema_version": self.schema_version,
+            "redaction_policy": self.redaction_policy,
+            "lexicon_identity": self.lexicon_identity,
+            "split_manifest_checksum": self.split_manifest_checksum,
+            "decision_artifact_id": self.decision_artifact_id,
+            "validation_split_identity": self.validation_split_identity,
+            "contract_version": self.contract_version,
+        }
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _validated_string_mapping(
+    value: object,
+    name: str,
+    *,
+    digests: bool,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValidationError(f"stability provenance {name} must be a mapping")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValidationError(f"stability provenance {name} keys must be non-empty strings")
+        if not isinstance(item, str) or not item.strip():
+            raise ValidationError(f"stability provenance {name} values must be non-empty strings")
+        if digests and not _is_sha256(item):
+            raise ValidationError("stability provenance inputs values must be SHA-256 digests")
+        normalized[key] = item
+    return dict(sorted(normalized.items()))
+
+
 def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
     """Validate the compiled lexicon manifests and bind every accompanying H5 byte stream."""
     root = Path(lexicons)
@@ -104,28 +273,15 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
     manifest_paths = sorted(root.glob("*.manifest.json"))
     if not manifest_paths:
         raise ValidationError(f"compiled lexicons directory has no *.manifest.json: {root}")
-    import h5py
-    import numpy as np
-
-    from motifmultiverse.compile import lexicon_semantic_hash
+    from motifmultiverse.compile import CompileError, validate_compiled_lexicon
 
     entry_rows: list[tuple[str, str, str, str]] = []
-    manifest_fields = {item.name for item in fields(LexiconManifest)}
     seen_tiers: set[str] = set()
     for manifest_path in manifest_paths:
         try:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, Mapping):
-                raise TypeError("manifest must be an object")
-            manifest = LexiconManifest(**{key: value for key, value in payload.items() if key in manifest_fields})
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            manifest = validate_compiled_lexicon(manifest_path)
+        except (CompileError, OSError) as exc:
             raise ValidationError(f"{manifest_path} is not a valid compiled lexicon manifest: {exc}") from exc
-        if (
-            not isinstance(manifest.lexicon_content_hash, str)
-            or len(manifest.lexicon_content_hash) != 64
-            or any(char not in "0123456789abcdef" for char in manifest.lexicon_content_hash)
-        ):
-            raise ValidationError(f"{manifest_path} has no valid lexicon_content_hash")
         if manifest_path.name != f"{manifest.tier}.manifest.json":
             raise ValidationError(f"{manifest_path} filename must exactly match declared tier {manifest.tier!r}")
         if manifest.tier in seen_tiers:
@@ -134,51 +290,6 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
         h5_path = root / f"{manifest.tier}.h5"
         if not h5_path.is_file():
             raise ValidationError(f"compiled lexicon named by {manifest_path} is missing: {h5_path}")
-        try:
-            index = payload["index"]
-            if not isinstance(index, list) or len(index) != manifest.n_motifs:
-                raise TypeError("manifest index must describe every motif")
-            if any(not isinstance(row, Mapping) for row in index):
-                raise TypeError("manifest index rows must be objects")
-            required = {"pattern_tag", "node_id"}
-            if any(not required <= set(row) for row in index):
-                raise TypeError("manifest index rows require pattern_tag and node_id")
-            if any(not isinstance(row["pattern_tag"], str) or not row["pattern_tag"].strip()
-                   or not isinstance(row["node_id"], str) or not row["node_id"].strip() for row in index):
-                raise TypeError("manifest index identities must be non-empty strings")
-            if len({row["node_id"] for row in index}) != len(index):
-                raise TypeError("manifest index has duplicate node_id")
-            if [row["pattern_tag"] for row in index] != manifest.pattern_order:
-                raise TypeError("manifest index pattern order is not authoritative")
-            if [row.get("node_id") for row in index] != manifest.node_ids:
-                raise TypeError("manifest index node order is not authoritative")
-            ordered = []
-            arrays: dict[str, dict[str, Any]] = {}
-            with h5py.File(h5_path, "r") as h5:
-                for row in index:
-                    group, pattern = str(row["pattern_tag"]).split(".", 1)
-                    if group not in h5 or pattern not in h5[group]:
-                        raise TypeError(f"missing compiled motif {group}.{pattern}")
-                    motif = h5[group][pattern]
-                    if "contrib_scores" not in motif:
-                        raise TypeError(f"compiled motif {group}.{pattern} lacks contrib_scores")
-                    arrays[str(row["node_id"])] = {
-                        "cwm": np.asarray(motif["contrib_scores"]),
-                        **({"hypothetical_cwm": np.asarray(motif["hypothetical_contribs"])}
-                           if "hypothetical_contribs" in motif else {}),
-                        **({"ppm": np.asarray(motif["sequence"])} if "sequence" in motif else {}),
-                    }
-                    ordered.append((group, pattern, {"node_id": str(row["node_id"])}))
-            recomputed = lexicon_semantic_hash(
-                ordered, arrays, schema_version=manifest.schema_version,
-                trim_threshold=manifest.trim_threshold, motif_type=manifest.motif_type,
-                include_rc=manifest.include_rc, loader_backend=manifest.loader_backend,
-                loader_parameters=manifest.loader_parameters,
-            )
-        except (OSError, TypeError, ValueError, KeyError, IndexError) as exc:
-            raise ValidationError(f"{h5_path} is not the verified compiled lexicon named by {manifest_path}: {exc}") from exc
-        if recomputed != manifest.lexicon_content_hash:
-            raise ValidationError(f"{manifest_path} lexicon_content_hash does not match HDF5 content and loader semantics")
         entry_rows.append((manifest.tier, manifest.lexicon_content_hash,
                            sha256_file(manifest_path), sha256_file(h5_path)))
     entries = tuple(sorted(entry_rows))
@@ -516,10 +627,112 @@ def _split_binding(
     }
 
 
+def _validation_split_identity(
+    manifest: PeakSplitManifest,
+    decision: DecisionSplitArtifact,
+    validation: ValidationSplitArtifact,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            _split_binding(manifest, decision, validation),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_identity_context(
+    lexicon: object,
+    manifest: object,
+    decision: object,
+    validation: object,
+) -> None:
+    if not isinstance(lexicon, LexiconBinding):
+        raise ValidationError("stability identity requires a validated LexiconBinding")
+    if not isinstance(manifest, PeakSplitManifest):
+        raise ValidationError("stability identity requires a PeakSplitManifest")
+    if not isinstance(decision, DecisionSplitArtifact):
+        raise ValidationError("stability identity requires a DecisionSplitArtifact")
+    if not isinstance(validation, ValidationSplitArtifact):
+        raise ValidationError("stability identity requires a ValidationSplitArtifact")
+    assert_artifact_split_compatibility(manifest, decision, validation)
+
+
+def _canonical_json(value: Any, *, what: str) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{what} is not canonical JSON: {exc}") from exc
+
+
+def _canonical_records(
+    values: object,
+    record_type: type[StabilityResult] | type[BackendVerification],
+    *,
+    what: str,
+) -> tuple[Any, ...]:
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
+        raise ValidationError(f"{what} must be a sequence of {record_type.__name__} records")
+    rows = tuple(values)
+    for position, row in enumerate(rows):
+        if type(row) is not record_type:
+            raise ValidationError(
+                f"{what}[{position}] must be an exact {record_type.__name__} record"
+            )
+        try:
+            if record_type is StabilityResult:
+                StabilityResult(**row.to_dict())
+            else:
+                BackendVerification(**asdict(row))
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"{what}[{position}] is malformed: {exc}") from exc
+    return tuple(sorted(
+        rows,
+        key=lambda row: _canonical_json(
+            row.to_dict() if isinstance(row, StabilityResult) else asdict(row),
+            what=what,
+        ),
+    ))
+
+
+def _validated_stability_identity_inputs(
+    results: object,
+    verification: object,
+    provenance: object,
+    lexicon: object,
+    manifest: object,
+    decision: object,
+    validation: object,
+) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
+    _validate_identity_context(lexicon, manifest, decision, validation)
+    if type(provenance) is not StabilityProvenance:
+        raise ValidationError(
+            "stability identity provenance must be an exact StabilityProvenance record"
+        )
+    # Reconstructing validates every field again before any bytes are hashed.
+    StabilityProvenance(**provenance.to_dict())
+    if provenance.lexicon_identity != lexicon.lexicon_identity:
+        raise ValidationError("stability provenance lexicon identity does not match")
+    if provenance.split_manifest_checksum != manifest.checksum:
+        raise ValidationError("stability provenance split manifest identity does not match")
+    if provenance.decision_artifact_id != decision.artifact_id:
+        raise ValidationError("stability provenance decision split identity does not match")
+    if provenance.validation_split_identity != _validation_split_identity(
+        manifest, decision, validation,
+    ):
+        raise ValidationError("stability provenance validation split identity does not match")
+    return (
+        _canonical_records(results, StabilityResult, what="stability results"),
+        _canonical_records(
+            verification, BackendVerification, what="backend verification",
+        ),
+    )
+
+
 def stability_result_id(
     results: Sequence[StabilityResult],
     verification: Sequence[BackendVerification],
-    provenance: Mapping[str, Any],
+    provenance: StabilityProvenance,
     lexicon: LexiconBinding,
     manifest: PeakSplitManifest,
     decision: DecisionSplitArtifact,
@@ -531,20 +744,80 @@ def stability_result_id(
     therefore commits to normalized backend results, verification rows, full
     provenance, every compiled lexicon byte/hash binding, and split semantics.
     """
+    result_rows, verification_rows = _validated_stability_identity_inputs(
+        results, verification, provenance, lexicon, manifest, decision, validation,
+    )
     payload = {
         "lexicon": lexicon.to_dict(),
-        "provenance": dict(provenance),
-        "results": [row.to_dict() for row in sorted(results, key=lambda row: row.backend_result_id)],
+        "provenance": provenance.to_dict(),
+        "results": [row.to_dict() for row in result_rows],
         "schema_version": STABILITY_SCHEMA_VERSION,
         "split_binding": _split_binding(manifest, decision, validation),
-        "verification": [asdict(row) for row in sorted(
-            verification, key=lambda row: (row.backend, row.backend_version, row.status, row.detail)
-        )],
+        "verification": [asdict(row) for row in verification_rows],
     }
     digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        _canonical_json(payload, what="stability identity payload").encode("utf-8")
     ).hexdigest()
     return f"stability:{digest}"
+
+
+def _publish_directory_noreplace(stage: Path, destination: Path) -> None:
+    """Atomically publish ``stage`` only when ``destination`` is still absent.
+
+    POSIX ``rename``/``replace`` may replace an empty destination directory, so
+    a separate existence check cannot provide the no-clobber contract.  Linux
+    ``renameat2(RENAME_NOREPLACE)`` makes the absence check and directory rename
+    one filesystem operation.  Filesystems without that flag publish an atomic
+    no-replace symlink to the already-complete private directory; readers still
+    see the complete directory at ``destination`` in one namespace operation.
+    """
+    import ctypes
+    import errno
+
+    def publish_symlink() -> None:
+        try:
+            os.symlink(
+                os.path.relpath(stage, destination.parent),
+                destination,
+                target_is_directory=True,
+            )
+        except FileExistsError as exc:
+            raise ValidationError(
+                f"validation output already exists and will not be overwritten: "
+                f"{destination}"
+            ) from exc
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        publish_symlink()
+        return
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        -100,
+        os.fsencode(stage),
+        -100,
+        os.fsencode(destination),
+        1,
+    )
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise ValidationError(
+            f"validation output already exists and will not be overwritten: {destination}"
+        )
+    if error in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP}:
+        publish_symlink()
+        return
+    raise OSError(error, os.strerror(error), os.fspath(destination))
 
 
 def write_stability_artifacts(
@@ -555,26 +828,18 @@ def write_stability_artifacts(
     manifest: PeakSplitManifest,
     decision: DecisionSplitArtifact,
     validation: ValidationSplitArtifact,
-    provenance: Mapping[str, Any],
+    provenance: StabilityProvenance,
     lexicon: LexiconBinding,
 ) -> tuple[Path, Path]:
     """Atomically publish a coherent, fully-bound stability artifact pair."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    assert_artifact_split_compatibility(manifest, decision, validation)
-    if not isinstance(lexicon, LexiconBinding):
-        raise ValidationError("stability artifacts require a validated LexiconBinding")
-    result_list = tuple(sorted(results, key=lambda row: json.dumps(
-        row.to_dict(), sort_keys=True, separators=(",", ":")
-    )))
-    verification_list = tuple(sorted(verification, key=lambda row: (
-        row.backend, row.backend_version, row.status, row.detail,
-    )))
+    result_list, verification_list = _validated_stability_identity_inputs(
+        results, verification, provenance, lexicon, manifest, decision, validation,
+    )
     if any(row.decision_id != decision.decision_id for row in result_list):
         raise ValidationError("stability result decision_id does not match the bound split artifact")
-    if not isinstance(provenance, Mapping) or not provenance:
-        raise ValidationError("stability artifacts require provenance")
     backend_identities = [(row.backend, row.backend_version) for row in verification_list]
     if len(set(backend_identities)) != len(backend_identities):
         raise ValidationError("backend verification rows must have unique backend identities")
@@ -610,12 +875,13 @@ def write_stability_artifacts(
         raise ValidationError(
             "validation split artifact result_id must equal the canonical stability artifact identity"
         )
+    provenance_json = _canonical_json(
+        provenance.to_dict(), what="stability provenance",
+    )
     metadata = {
         b"motifmultiverse.artifact_id": artifact_id.encode(),
         b"motifmultiverse.schema_version": STABILITY_SCHEMA_VERSION.encode(),
-        b"motifmultiverse.provenance": json.dumps(
-            dict(provenance), sort_keys=True, separators=(",", ":")
-        ).encode(),
+        b"motifmultiverse.provenance": provenance_json.encode(),
         b"motifmultiverse.split_manifest_checksum": manifest.checksum.encode(),
         b"motifmultiverse.decision_artifact_id": decision.artifact_id.encode(),
         b"motifmultiverse.validation_artifact_id": validation.artifact_id.encode(),
@@ -633,12 +899,12 @@ def write_stability_artifacts(
             "decision_artifact_id": decision.artifact_id,
             "validation_artifact_id": validation.artifact_id,
             "lexicon_identity": lexicon.lexicon_identity,
-            "provenance": json.dumps(dict(provenance), sort_keys=True, separators=(",", ":")),
+            "provenance": provenance_json,
         })
         rows.append(row)
     out = Path(out_dir)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
+    if os.path.lexists(out):
         raise ValidationError(
             f"validation output already exists and will not be overwritten: {out}"
         )
@@ -673,12 +939,12 @@ def write_stability_artifacts(
                     "split_manifest_checksum": manifest.checksum,
                     "decision_artifact_id": decision.artifact_id,
                     "validation_artifact_id": validation.artifact_id,
-                    "provenance": json.dumps(dict(provenance), sort_keys=True, separators=(",", ":")),
+                    "provenance": provenance_json,
                 })
         (stage / "provenance.json").write_text(
-            json.dumps([dict(provenance)], indent=2, sort_keys=True), encoding="utf-8"
+            json.dumps([provenance.to_dict()], indent=2, sort_keys=True), encoding="utf-8"
         )
-        os.replace(stage, out)
+        _publish_directory_noreplace(stage, out)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
@@ -694,10 +960,13 @@ class _FrozenHitTableBackend(StabilityBackend):
         before_path: str | Path,
         after_path: str | Path,
         validation_peak_ids: frozenset[str],
+        expected_substrate_id: str | None = None,
     ) -> None:
         self.before_path = Path(before_path)
         self.after_path = Path(after_path)
         self.validation_peak_ids = validation_peak_ids
+        self.expected_substrate_id = expected_substrate_id
+        self.substrate_id: str | None = None
 
     def compare(self, lexicons: str | Path, decision_id: str) -> tuple[Any, Any]:
         import pandas as pd
@@ -710,8 +979,43 @@ class _FrozenHitTableBackend(StabilityBackend):
             except (OSError, ValueError) as exc:
                 raise ValidationError(f"frozen-hit-table cannot read {path}: {exc}") from exc
 
-        before = normalize_backend_output(read(self.before_path), backend=self.name)
-        after = normalize_backend_output(read(self.after_path), backend=self.name)
+        before_raw = read(self.before_path)
+        after_raw = read(self.after_path)
+
+        def substrate_identity(frame: Any, label: str) -> str:
+            if "substrate_id" not in frame.columns:
+                raise ValidationError(
+                    f"frozen-hit-table {label} rows must carry substrate_id"
+                )
+            values = list(frame["substrate_id"])
+            if not values or any(not _is_sha256(value) for value in values):
+                raise ValidationError(
+                    f"frozen-hit-table {label} substrate_id values must be "
+                    "lowercase SHA-256 digests"
+                )
+            identities = set(values)
+            if len(identities) != 1:
+                raise ValidationError(
+                    f"frozen-hit-table {label} rows must belong to one substrate"
+                )
+            return next(iter(identities))
+
+        before_substrate = substrate_identity(before_raw, "before")
+        after_substrate = substrate_identity(after_raw, "after")
+        if before_substrate != after_substrate:
+            raise ValidationError(
+                "frozen-hit-table before and after rows must use the same substrate"
+            )
+        if (
+            self.expected_substrate_id is not None
+            and before_substrate != self.expected_substrate_id
+        ):
+            raise ValidationError(
+                "frozen-hit-table substrate_id does not match the validated "
+                "substrate manifest"
+            )
+        before = normalize_backend_output(before_raw, backend=self.name)
+        after = normalize_backend_output(after_raw, backend=self.name)
         for label, frame in (("before", before), ("after", after)):
             peak_ids = frozenset(str(value) for value in frame["peak_id"])
             if peak_ids != self.validation_peak_ids:
@@ -720,6 +1024,7 @@ class _FrozenHitTableBackend(StabilityBackend):
                     f"validation peaks; got {sorted(peak_ids)} expected "
                     f"{sorted(self.validation_peak_ids)}"
                 )
+        self.substrate_id = before_substrate
         return before, after
 
 
@@ -745,48 +1050,105 @@ def _read_artifact(path: str | Path, kind: str, manifest: PeakSplitManifest):
         raise ValidationError(f"{source} is not a valid {kind} split artifact: {exc}") from exc
 
 
+def _bind_provenance_input(
+    provenance: ProvenanceRecord,
+    role: str,
+    path: str | Path,
+) -> None:
+    if not isinstance(role, str) or not role.strip() or role in provenance.inputs:
+        raise ValidationError(f"validation provenance input role is ambiguous: {role!r}")
+    provenance.inputs[role] = sha256_file(path)
+
+
 def run(
     lexicons: str | Path,
     out_dir: str | Path,
     *,
     before_hits: str | Path,
     after_hits: str | Path,
+    substrate_manifest: str | Path,
     split_manifest: str | Path,
     decision_artifact: str | Path,
     validation_artifact: str | Path,
 ) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
     """Validate frozen before/after hit tables under an exact split binding."""
     lexicon = load_lexicon_binding(lexicons)
+    from motifmultiverse.substrate import SubstrateError
+    from motifmultiverse.substrate import read_manifest as read_substrate_manifest
+
+    try:
+        substrate = read_substrate_manifest(substrate_manifest)
+    except (OSError, SubstrateError) as exc:
+        raise ValidationError(
+            f"{substrate_manifest} is not a valid substrate manifest: {exc}"
+        ) from exc
+    lexicon_content_hashes = {entry[1] for entry in lexicon.entries}
+    if substrate.caller_specification.lexicon_content_hash not in lexicon_content_hashes:
+        raise ValidationError(
+            "substrate manifest caller lexicon identity does not match any bound "
+            "compiled lexicon"
+        )
     manifest = _read_manifest(split_manifest)
     decision = _read_artifact(decision_artifact, "decision", manifest)
     validation = _read_artifact(validation_artifact, "validation", manifest)
     assert_artifact_split_compatibility(manifest, decision, validation)
     provenance_record = record("validate")
     try:
-        for source in (before_hits, after_hits, split_manifest, decision_artifact):
-            provenance_record.add_input(source)
+        for role, source in (
+            ("before_hits", before_hits),
+            ("after_hits", after_hits),
+            ("substrate_manifest", substrate_manifest),
+            ("split_manifest", split_manifest),
+            ("decision_artifact", decision_artifact),
+        ):
+            _bind_provenance_input(provenance_record, role, source)
         for manifest_path in sorted(Path(lexicons).glob("*.manifest.json")):
-            provenance_record.add_input(manifest_path)
-            provenance_record.add_input(Path(lexicons) / f"{manifest_path.name.removesuffix('.manifest.json')}.h5")
+            tier = manifest_path.name.removesuffix(".manifest.json")
+            _bind_provenance_input(
+                provenance_record, f"lexicon_manifest:{tier}", manifest_path,
+            )
+            _bind_provenance_input(
+                provenance_record,
+                f"lexicon_h5:{tier}",
+                Path(lexicons) / f"{tier}.h5",
+            )
     except OSError:
         raise
+    backend = _FrozenHitTableBackend(
+        before_hits,
+        after_hits,
+        validation.validation_peak_ids,
+        expected_substrate_id=substrate.substrate_id,
+    )
     results, verification = run_backend_validation(
         lexicon,
         decision.decision_id,
-        [_FrozenHitTableBackend(before_hits, after_hits, validation.validation_peak_ids)],
+        [backend],
     )
-    # The validation artifact's raw bytes include its required output identity;
-    # hashing those bytes here would create a circular identity.  Its complete
-    # split semantics are instead bound below and fingerprinted as provenance.
-    validation_binding_digest = hashlib.sha256(json.dumps(
-        _split_binding(manifest, decision, validation), sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")).hexdigest()
-    provenance = {
-        "stage": "validate",
-        "inputs": {**dict(provenance_record.inputs), "validation_split_binding": validation_binding_digest},
-        "software": dict(provenance_record.software),
-        "lexicon": lexicon.to_dict(),
-    }
+    if backend.substrate_id != substrate.substrate_id:
+        raise ValidationError(
+            "validated frozen-hit-table substrate identity was not established"
+        )
+    # The raw validation artifact contains result_id, which points back to the
+    # stability identity being computed.  Exclude exactly those self-referential
+    # bytes; bind its complete non-circular split semantics instead.
+    provenance_record.inputs["validation_split_binding"] = _validation_split_identity(
+        manifest, decision, validation,
+    )
+    provenance_record.input_scale = len(validation.validation_peak_ids)
+    provenance_record.substrate_id = substrate.substrate_id
+    provenance = StabilityProvenance.from_record(
+        provenance_record,
+        lexicon=lexicon,
+        manifest=manifest,
+        decision=decision,
+        validation=validation,
+    )
+    expected_result_id = stability_result_id(
+        results, verification, provenance, lexicon, manifest, decision, validation,
+    )
+    if validation.result_id == "pending":
+        validation = replace(validation, result_id=expected_result_id, artifact_id="")
     write_stability_artifacts(
         out_dir,
         results,

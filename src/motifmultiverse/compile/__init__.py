@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
-from dataclasses import asdict
+import re
+from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +57,8 @@ from motifmultiverse.schema import (
 
 __all__ = [
     "CompileError", "BackendMissing", "TIERS",
-    "compile_lexicons", "lexicon_semantic_hash", "load_back", "verify_roundtrip",
+    "compile_lexicons", "lexicon_semantic_hash", "load_back",
+    "validate_compiled_lexicon", "verify_roundtrip",
 ]
 
 TIERS = ("core", "expanded", "sensitivity")
@@ -272,6 +275,451 @@ def lexicon_semantic_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays
 _content_hash = lexicon_semantic_hash
 
 
+_COMPILED_MANIFEST_FIELDS = {
+    *(item.name for item in fields(LexiconManifest)),
+    "index",
+    "project",
+    "cross_model_claims_restricted",
+}
+_COMPILED_INDEX_FIELDS = {
+    "index", "pattern_tag", "node_id", "variant_id", "metacluster",
+}
+_COMPILED_MOTIF_DATASETS = {"contrib_scores", "hypothetical_contribs", "sequence"}
+_MOTIF_TYPE_DATASET = {
+    "cwm": ("contrib_scores", "cwm"),
+    "hcwm": ("hypothetical_contribs", "hypothetical_cwm"),
+    "ppm": ("sequence", "ppm"),
+}
+_VARIANT_ID_RE = re.compile(r"^[A-Za-z0-9]+_[A-Za-z0-9]+_\d{2,}$")
+_COMPARISON_FIELDS = {
+    "positive_sets_identical",
+    "negative_sets_identical",
+    "n_positive_here",
+    "n_positive_there",
+    "n_negative_here",
+    "n_negative_there",
+    "only_here",
+    "only_there",
+}
+_SENSITIVITY_TRIGGER_VALUES = {
+    "merge_confidence_not_high",
+    "family_ambiguity",
+    "threshold_sensitive",
+}
+
+
+def _require_exact_json_fields(
+    payload: dict[str, Any],
+    expected: set[str],
+    *,
+    what: str,
+) -> None:
+    missing = expected - set(payload)
+    unknown = set(payload) - expected
+    if missing or unknown:
+        detail = []
+        if missing:
+            detail.append(f"missing {sorted(missing)}")
+        if unknown:
+            detail.append(f"unknown {sorted(unknown)}")
+        raise CompileError(f"{what} schema is not exact: {', '.join(detail)}")
+
+
+def _require_json_type(
+    payload: dict[str, Any],
+    key: str,
+    expected: type | tuple[type, ...],
+    *,
+    what: str,
+) -> Any:
+    value = payload[key]
+    if isinstance(value, bool) and expected is not bool:
+        raise CompileError(f"{what} {key} has type bool, not {expected}")
+    if not isinstance(value, expected):
+        raise CompileError(f"{what} {key} has type {type(value).__name__}, not {expected}")
+    return value
+
+
+def _motif_type_dataset(motif_type: object, *, what: str) -> tuple[str, str]:
+    if not isinstance(motif_type, str) or motif_type not in _MOTIF_TYPE_DATASET:
+        raise CompileError(
+            f"{what} motif_type must be one of {sorted(_MOTIF_TYPE_DATASET)}"
+        )
+    return _MOTIF_TYPE_DATASET[motif_type]
+
+
+def _validate_nested_manifest_schema(payload: dict[str, Any], *, what: str) -> None:
+    for other_tier, comparison in payload["comparisons"].items():
+        if (
+            not isinstance(other_tier, str)
+            or other_tier not in TIERS
+            or other_tier == payload["tier"]
+        ):
+            raise CompileError(f"{what} comparisons has an invalid tier key")
+        if type(comparison) is not dict:
+            raise CompileError(f"{what} comparisons[{other_tier!r}] must be an object")
+        comparison_fields = set(comparison)
+        if comparison_fields not in (
+            _COMPARISON_FIELDS,
+            _COMPARISON_FIELDS | {"warning"},
+        ):
+            raise CompileError(
+                f"{what} comparisons[{other_tier!r}] schema is not exact"
+            )
+        for name in ("positive_sets_identical", "negative_sets_identical"):
+            if type(comparison[name]) is not bool:
+                raise CompileError(
+                    f"{what} comparisons[{other_tier!r}].{name} must be a boolean"
+                )
+        for name in (
+            "n_positive_here",
+            "n_positive_there",
+            "n_negative_here",
+            "n_negative_there",
+        ):
+            if type(comparison[name]) is not int or comparison[name] < 0:
+                raise CompileError(
+                    f"{what} comparisons[{other_tier!r}].{name} "
+                    "must be a non-negative integer"
+                )
+        for name in ("only_here", "only_there"):
+            values = comparison[name]
+            if (
+                type(values) is not list
+                or any(type(value) is not str or not value.strip() for value in values)
+                or values != sorted(set(values))
+            ):
+                raise CompileError(
+                    f"{what} comparisons[{other_tier!r}].{name} "
+                    "must be a sorted unique string array"
+                )
+        if "warning" in comparison and (
+            type(comparison["warning"]) is not str
+            or not comparison["warning"].strip()
+        ):
+            raise CompileError(
+                f"{what} comparisons[{other_tier!r}].warning "
+                "must be a non-empty string"
+            )
+
+    for cluster_id, values in payload["sensitivity_triggers"].items():
+        if type(cluster_id) is not str or not cluster_id.strip():
+            raise CompileError(f"{what} sensitivity_triggers keys must be non-empty strings")
+        if (
+            type(values) is not list
+            or not values
+            or any(type(value) is not str for value in values)
+            or values != list(dict.fromkeys(values))
+            or any(value not in _SENSITIVITY_TRIGGER_VALUES for value in values)
+        ):
+            raise CompileError(
+                f"{what} sensitivity_triggers[{cluster_id!r}] must be a unique "
+                "non-empty array of named compiler triggers"
+            )
+
+
+def validate_compiled_lexicon(
+    manifest_path: str | os.PathLike[str],
+    h5_path: str | os.PathLike[str] | None = None,
+) -> LexiconManifest:
+    """Load and prove one exact compiler-emitted manifest/HDF5 pair.
+
+    This is the public structural loader shared by compile consumers.  It
+    enumerates the complete HDF5 tree emitted by :func:`_write_h5`, rather than
+    trusting a manifest-controlled subset: every root group, motif group, and
+    motif dataset must be accounted for.  The semantic hash is then recomputed
+    with :func:`lexicon_semantic_hash`, the same public algorithm used to emit
+    the manifest.
+    """
+    import h5py
+    import numpy as np
+
+    manifest_source = Path(manifest_path)
+    h5_source = (
+        Path(h5_path)
+        if h5_path is not None
+        else manifest_source.with_name(manifest_source.name.removesuffix(".manifest.json") + ".h5")
+    )
+    try:
+        payload = json.loads(manifest_source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CompileError(f"{manifest_source} is not valid JSON: {exc}") from exc
+    if type(payload) is not dict:
+        raise CompileError(f"{manifest_source} manifest must be a JSON object")
+    _require_exact_json_fields(
+        payload, _COMPILED_MANIFEST_FIELDS, what=f"{manifest_source} manifest",
+    )
+    string_fields = {
+        "tier", "lexicon_content_hash", "schema_version", "motif_type",
+        "loader_backend", "source_registry", "project",
+    }
+    for name in string_fields:
+        value = _require_json_type(payload, name, str, what=f"{manifest_source} manifest")
+        if not value.strip():
+            raise CompileError(f"{manifest_source} manifest {name} must be non-empty")
+    _require_json_type(payload, "n_motifs", int, what=f"{manifest_source} manifest")
+    trim_threshold = _require_json_type(
+        payload, "trim_threshold", (int, float), what=f"{manifest_source} manifest",
+    )
+    if not math.isfinite(trim_threshold):
+        raise CompileError(f"{manifest_source} manifest trim_threshold must be finite")
+    for name in ("include_rc", "cross_model_claims_restricted"):
+        if type(payload[name]) is not bool:
+            raise CompileError(f"{manifest_source} manifest {name} must be a boolean")
+    for name in ("loader_parameters", "comparisons", "sensitivity_triggers"):
+        if type(payload[name]) is not dict:
+            raise CompileError(f"{manifest_source} manifest {name} must be an object")
+    for name in ("pattern_order", "node_ids", "index"):
+        if type(payload[name]) is not list:
+            raise CompileError(f"{manifest_source} manifest {name} must be an array")
+    required_dataset, _required_semantic_name = _motif_type_dataset(
+        payload["motif_type"], what=f"{manifest_source} manifest",
+    )
+    motif_lambda = payload["loader_parameters"].get("motif_lambda_default")
+    if (
+        isinstance(motif_lambda, bool)
+        or not isinstance(motif_lambda, (int, float))
+        or not math.isfinite(motif_lambda)
+    ):
+        raise CompileError(
+            f"{manifest_source} manifest loader_parameters must contain the finite "
+            "resolved motif_lambda_default"
+        )
+    _validate_nested_manifest_schema(
+        payload, what=f"{manifest_source} manifest",
+    )
+
+    manifest_fields = {item.name for item in fields(LexiconManifest)}
+    try:
+        manifest = LexiconManifest(**{key: payload[key] for key in manifest_fields})
+    except (TypeError, ValueError) as exc:
+        raise CompileError(f"{manifest_source} manifest is malformed: {exc}") from exc
+    if manifest.schema_version != LEXICON_MANIFEST_SCHEMA_VERSION:
+        raise CompileError(
+            f"{manifest_source} manifest schema_version must be "
+            f"{LEXICON_MANIFEST_SCHEMA_VERSION!r}"
+        )
+    if manifest.tier not in TIERS:
+        raise CompileError(f"{manifest_source} manifest has unknown tier {manifest.tier!r}")
+    if manifest.n_motifs < 1:
+        raise CompileError(f"{manifest_source} manifest must describe at least one motif")
+    if (
+        len(manifest.lexicon_content_hash) != 64
+        or any(character not in "0123456789abcdef"
+               for character in manifest.lexicon_content_hash)
+    ):
+        raise CompileError(f"{manifest_source} manifest has no lowercase SHA-256 content hash")
+    for name, values in (
+        ("pattern_order", manifest.pattern_order),
+        ("node_ids", manifest.node_ids),
+    ):
+        if any(type(value) is not str or not value.strip() for value in values):
+            raise CompileError(f"{manifest_source} manifest {name} must contain strings")
+        if len(set(values)) != len(values):
+            raise CompileError(f"{manifest_source} manifest has duplicate {name}")
+
+    index = payload["index"]
+    if len(index) != manifest.n_motifs:
+        raise CompileError(f"{manifest_source} manifest index must describe every motif")
+    for position, row in enumerate(index):
+        if type(row) is not dict:
+            raise CompileError(f"{manifest_source} manifest index row {position} must be an object")
+        _require_exact_json_fields(
+            row, _COMPILED_INDEX_FIELDS,
+            what=f"{manifest_source} manifest index row {position}",
+        )
+        if type(row["index"]) is not int:
+            raise CompileError(
+                f"{manifest_source} manifest index row {position} index must be an integer"
+            )
+        if row["index"] != position:
+            raise CompileError(
+                f"{manifest_source} manifest index row {position} has noncanonical index "
+                f"{row['index']!r}"
+            )
+        for name in ("pattern_tag", "node_id", "variant_id", "metacluster"):
+            if type(row[name]) is not str or not row[name].strip():
+                raise CompileError(
+                    f"{manifest_source} manifest index row {position} {name} "
+                    "must be a non-empty string"
+                )
+    pattern_tags = [row["pattern_tag"] for row in index]
+    node_ids = [row["node_id"] for row in index]
+    variant_ids = [row["variant_id"] for row in index]
+    if len(set(pattern_tags)) != len(pattern_tags):
+        raise CompileError(f"{manifest_source} manifest index has duplicate pattern identity")
+    if len(set(node_ids)) != len(node_ids):
+        raise CompileError(f"{manifest_source} manifest index has duplicate node identity")
+    if any(not _VARIANT_ID_RE.fullmatch(variant_id) for variant_id in variant_ids):
+        raise CompileError(
+            f"{manifest_source} manifest index has a malformed variant identity"
+        )
+    if len(set(variant_ids)) != len(variant_ids):
+        raise CompileError(f"{manifest_source} manifest index has duplicate variant identity")
+    if pattern_tags != manifest.pattern_order or node_ids != manifest.node_ids:
+        raise CompileError(
+            f"{manifest_source} manifest index order does not match pattern_order/node_ids"
+        )
+
+    expected_by_group: dict[str, list[str]] = {group: [] for group in MODISCO_GROUPS}
+    ordered: list[tuple[str, str, dict[str, Any]]] = []
+    for row in index:
+        pieces = row["pattern_tag"].split(".")
+        if len(pieces) != 2 or pieces[0] not in expected_by_group:
+            raise CompileError(
+                f"{manifest_source} manifest index pattern_tag "
+                f"{row['pattern_tag']!r} is not compiler-emitted"
+            )
+        group, pattern = pieces
+        expected_pattern = f"pattern_{len(expected_by_group[group])}"
+        if pattern != expected_pattern:
+            raise CompileError(
+                f"{manifest_source} manifest index pattern {pattern!r} is not the next "
+                f"compiler-emitted name {expected_pattern!r}"
+            )
+        if row["metacluster"] != GROUP_METACLUSTER[group]:
+            raise CompileError(
+                f"{manifest_source} manifest index metacluster does not match {group}"
+            )
+        expected_by_group[group].append(pattern)
+        ordered.append((group, pattern, {"node_id": row["node_id"]}))
+    expected_order = [
+        f"{group}.{pattern}"
+        for group in MODISCO_GROUPS
+        for pattern in expected_by_group[group]
+    ]
+    if pattern_tags != expected_order:
+        raise CompileError(f"{manifest_source} manifest index is not in compiler loader order")
+
+    arrays: dict[str, dict[str, Any]] = {}
+    try:
+        with h5py.File(h5_source, "r") as h5:
+            seen_objects: dict[int, str] = {}
+
+            def require_local_object(parent: Any, name: str, path: str) -> Any:
+                link = parent.get(name, getlink=True)
+                if type(link) is not h5py.HardLink:
+                    raise CompileError(
+                        f"{h5_source} HDF5 {path} uses a nonlocal or soft link; "
+                        "compiler-emitted trees contain local hard links only"
+                    )
+                obj = parent[name]
+                address = int(h5py.h5o.get_info(obj.id).addr)
+                if address in seen_objects:
+                    raise CompileError(
+                        f"{h5_source} HDF5 {path} aliases compiler object "
+                        f"{seen_objects[address]!r}"
+                    )
+                seen_objects[address] = path
+                return obj
+
+            expected_groups = {
+                group for group, patterns in expected_by_group.items() if patterns
+            }
+            actual_groups = set(h5.keys())
+            if actual_groups != expected_groups:
+                raise CompileError(
+                    f"{h5_source} HDF5 root groups do not exactly match the manifest "
+                    f"universe: actual={sorted(actual_groups)} expected={sorted(expected_groups)}"
+                )
+            metaclusters = {
+                group: require_local_object(h5, group, group)
+                for group in expected_groups
+            }
+            motif_lengths: set[int] = set()
+            for group in MODISCO_GROUPS:
+                patterns = expected_by_group[group]
+                if not patterns:
+                    continue
+                metacluster = metaclusters[group]
+                if not isinstance(metacluster, h5py.Group):
+                    raise CompileError(f"{h5_source} HDF5 {group} must be a group")
+                if set(metacluster.keys()) != set(patterns):
+                    raise CompileError(
+                        f"{h5_source} HDF5 motifs in {group} do not exactly match the "
+                        f"manifest universe: actual={sorted(metacluster.keys())} "
+                        f"expected={sorted(patterns)}"
+                    )
+            for group, pattern, node in ordered:
+                motif = require_local_object(
+                    metaclusters[group], pattern, f"{group}.{pattern}",
+                )
+                if not isinstance(motif, h5py.Group):
+                    raise CompileError(
+                        f"{h5_source} HDF5 motif {group}.{pattern} must be a group"
+                    )
+                dataset_names = set(motif.keys())
+                if "contrib_scores" not in dataset_names:
+                    raise CompileError(
+                        f"{h5_source} HDF5 motif {group}.{pattern} lacks contrib_scores"
+                    )
+                if required_dataset not in dataset_names:
+                    raise CompileError(
+                        f"{h5_source} HDF5 motif {group}.{pattern} lacks "
+                        f"{required_dataset} required by motif_type={manifest.motif_type!r}"
+                    )
+                if not dataset_names <= _COMPILED_MOTIF_DATASETS:
+                    raise CompileError(
+                        f"{h5_source} HDF5 motif {group}.{pattern} has unindexed dataset/group "
+                        f"{sorted(dataset_names - _COMPILED_MOTIF_DATASETS)}"
+                    )
+                loaded: dict[str, Any] = {}
+                for source_name, semantic_name in (
+                    ("contrib_scores", "cwm"),
+                    ("hypothetical_contribs", "hypothetical_cwm"),
+                    ("sequence", "ppm"),
+                ):
+                    if source_name not in motif:
+                        continue
+                    dataset = require_local_object(
+                        motif,
+                        source_name,
+                        f"{group}.{pattern}/{source_name}",
+                    )
+                    if not isinstance(dataset, h5py.Dataset):
+                        raise CompileError(
+                            f"{h5_source} HDF5 motif {group}.{pattern}/{source_name} "
+                            "must be a dataset"
+                        )
+                    values = np.asarray(dataset)
+                    if values.ndim != 2 or values.shape[1] != 4:
+                        raise CompileError(
+                            f"{h5_source} HDF5 motif {group}.{pattern}/{source_name} "
+                            "must have shape (width, 4)"
+                        )
+                    if values.dtype != np.dtype(float):
+                        raise CompileError(
+                            f"{h5_source} HDF5 motif {group}.{pattern}/{source_name} "
+                            "must contain compiler-emitted float64 values"
+                        )
+                    loaded[semantic_name] = values
+                motif_lengths.add(int(loaded["cwm"].shape[0]))
+                arrays[node["node_id"]] = loaded
+            if len(motif_lengths) != 1:
+                raise CompileError(
+                    f"{h5_source} HDF5 motifs have mixed widths {sorted(motif_lengths)}"
+                )
+    except OSError as exc:
+        raise CompileError(f"{h5_source} is not readable HDF5: {exc}") from exc
+
+    recomputed = lexicon_semantic_hash(
+        ordered,
+        arrays,
+        schema_version=manifest.schema_version,
+        trim_threshold=manifest.trim_threshold,
+        motif_type=manifest.motif_type,
+        include_rc=manifest.include_rc,
+        loader_backend=manifest.loader_backend,
+        loader_parameters=manifest.loader_parameters,
+    )
+    if recomputed != manifest.lexicon_content_hash:
+        raise CompileError(
+            f"{manifest_source} lexicon_content_hash does not match the complete HDF5 "
+            "motif universe and loader semantics"
+        )
+    return manifest
+
+
 def _write_h5(path: Path, ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any) -> None:
     import h5py
     import numpy as np
@@ -421,6 +869,9 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
     unknown = [t for t in tiers if t not in TIERS]
     if unknown:
         raise CompileError(f"unknown tiers {unknown}; expected a subset of {list(TIERS)}")
+    _required_dataset, required_semantic_name = _motif_type_dataset(
+        motif_type, what="compile",
+    )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     # Resolved once, to its effective form, before it is hashed or stored: any
@@ -471,6 +922,19 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                  "variant_id": n["variant_id"], "metacluster": n["metacluster"]}
                 for i, (g, p, n) in enumerate(ordered)
             ]
+
+        missing_loader_arrays = sorted({
+            node["node_id"]
+            for ordered in ordered_by_tier.values()
+            for _, _, node in ordered
+            if required_semantic_name not in arrays[node["node_id"]]
+        })
+        if missing_loader_arrays:
+            raise CompileError(
+                f"motif_type={motif_type!r} requires {required_semantic_name!r} "
+                "for every emitted motif; missing for "
+                f"{missing_loader_arrays}"
+            )
 
         manifests: dict[str, LexiconManifest] = {}
         for tier in tiers:
