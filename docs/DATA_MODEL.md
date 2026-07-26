@@ -193,3 +193,54 @@ not break. It will be removed in a later release; new readers should use `query_
 `analysis_tier` answers *should it enter the analysis lexicon as an independent
 detector?* When they differ, `tier_reason` is mandatory. A single tier field
 silently answers both questions with one value.
+
+## Criterion registry — criterion before implementation
+
+Implemented in `src/motifmultiverse/schema/criteria.py`; the frozen data lives in
+`config/criteria.v1.yaml`. See `docs/CONSTRAINTS.md` (`FP-04`, `FP-08`, `FP-13`)
+and `docs/CONCEPT.md` ("A merge is validated downstream, not by similarity").
+
+A `Criterion` is one versioned, executable rule for one candidate relationship
+between two motifs (`TRUE_DUPLICATE`, `FRAGMENT_MATCH`, `SAME_FAMILY_VARIANT`,
+`AMBIGUOUS_CROSS_FAMILY` in `criteria.v1.yaml`). Each carries a `status`:
+
+| status | meaning |
+|---|---|
+| `FROZEN` | its `predicates` are declared and may be evaluated |
+| `CRITERION_NOT_YET_DEFINED` | the frozen design states no magnitude for it |
+
+Evaluating a `CRITERION_NOT_YET_DEFINED` criterion (`evaluate_criterion`) always
+returns `Decision.DEFERRED`, regardless of how complete the evidence is. This is
+the same discipline `schema.MERGE_CONFIDENCE_CRITERIA` already applies to
+`MergeConfidence` grades: a threshold the design does not justify is recorded as
+a gap, never filled with a plausible-looking number (`FP-13`). `TRUE_DUPLICATE`
+and `FRAGMENT_MATCH` are `CRITERION_NOT_YET_DEFINED` in `criteria.v1.yaml`
+because collapsing motifs is validated by downstream reconstruction, not by a
+similarity score (Concept principle 2), and no document states how much
+reconstruction loss is tolerable. `SAME_FAMILY_VARIANT` and
+`AMBIGUOUS_CROSS_FAMILY` are `FROZEN`: both are structural/categorical checks
+(`is_true` over booleans the caller derives from identity fields, per `FP-03`),
+never a magnitude comparison, so they need no invented threshold.
+
+A `Predicate` is a named-operator check of one evidence field: `ge`, `le`, `eq`,
+`is_true`, or `present`. The evaluator supports only these five; it never calls
+`eval`/`exec` and a predicate can never name an arbitrary Python expression. A
+numeric operator (`ge`/`le`) against a grade-valued field (`merge_confidence`,
+`discovery_tier`, ...) is refused at load time — those fields are dispatched by
+name, and a magnitude comparison over one would smuggle in a scalar the schema
+has already ruled they do not have.
+
+`evaluate_criterion` resolves in this order:
+
+1. `CRITERION_NOT_YET_DEFINED` → `Decision.DEFERRED`, unconditionally.
+2. Evidence missing one of `required_evidence` (absent, or explicitly `None` —
+   never coerced to a false-y placeholder) → `insufficient_evidence_action`.
+3. Otherwise every predicate is checked. All satisfied →
+   `decision_if_matched`. Any unsatisfied → the fail-safe `Decision.REFUSE_MERGE`,
+   never a guessed `COLLAPSE` — the same "never resolve to the permissive branch"
+   rule `schema.MOST_CONSERVATIVE_OUTPUT_MODE` already applies to selection
+   provenance.
+
+Every evaluation returns a `CriterionEvaluation` carrying a non-empty
+`rationale`: a deferral or a refusal is a first-class recorded state (rule 4
+above), not a bare enum value.
