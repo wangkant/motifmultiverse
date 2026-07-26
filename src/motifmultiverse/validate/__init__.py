@@ -11,14 +11,18 @@ import csv
 import hashlib
 import json
 import math
+import os
+import shutil
+import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from numbers import Real
 from pathlib import Path
 from typing import Any
 
-from motifmultiverse.provenance import record
+from motifmultiverse.provenance import record, sha256_file
 from motifmultiverse.schema import (
+    LexiconManifest,
     PeakSplitManifest,
     SchemaError,
     SplitRole,
@@ -39,12 +43,13 @@ from .base import (
 
 __all__ = [
     "AnalysisMode", "BackendUnavailable", "BackendVerification", "CrossFitFold",
-    "DecisionSplitArtifact", "PeakSplitManifest", "SPLIT_ARTIFACT_SCHEMA_VERSION",
+    "DecisionSplitArtifact", "LexiconBinding", "PeakSplitManifest", "SPLIT_ARTIFACT_SCHEMA_VERSION",
     "STABILITY_SCHEMA_VERSION", "StabilityBackend", "StabilityResult", "SplitRole",
     "ValidationError", "ValidationSplitArtifact", "assert_artifact_split_compatibility",
     "assert_cross_fit_compatibility", "assert_split_compatibility",
-    "build_peak_split_manifest", "evaluate_stability", "normalize_backend_output",
-    "peak_split_manifest_checksum", "run_backend_validation", "run",
+    "build_peak_split_manifest", "evaluate_stability", "load_lexicon_binding",
+    "normalize_backend_output", "peak_split_manifest_checksum", "run_backend_validation", "run",
+    "stability_result_id",
     "write_stability_artifacts",
 ]
 
@@ -69,6 +74,63 @@ class BackendUnavailable(ValidationError):
 
 
 @dataclass(frozen=True)
+class LexiconBinding:
+    """The exact compiled lexicon files and semantic hashes an adapter receives."""
+
+    lexicon_identity: str
+    entries: tuple[tuple[str, str, str, str], ...]
+    schema_version: str = STABILITY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.lexicon_identity, str) or not self.lexicon_identity.startswith("lexicons:"):
+            raise ValidationError("lexicon_identity must be a content-addressed lexicons identity")
+        if not isinstance(self.entries, tuple) or not self.entries:
+            raise ValidationError("lexicon binding requires at least one compiled manifest entry")
+        if self.schema_version != STABILITY_SCHEMA_VERSION:
+            raise ValidationError("lexicon binding has an unsupported schema_version")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"lexicon_identity": self.lexicon_identity, "entries": self.entries,
+                "schema_version": self.schema_version}
+
+
+def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
+    """Validate the compiled lexicon manifests and bind every accompanying H5 byte stream."""
+    root = Path(lexicons)
+    if not root.exists():
+        raise ValidationError(f"compiled lexicons path does not exist: {root}")
+    if not root.is_dir():
+        raise ValidationError(f"compiled lexicons path must be a directory: {root}")
+    manifest_paths = sorted(root.glob("*.manifest.json"))
+    if not manifest_paths:
+        raise ValidationError(f"compiled lexicons directory has no *.manifest.json: {root}")
+    entry_rows: list[tuple[str, str, str, str]] = []
+    manifest_fields = {item.name for item in fields(LexiconManifest)}
+    for manifest_path in manifest_paths:
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, Mapping):
+                raise TypeError("manifest must be an object")
+            manifest = LexiconManifest(**{key: value for key, value in payload.items() if key in manifest_fields})
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"{manifest_path} is not a valid compiled lexicon manifest: {exc}") from exc
+        if (
+            not isinstance(manifest.lexicon_content_hash, str)
+            or len(manifest.lexicon_content_hash) != 64
+            or any(char not in "0123456789abcdef" for char in manifest.lexicon_content_hash)
+        ):
+            raise ValidationError(f"{manifest_path} has no valid lexicon_content_hash")
+        h5_path = root / f"{manifest.tier}.h5"
+        if not h5_path.is_file():
+            raise ValidationError(f"compiled lexicon named by {manifest_path} is missing: {h5_path}")
+        entry_rows.append((manifest.tier, manifest.lexicon_content_hash,
+                           sha256_file(manifest_path), sha256_file(h5_path)))
+    entries = tuple(sorted(entry_rows))
+    digest = hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return LexiconBinding(lexicon_identity=f"lexicons:{digest}", entries=entries)
+
+
+@dataclass(frozen=True)
 class StabilityResult:
     """Versioned, affected-subset evidence for one downstream decision."""
 
@@ -83,6 +145,10 @@ class StabilityResult:
     status: str
     power_statement: str
     affected_interval: tuple[float, float] | None = None
+    backend: str = ""
+    backend_version: str = ""
+    backend_result_id: str = ""
+    lexicon_identity: str = ""
     schema_version: str = STABILITY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -114,6 +180,10 @@ class StabilityResult:
             raise ValidationError("stability status must be a non-empty string")
         if not isinstance(self.power_statement, str) or not self.power_statement.strip():
             raise ValidationError("stability power_statement must be a non-empty string")
+        for name in ("backend", "backend_version", "backend_result_id", "lexicon_identity"):
+            value = getattr(self, name)
+            if value and (not isinstance(value, str) or not value.strip()):
+                raise ValidationError(f"stability {name} must be a non-empty string when bound")
         if self.affected_interval is not None:
             if (
                 not isinstance(self.affected_interval, tuple)
@@ -144,6 +214,8 @@ class BackendVerification:
     backend_version: str
     status: str
     detail: str = ""
+    backend_result_id: str | None = None
+    lexicon_identity: str = ""
     schema_version: str = STABILITY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -155,6 +227,14 @@ class BackendVerification:
             raise ValidationError("backend verification status must be VERIFIED or UNVERIFIED")
         if not isinstance(self.detail, str):
             raise ValidationError("backend verification detail must be a string")
+        if self.backend_result_id is not None and (
+            not isinstance(self.backend_result_id, str) or not self.backend_result_id.strip()
+        ):
+            raise ValidationError("backend verification backend_result_id must be non-empty or None")
+        if self.lexicon_identity and (
+            not isinstance(self.lexicon_identity, str) or not self.lexicon_identity.startswith("lexicons:")
+        ):
+            raise ValidationError("backend verification lexicon_identity must be bound when present")
         if self.schema_version != STABILITY_SCHEMA_VERSION:
             raise ValidationError("backend verification has an unsupported schema_version")
 
@@ -304,11 +384,13 @@ def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityRe
 
 
 def run_backend_validation(
-    lexicons: str | Path,
+    lexicons: LexiconBinding,
     decision_id: str,
     backends: Sequence[StabilityBackend],
 ) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
     """Run independent adapters without converting a missing optional one to success."""
+    if not isinstance(lexicons, LexiconBinding):
+        raise ValidationError("backend validation requires a validated LexiconBinding")
     results: list[StabilityResult] = []
     verification: list[BackendVerification] = []
     for backend in backends:
@@ -319,32 +401,83 @@ def run_backend_validation(
             raise ValidationError("stability backend requires non-empty name and version")
         try:
             before, after = backend.compare(lexicons, decision_id)
-            results.append(evaluate_stability(decision_id, before, after))
-            verification.append(BackendVerification(name, version, "VERIFIED"))
+            before = normalize_backend_output(before, backend=name)
+            after = normalize_backend_output(after, backend=name)
+            backend_result_id = "backend-result:" + hashlib.sha256(json.dumps({
+                "after": after.to_dict("records"), "backend": name, "backend_version": version,
+                "before": before.to_dict("records"), "decision_id": decision_id,
+                "lexicon_identity": lexicons.lexicon_identity,
+            }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            result = replace(
+                evaluate_stability(decision_id, before, after),
+                backend=name,
+                backend_version=version,
+                backend_result_id=backend_result_id,
+                lexicon_identity=lexicons.lexicon_identity,
+            )
+            results.append(result)
+            verification.append(BackendVerification(
+                name, version, "VERIFIED", backend_result_id=backend_result_id,
+                lexicon_identity=lexicons.lexicon_identity,
+            ))
         except BackendUnavailable as exc:
             detail = f"{name} backend unavailable: {exc}"
             if not optional:
                 raise BackendUnavailable(detail) from exc
-            verification.append(BackendVerification(name, version, "UNVERIFIED", detail))
+            verification.append(BackendVerification(
+                name, version, "UNVERIFIED", detail, lexicon_identity=lexicons.lexicon_identity,
+            ))
     return tuple(results), tuple(verification)
 
 
-def _artifact_id(
+def _split_binding(
+    manifest: PeakSplitManifest,
+    decision: DecisionSplitArtifact,
+    validation: ValidationSplitArtifact,
+) -> dict[str, Any]:
+    """The result-ID binding intentionally excludes its own circular result_id/artifact_id."""
+    return {
+        "decision_artifact_id": decision.artifact_id,
+        "manifest_checksum": manifest.checksum,
+        "validation": {
+            "cross_fit_folds": [
+                {"fold_id": fold.fold_id, "decision_peak_ids": sorted(fold.decision_peak_ids),
+                 "evaluation_peak_ids": sorted(fold.evaluation_peak_ids)}
+                for fold in validation.cross_fit_folds
+            ],
+            "decision_id": validation.decision_id,
+            "decision_peak_ids": sorted(validation.decision_peak_ids),
+            "mode": validation.mode.value,
+            "schema_version": validation.schema_version,
+            "validation_peak_ids": sorted(validation.validation_peak_ids),
+        },
+    }
+
+
+def stability_result_id(
     results: Sequence[StabilityResult],
     verification: Sequence[BackendVerification],
     provenance: Mapping[str, Any],
+    lexicon: LexiconBinding,
     manifest: PeakSplitManifest,
     decision: DecisionSplitArtifact,
     validation: ValidationSplitArtifact,
 ) -> str:
+    """Canonical emitted artifact identity, and the required ValidationSplitArtifact.result_id.
+
+    The identity deliberately excludes only the output's self-reference.  It
+    therefore commits to normalized backend results, verification rows, full
+    provenance, every compiled lexicon byte/hash binding, and split semantics.
+    """
     payload = {
-        "decision_artifact_id": decision.artifact_id,
-        "manifest_checksum": manifest.checksum,
+        "lexicon": lexicon.to_dict(),
         "provenance": dict(provenance),
-        "results": [row.to_dict() for row in results],
+        "results": [row.to_dict() for row in sorted(results, key=lambda row: row.backend_result_id)],
         "schema_version": STABILITY_SCHEMA_VERSION,
-        "validation_artifact_id": validation.artifact_id,
-        "verification": [asdict(row) for row in verification],
+        "split_binding": _split_binding(manifest, decision, validation),
+        "verification": [asdict(row) for row in sorted(
+            verification, key=lambda row: (row.backend, row.backend_version, row.status, row.detail)
+        )],
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -361,13 +494,15 @@ def write_stability_artifacts(
     decision: DecisionSplitArtifact,
     validation: ValidationSplitArtifact,
     provenance: Mapping[str, Any],
+    lexicon: LexiconBinding,
 ) -> tuple[Path, Path]:
-    """Persist typed stability evidence and backend verification with one identity."""
-    import pandas as pd
+    """Atomically publish a coherent, fully-bound stability artifact pair."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     assert_artifact_split_compatibility(manifest, decision, validation)
+    if not isinstance(lexicon, LexiconBinding):
+        raise ValidationError("stability artifacts require a validated LexiconBinding")
     result_list = tuple(sorted(results, key=lambda row: json.dumps(
         row.to_dict(), sort_keys=True, separators=(",", ":")
     )))
@@ -378,11 +513,27 @@ def write_stability_artifacts(
         raise ValidationError("stability result decision_id does not match the bound split artifact")
     if not isinstance(provenance, Mapping) or not provenance:
         raise ValidationError("stability artifacts require provenance")
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    artifact_id = _artifact_id(
-        result_list, verification_list, provenance, manifest, decision, validation
+    for row in result_list:
+        matches = [entry for entry in verification_list if (
+            entry.status == "VERIFIED" and entry.backend == row.backend
+            and entry.backend_version == row.backend_version
+            and entry.backend_result_id == row.backend_result_id
+            and entry.lexicon_identity == row.lexicon_identity == lexicon.lexicon_identity
+        )]
+        if len(matches) != 1:
+            raise ValidationError("every stability result must link to exactly one VERIFIED backend row")
+    verified_ids = {entry.backend_result_id for entry in verification_list if entry.status == "VERIFIED"}
+    if verified_ids != {row.backend_result_id for row in result_list}:
+        raise ValidationError("every VERIFIED backend row must link to exactly one stability result")
+    if any(entry.lexicon_identity != lexicon.lexicon_identity for entry in verification_list):
+        raise ValidationError("backend verification lexicon identity does not match the bound lexicons")
+    artifact_id = stability_result_id(
+        result_list, verification_list, provenance, lexicon, manifest, decision, validation
     )
+    if validation.result_id != artifact_id:
+        raise ValidationError(
+            "validation split artifact result_id must equal the canonical stability artifact identity"
+        )
     metadata = {
         b"motifmultiverse.artifact_id": artifact_id.encode(),
         b"motifmultiverse.schema_version": STABILITY_SCHEMA_VERSION.encode(),
@@ -392,6 +543,7 @@ def write_stability_artifacts(
         b"motifmultiverse.split_manifest_checksum": manifest.checksum.encode(),
         b"motifmultiverse.decision_artifact_id": decision.artifact_id.encode(),
         b"motifmultiverse.validation_artifact_id": validation.artifact_id.encode(),
+        b"motifmultiverse.lexicon_identity": lexicon.lexicon_identity.encode(),
     }
     rows: list[dict[str, Any]] = []
     for result in result_list:
@@ -404,28 +556,62 @@ def write_stability_artifacts(
             "split_manifest_checksum": manifest.checksum,
             "decision_artifact_id": decision.artifact_id,
             "validation_artifact_id": validation.artifact_id,
+            "lexicon_identity": lexicon.lexicon_identity,
             "provenance": json.dumps(dict(provenance), sort_keys=True, separators=(",", ":")),
         })
         rows.append(row)
-    result_path = out / "stability_results.parquet"
-    table = pa.Table.from_pandas(
-        pd.DataFrame(rows, columns=_PERSISTED_RESULT_COLUMNS), preserve_index=False
-    )
-    pq.write_table(table.replace_schema_metadata(metadata), result_path)
-    verification_path = out / "backend_verification.tsv"
-    fields = ["backend", "backend_version", "status", "detail", "schema_version", "artifact_id",
-              "split_manifest_checksum", "decision_artifact_id", "validation_artifact_id"]
-    with verification_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
-        writer.writeheader()
-        for item in verification_list:
-            writer.writerow({
-                **asdict(item), "artifact_id": artifact_id,
-                "split_manifest_checksum": manifest.checksum,
-                "decision_artifact_id": decision.artifact_id,
-                "validation_artifact_id": validation.artifact_id,
-            })
-    return result_path, verification_path
+    out = Path(out_dir)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix=f".{out.name}.stage-", dir=out.parent))
+    backup = out.with_name(f".{out.name}.previous")
+    result_path = stage / "stability_results.parquet"
+    arrow_schema = pa.schema([
+        pa.field("decision_id", pa.string()), pa.field("n_affected_peaks", pa.int64()),
+        pa.field("n_affected_hits", pa.int64()), pa.field("family_coefficient_share", pa.float64()),
+        pa.field("paired_delta_reconstruction_affected", pa.float64()),
+        pa.field("paired_delta_reconstruction_all", pa.float64()), pa.field("hit_jaccard", pa.float64()),
+        pa.field("coefficient_conservation", pa.float64()), pa.field("status", pa.string()),
+        pa.field("power_statement", pa.string()), pa.field("affected_interval", pa.string()),
+        pa.field("backend", pa.string()), pa.field("backend_version", pa.string()),
+        pa.field("backend_result_id", pa.string()), pa.field("lexicon_identity", pa.string()),
+        pa.field("schema_version", pa.string()), pa.field("artifact_id", pa.string()),
+        pa.field("split_manifest_checksum", pa.string()), pa.field("decision_artifact_id", pa.string()),
+        pa.field("validation_artifact_id", pa.string()), pa.field("provenance", pa.string()),
+    ], metadata=metadata)
+    try:
+        table = pa.Table.from_pylist(rows, schema=arrow_schema)
+        pq.write_table(table, result_path)
+        verification_path = stage / "backend_verification.tsv"
+        fields = ["backend", "backend_version", "status", "detail", "backend_result_id",
+                  "lexicon_identity", "schema_version", "artifact_id", "split_manifest_checksum",
+                  "decision_artifact_id", "validation_artifact_id", "provenance"]
+        with verification_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
+            writer.writeheader()
+            for item in verification_list:
+                writer.writerow({
+                    **asdict(item), "artifact_id": artifact_id,
+                    "split_manifest_checksum": manifest.checksum,
+                    "decision_artifact_id": decision.artifact_id,
+                    "validation_artifact_id": validation.artifact_id,
+                    "provenance": json.dumps(dict(provenance), sort_keys=True, separators=(",", ":")),
+                })
+        (stage / "provenance.json").write_text(
+            json.dumps([dict(provenance)], indent=2, sort_keys=True), encoding="utf-8"
+        )
+        if backup.exists():
+            shutil.rmtree(backup)
+        if out.exists():
+            os.replace(out, backup)
+        os.replace(stage, out)
+        if backup.exists():
+            shutil.rmtree(backup)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        if backup.exists() and not out.exists():
+            os.replace(backup, out)
+        raise
+    return out / "stability_results.parquet", out / "backend_verification.tsv"
 
 
 class _FrozenHitTableBackend(StabilityBackend):
@@ -499,23 +685,37 @@ def run(
     validation_artifact: str | Path,
 ) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
     """Validate frozen before/after hit tables under an exact split binding."""
+    lexicon = load_lexicon_binding(lexicons)
     manifest = _read_manifest(split_manifest)
     decision = _read_artifact(decision_artifact, "decision", manifest)
     validation = _read_artifact(validation_artifact, "validation", manifest)
     assert_artifact_split_compatibility(manifest, decision, validation)
     provenance_record = record("validate")
     try:
-        for source in (before_hits, after_hits, split_manifest, decision_artifact, validation_artifact):
+        for source in (before_hits, after_hits, split_manifest, decision_artifact):
             provenance_record.add_input(source)
+        for manifest_path in sorted(Path(lexicons).glob("*.manifest.json")):
+            provenance_record.add_input(manifest_path)
+            provenance_record.add_input(Path(lexicons) / f"{manifest_path.name.removesuffix('.manifest.json')}.h5")
     except OSError:
-        provenance_record.write(out_dir)
         raise
-    provenance_record.write(out_dir)
     results, verification = run_backend_validation(
-        lexicons,
+        lexicon,
         decision.decision_id,
         [_FrozenHitTableBackend(before_hits, after_hits, validation.validation_peak_ids)],
     )
+    # The validation artifact's raw bytes include its required output identity;
+    # hashing those bytes here would create a circular identity.  Its complete
+    # split semantics are instead bound below and fingerprinted as provenance.
+    validation_binding_digest = hashlib.sha256(json.dumps(
+        _split_binding(manifest, decision, validation), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    provenance = {
+        "stage": "validate",
+        "inputs": {**dict(provenance_record.inputs), "validation_split_binding": validation_binding_digest},
+        "software": dict(provenance_record.software),
+        "lexicon": lexicon.to_dict(),
+    }
     write_stability_artifacts(
         out_dir,
         results,
@@ -523,10 +723,7 @@ def run(
         manifest=manifest,
         decision=decision,
         validation=validation,
-        provenance={
-            "stage": "validate",
-            "inputs": dict(provenance_record.inputs),
-            "software": dict(provenance_record.software),
-        },
+        provenance=provenance,
+        lexicon=lexicon,
     )
     return results, verification

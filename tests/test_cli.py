@@ -1,14 +1,23 @@
 """CLI tests: all eight subcommands expose real --help and record provenance (T-08/T-09)."""
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pandas as pd
 import pytest
 
 from motifmultiverse.cli import build_parser, main
+from motifmultiverse.provenance import record, sha256_file
 from motifmultiverse.schema import build_peak_split_manifest
-from motifmultiverse.validate import DecisionSplitArtifact, ValidationSplitArtifact
+from motifmultiverse.validate import (
+    DecisionSplitArtifact,
+    StabilityBackend,
+    ValidationSplitArtifact,
+    load_lexicon_binding,
+    run_backend_validation,
+    stability_result_id,
+)
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
@@ -58,6 +67,13 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
 def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_path):
     lexicons = tmp_path / "lexicons"
     lexicons.mkdir()
+    (lexicons / "core.h5").write_bytes(b"compiled-lexicon")
+    (lexicons / "core.manifest.json").write_text(json.dumps({
+        "tier": "core", "lexicon_content_hash": "a" * 64, "n_motifs": 1,
+        "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
+        "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
+        "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
+    }), encoding="utf-8")
     rows = [
         {"peak_id": "p-validation", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0},
     ]
@@ -80,14 +96,51 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
         decision_peak_ids=frozenset({"p-discovery"}),
         validation_peak_ids=frozenset({"p-validation"}),
     )
-    validation = ValidationSplitArtifact.create(
-        manifest=manifest, decision_id="decision:cli", result_id="stability:cli",
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id="decision:cli", result_id="pending",
         decision_peak_ids=frozenset({"p-discovery"}),
         validation_peak_ids=frozenset({"p-validation"}),
     )
     decision_path = tmp_path / "decision-split.json"
     validation_path = tmp_path / "validation-split.json"
     decision_path.write_text(json.dumps(decision.to_dict()), encoding="utf-8")
+    validation_path.write_text(json.dumps(provisional.to_dict()), encoding="utf-8")
+    binding = load_lexicon_binding(lexicons)
+
+    class _FrozenBackend(StabilityBackend):
+        name = "frozen-hit-table"
+        version = "1"
+
+        def compare(self, bound_lexicons, decision_id):
+            return pd.read_parquet(before), pd.read_parquet(after)
+
+    results, verification = run_backend_validation(binding, decision.decision_id, [_FrozenBackend()])
+    input_hashes = {
+        path.name: sha256_file(path)
+        for path in (before, after, manifest_path, decision_path, lexicons / "core.manifest.json", lexicons / "core.h5")
+    }
+    validation_binding = {
+        "decision_artifact_id": decision.artifact_id,
+        "manifest_checksum": manifest.checksum,
+        "validation": {
+            "cross_fit_folds": [], "decision_id": provisional.decision_id,
+            "decision_peak_ids": sorted(provisional.decision_peak_ids), "mode": provisional.mode.value,
+            "schema_version": provisional.schema_version,
+            "validation_peak_ids": sorted(provisional.validation_peak_ids),
+        },
+    }
+    input_hashes["validation_split_binding"] = hashlib.sha256(
+        json.dumps(validation_binding, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    provenance = {"stage": "validate", "inputs": input_hashes,
+                  "software": record("validate").software,
+                  "lexicon": binding.to_dict()}
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id="decision:cli",
+        result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),
+        decision_peak_ids=provisional.decision_peak_ids,
+        validation_peak_ids=provisional.validation_peak_ids,
+    )
     validation_path.write_text(json.dumps(validation.to_dict()), encoding="utf-8")
     out = tmp_path / "validation"
 
@@ -100,6 +153,11 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
     assert (out / "stability_results.parquet").exists()
     assert (out / "backend_verification.tsv").exists()
 
+    unsupported_out = tmp_path / "unsupported-backend"
+    unsupported_argv = [str(unsupported_out) if value == str(out) else value for value in argv]
+    assert main([*unsupported_argv, "--fimo-heldout"]) == 4
+    assert not unsupported_out.exists()
+
     # A split-bound validation command must not silently include decision peaks.
     corrupt = pd.read_parquet(after)
     corrupt.loc[len(corrupt)] = {
@@ -109,7 +167,7 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
     refused_out = tmp_path / "refused-validation"
     refused_argv = [str(refused_out) if value == str(out) else value for value in argv]
     assert main(refused_argv) == 4
-    assert not (refused_out / "stability_results.parquet").exists()
+    assert not refused_out.exists()
 
 
 def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):

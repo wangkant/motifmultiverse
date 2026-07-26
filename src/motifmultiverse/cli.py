@@ -355,6 +355,18 @@ def _run_compile(ns: argparse.Namespace) -> int:
 def _run_validate(ns: argparse.Namespace) -> int:
     from motifmultiverse import validate as validate_mod
 
+    requested = [
+        flag for flag, enabled in (
+            ("--fimo-heldout", ns.fimo_heldout),
+            ("--finemo-pilot", ns.finemo_pilot),
+            ("--matched-peaks", ns.matched_peaks),
+        ) if enabled
+    ]
+    if requested:
+        raise SchemaError(
+            f"{', '.join(requested)} is not yet an adapter input; refusing a semantic no-op. "
+            "Supply normalized frozen hit tables only."
+        )
     results, verification = validate_mod.run(
         ns.lexicons,
         ns.out,

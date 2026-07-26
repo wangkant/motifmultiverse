@@ -1,6 +1,7 @@
 """Validation split provenance tests (Task 13)."""
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import pandas as pd
@@ -14,6 +15,7 @@ from motifmultiverse.validate import (
     BackendVerification,
     CrossFitFold,
     DecisionSplitArtifact,
+    LexiconBinding,
     PeakSplitManifest,
     StabilityBackend,
     StabilityResult,
@@ -23,8 +25,10 @@ from motifmultiverse.validate import (
     assert_split_compatibility,
     build_peak_split_manifest,
     evaluate_stability,
+    load_lexicon_binding,
     normalize_backend_output,
     run_backend_validation,
+    stability_result_id,
     write_stability_artifacts,
 )
 
@@ -615,6 +619,48 @@ def test_stability_normalization_rejects_corrupt_backend_output(column, value):
         normalize_backend_output(rows, backend="test-backend")
 
 
+@pytest.mark.parametrize("output, match", [
+    ({"peak_id": ["p"]}, "DataFrame"),
+    (pd.DataFrame(), "missing standardized"),
+    (pd.DataFrame(columns=["peak_id", "hit_id", "coefficient", "reconstruction"]), "cannot be empty"),
+    (pd.DataFrame([{"peak_id": "p", "hit_id": "h", "coefficient": True, "reconstruction": 0.0}]), "numeric"),
+    (pd.DataFrame([
+        {"peak_id": "p", "hit_id": "h", "coefficient": 1.0, "reconstruction": 0.0},
+        {"peak_id": "p", "hit_id": "h", "coefficient": 2.0, "reconstruction": 0.0},
+    ]), "duplicate"),
+])
+def test_stability_normalization_negative_controls_cover_type_empty_and_identity(output, match):
+    with pytest.raises(SchemaError, match=match):
+        normalize_backend_output(output, backend="control")
+
+
+def test_stability_refuses_inconsistent_peak_reconstruction_and_unpaired_peak_sets():
+    inconsistent = pd.DataFrame([
+        {"peak_id": "p", "hit_id": "a", "coefficient": 1.0, "reconstruction": 0.0},
+        {"peak_id": "p", "hit_id": "b", "coefficient": 1.0, "reconstruction": 1.0},
+    ])
+    with pytest.raises(SchemaError, match="multiple reconstruction"):
+        evaluate_stability("decision:control", inconsistent, inconsistent)
+    with pytest.raises(SchemaError, match="same peak identities"):
+        evaluate_stability("decision:control", _hit_table(total=1), _hit_table(total=2))
+
+
+def test_stability_coefficient_cancellation_and_none_similarity_semantics():
+    before = pd.DataFrame([
+        {"peak_id": "p", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0},
+    ])
+    after = pd.DataFrame([
+        {"peak_id": "p", "hit_id": "new", "coefficient": 0.0, "reconstruction": 1.0},
+    ])
+    changed = evaluate_stability("decision:control", before, after)
+    assert changed.family_coefficient_share == 0.0
+    assert changed.hit_jaccard == 0.0
+    assert changed.coefficient_conservation is None
+    unchanged = evaluate_stability("decision:control", before, before)
+    assert unchanged.hit_jaccard is None
+    assert unchanged.coefficient_conservation is None
+
+
 class _UnavailableBackend(StabilityBackend):
     name = "optional-missing"
     version = "1"
@@ -632,9 +678,10 @@ class _AvailableBackend(StabilityBackend):
         return _hit_table(), _hit_table(merged=True)
 
 
-def test_missing_optional_backend_is_persisted_unverified_without_erasing_verified_results():
+def test_missing_optional_backend_is_persisted_unverified_without_erasing_verified_results(tmp_path):
     results, verification = run_backend_validation(
-        "lexicons", "decision:backend", [_UnavailableBackend(), _AvailableBackend()],
+        load_lexicon_binding(_lexicons(tmp_path)), "decision:backend",
+        [_UnavailableBackend(), _AvailableBackend()],
     )
 
     assert [result.decision_id for result in results] == ["decision:backend"]
@@ -649,6 +696,7 @@ def test_stability_result_satisfies_the_adjudication_evidence_protocol():
 
 
 def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
     manifest = _manifest()
     decision = DecisionSplitArtifact.create(
         manifest=manifest,
@@ -656,22 +704,30 @@ def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
         decision_peak_ids=frozenset({"p-discovery"}),
         validation_peak_ids=frozenset({"p-validation-a"}),
     )
-    validation = ValidationSplitArtifact.create(
+    provisional = ValidationSplitArtifact.create(
         manifest=manifest,
         decision_id="decision:artifact",
-        result_id="stability:artifact",
+        result_id="pending",
         decision_peak_ids=frozenset({"p-discovery"}),
         validation_peak_ids=frozenset({"p-validation-a"}),
     )
-    result = evaluate_stability("decision:artifact", _hit_table(), _hit_table(merged=True))
+    results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
+    provenance = {"stage": "test", "input": "fixed", "lexicon": binding.to_dict()}
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id,
+        result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),
+        decision_peak_ids=provisional.decision_peak_ids,
+        validation_peak_ids=provisional.validation_peak_ids,
+    )
     results_path, verification_path = write_stability_artifacts(
         tmp_path,
-        [result],
-        [BackendVerification("frozen", "1", "VERIFIED")],
+        results,
+        verification,
         manifest=manifest,
         decision=decision,
         validation=validation,
-        provenance={"stage": "test", "input": "fixed"},
+        provenance=provenance,
+        lexicon=binding,
     )
 
     import pyarrow.parquet as pq
@@ -684,6 +740,7 @@ def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
 
 
 def test_stability_artifact_writer_refuses_a_manifest_mismatch(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
     manifest = _manifest()
     other_manifest = build_peak_split_manifest({
         **manifest.assignments,
@@ -707,5 +764,124 @@ def test_stability_artifact_writer_refuses_a_manifest_mismatch(tmp_path):
     with pytest.raises(SchemaError, match="checksum"):
         write_stability_artifacts(
             tmp_path, [result], [], manifest=manifest, decision=decision,
-            validation=validation, provenance={"stage": "test"},
+            validation=validation, provenance={"stage": "test"}, lexicon=binding,
         )
+
+
+def _lexicons(tmp_path, *, content_hash="a" * 64):
+    lexicons = tmp_path / "lexicons"
+    lexicons.mkdir()
+    (lexicons / "core.h5").write_bytes(b"frozen-core-content")
+    (lexicons / "core.manifest.json").write_text(json.dumps({
+        "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
+        "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
+        "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
+        "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
+    }), encoding="utf-8")
+    return lexicons
+
+
+def test_lexicon_binding_requires_a_real_content_addressed_compiled_lexicon(tmp_path):
+    with pytest.raises(SchemaError, match="does not exist"):
+        load_lexicon_binding(tmp_path / "missing")
+    lexicons = _lexicons(tmp_path)
+    binding = load_lexicon_binding(lexicons)
+    assert isinstance(binding, LexiconBinding)
+    assert binding.lexicon_identity.startswith("lexicons:")
+    (lexicons / "core.h5").write_bytes(b"tampered")
+    assert load_lexicon_binding(lexicons).lexicon_identity != binding.lexicon_identity
+
+
+def test_backend_results_are_bound_to_the_backend_and_lexicon_identity(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    results, verification = run_backend_validation(
+        binding, "decision:backend", [_AvailableBackend()],
+    )
+
+    assert results[0].backend == verification[0].backend == "available"
+    assert results[0].backend_result_id == verification[0].backend_result_id
+    assert results[0].lexicon_identity == verification[0].lexicon_identity == binding.lexicon_identity
+
+
+def test_stability_result_id_changes_with_lexicon_identity_and_cannot_match_an_arbitrary_result_id(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    manifest = _manifest()
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:identity",
+        decision_peak_ids=frozenset({"p-discovery"}), validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id="decision:identity", result_id="arbitrary",
+        decision_peak_ids=frozenset({"p-discovery"}), validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
+    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    expected = stability_result_id(results, verification, provenance, binding, manifest, decision, validation)
+
+    assert expected.startswith("stability:")
+    assert expected != validation.result_id
+    with pytest.raises(SchemaError, match="result_id"):
+        write_stability_artifacts(
+            tmp_path / "out", results, verification, manifest=manifest, decision=decision,
+            validation=validation, provenance=provenance, lexicon=binding,
+        )
+
+
+def test_empty_stability_artifact_has_explicit_schema_and_unverified_backend_row(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    manifest = _manifest()
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:empty",
+        decision_peak_ids=frozenset({"p-discovery"}), validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id, result_id="pending",
+        decision_peak_ids=decision.decision_peak_ids, validation_peak_ids=decision.validation_peak_ids,
+    )
+    verification = [BackendVerification(
+        "missing", "1", "UNVERIFIED", "missing backend", lexicon_identity=binding.lexicon_identity,
+    )]
+    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id,
+        result_id=stability_result_id([], verification, provenance, binding, manifest, decision, provisional),
+        decision_peak_ids=decision.decision_peak_ids, validation_peak_ids=decision.validation_peak_ids,
+    )
+    result_path, verification_path = write_stability_artifacts(
+        tmp_path / "out", [], verification, manifest=manifest, decision=decision,
+        validation=validation, provenance=provenance, lexicon=binding,
+    )
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    schema = pq.read_schema(result_path)
+    assert schema.field("n_affected_peaks").type == pa.int64()
+    assert schema.metadata[b"motifmultiverse.artifact_id"] == validation.result_id.encode()
+    assert "UNVERIFIED" in verification_path.read_text(encoding="utf-8")
+
+
+def test_unlinked_backend_result_refuses_before_any_artifact_is_published(tmp_path):
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    manifest = _manifest()
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:linked",
+        decision_peak_ids=frozenset({"p-discovery"}), validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id, result_id="pending",
+        decision_peak_ids=decision.decision_peak_ids, validation_peak_ids=decision.validation_peak_ids,
+    )
+    results, verification = run_backend_validation(binding, decision.decision_id, [_AvailableBackend()])
+    provenance = {"stage": "test", "inputs": {}, "software": {}, "lexicon": binding.to_dict()}
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id,
+        result_id=stability_result_id(results, verification, provenance, binding, manifest, decision, provisional),
+        decision_peak_ids=decision.decision_peak_ids, validation_peak_ids=decision.validation_peak_ids,
+    )
+    with pytest.raises(SchemaError, match="exactly one VERIFIED"):
+        write_stability_artifacts(
+            tmp_path / "refused", [replace(results[0], backend_result_id="forged")], verification,
+            manifest=manifest, decision=decision, validation=validation,
+            provenance=provenance, lexicon=binding,
+        )
+    assert not (tmp_path / "refused").exists()
