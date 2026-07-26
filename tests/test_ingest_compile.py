@@ -465,6 +465,34 @@ def test_loader_parameters_propagate_to_roundtrip_verification(tmp_path, monkeyp
     assert captured["include_rc"] is True
 
 
+def test_loader_parameters_hash_by_effective_value_not_spelling(tmp_path):
+    """The hash must track what the loader actually does, not how the caller spelled it.
+
+    `loader_parameters=None` and `loader_parameters={}` both resolve to the same
+    effective configuration at read time -- `load_back` falls back to
+    `motif_lambda_default=0.7` in both cases -- so they must content-address
+    identically. A spelling that changes the *effective* value
+    (`motif_lambda_default=0.5` instead of the 0.7 default) must still change the
+    hash: this is not a return to "the hash ignores loader_parameters", it is "the
+    hash tracks the resolved value, not the unresolved spelling" (round-1 review
+    finding 1).
+    """
+    registry = _registry(tmp_path)
+    none_spelling = compile_mod.compile_lexicons(
+        registry, tmp_path / "none", loader_parameters=None)
+    empty_spelling = compile_mod.compile_lexicons(
+        registry, tmp_path / "empty", loader_parameters={})
+    assert (none_spelling["core"].lexicon_content_hash
+            == empty_spelling["core"].lexicon_content_hash)
+    assert none_spelling["core"].loader_parameters == empty_spelling["core"].loader_parameters
+
+    different = compile_mod.compile_lexicons(
+        registry, tmp_path / "different",
+        loader_parameters={"motif_lambda_default": 0.5})
+    assert (different["core"].lexicon_content_hash
+            != none_spelling["core"].lexicon_content_hash)
+
+
 def test_a_lexicon_of_mixed_motif_lengths_is_refused(tmp_path):
     """The loader stacks every motif into one array, so lengths must agree."""
     registry = _registry(tmp_path)

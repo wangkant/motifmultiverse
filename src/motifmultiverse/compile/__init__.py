@@ -294,6 +294,28 @@ def _compare(tier: str, index: dict[str, list[dict[str, Any]]]) -> dict[str, dic
     return out
 
 
+#: The loader-side defaults ``load_back`` applies for any key ``loader_parameters``
+#: leaves unset. Kept as data, in one place, so ``_resolve_loader_parameters`` is
+#: the *only* place a fallback is filled in -- not duplicated between the hasher
+#: and the reader, which is what let ``None`` and ``{}`` (behaviourally identical:
+#: both fall back to this same default) content-address differently (round-1
+#: review finding 1).
+_LOADER_PARAMETER_DEFAULTS: dict[str, Any] = {"motif_lambda_default": 0.7}
+
+
+def _resolve_loader_parameters(loader_parameters: dict[str, Any] | None) -> dict[str, Any]:
+    """The fully-resolved, effective loader parameters -- what ``load_back`` will use.
+
+    Called once, before the result is hashed, stored on the manifest, or handed to
+    ``load_back``, so that every spelling which resolves to the same effective
+    configuration (``None``, ``{}``, an explicit
+    ``{"motif_lambda_default": 0.7}``) always produces the *same* dict -- and
+    therefore the same ``lexicon_content_hash`` -- while a spelling that actually
+    changes a value (``{"motif_lambda_default": 0.5}``) still changes it.
+    """
+    return {**_LOADER_PARAMETER_DEFAULTS, **(loader_parameters or {})}
+
+
 # --------------------------------------------------------------------------- #
 # Reading back, with the real loader
 # --------------------------------------------------------------------------- #
@@ -316,7 +338,7 @@ def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3,
             "round-trip verification needs the finemo backend (pip install finemo-gpu). "
             "Without it the H5 is written but never read back by anything but this package."
         ) from exc
-    extra = {"motif_lambda_default": 0.7, **(loader_parameters or {})}
+    extra = _resolve_loader_parameters(loader_parameters)
     _motifs_df, _cwms, _trim_masks, names = load_modisco_motifs(
         str(h5_path), trim_threshold=trim_threshold, motif_type=motif_type,
         motifs_include=None, motif_name_map=None, motif_lambdas=None,
@@ -371,8 +393,12 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
         raise CompileError(f"unknown tiers {unknown}; expected a subset of {list(TIERS)}")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    loader_parameters = (dict(loader_parameters) if loader_parameters is not None
-                        else {"motif_lambda_default": 0.7})
+    # Resolved once, to its effective form, before it is hashed or stored: any
+    # spelling that reads back identically (``None``, ``{}``, an explicit
+    # ``{"motif_lambda_default": 0.7}``) must produce the same manifest and the
+    # same lexicon_content_hash. `load_back` resolves the same way, from the same
+    # function, so the two can never drift apart again.
+    loader_parameters = _resolve_loader_parameters(loader_parameters)
 
     prov = record("compile", seed=seed)
     meta, nodes, arrays = load_registry(registry_dir)

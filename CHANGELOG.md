@@ -77,6 +77,19 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   `schema.MergeConfidence` is a categorical grade — `grade < 0.8` raises `TypeError` —
   and `MERGE_CONFIDENCE_CRITERIA` records `CRITERION_NOT_YET_DEFINED` for all three
   levels rather than filling them in.
+- **Breaking: `lexicon_content_hash` now covers loader configuration, not only motif
+  arrays.** `compile_lexicons()` gained `trim_threshold`, `motif_type`, `include_rc`,
+  `loader_backend` and `loader_parameters` — the settings that used to be hard-coded
+  inside `load_back()` and therefore invisible to the hash. Two lexicons built from
+  identical arrays but meant to be read back under different loader settings load
+  differently and must not share an identity; now they don't. Every
+  previously-computed `lexicon_content_hash` changes as a result — there is no
+  migration, because nothing has consumed a hash as a stored value yet. `load_back()`
+  and `verify_roundtrip()` were updated to read back under the same configuration the
+  hash covers, instead of `load_back`'s own fixed defaults, and behaviourally
+  equivalent spellings of `loader_parameters` (`None`, `{}`, an explicit
+  `{"motif_lambda_default": 0.7}`) are resolved to one canonical form before hashing
+  so they still address identically.
 
 ### Removed
 - `CITATION.cff`. A citation file with placeholder authors renders as a claim that the
