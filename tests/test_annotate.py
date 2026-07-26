@@ -101,7 +101,9 @@ def test_annotation_candidate_refuses_false_low_confidence_for_each_trigger(chan
     ("changes", "message"),
     [
         ({"backend": ""}, "backend name and version"),
+        ({"backend": 42}, "backend name and version"),
         ({"backend_version": ""}, "backend name and version"),
+        ({"backend_version": 42}, "backend name and version"),
         ({"status": "NOT_A_STATUS"}, "backend log status"),
         ({"candidate_count": -1}, "candidate_count"),
         ({"schema_version": "999"}, "backend log schema_version"),
