@@ -54,6 +54,12 @@ def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBack
             returned = tuple(backend.annotate(nodes))
             backend_candidates: dict[str, AnnotationCandidate] = {}
             for candidate in returned:
+                if (candidate.source != backend.name
+                        or candidate.source_version != backend.version):
+                    raise AnnotationError(
+                        f"{backend.name}/{backend.version} returned candidate "
+                        f"source/version {candidate.source}/{candidate.source_version}"
+                    )
                 if candidate.node_id not in node_ids:
                     raise AnnotationError(
                         f"{backend.name} returned candidate for unknown node {candidate.node_id!r}"

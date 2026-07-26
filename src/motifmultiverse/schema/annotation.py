@@ -181,8 +181,14 @@ class AnnotationBackendLog:
     schema_version: str = ANNOTATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if not self.backend or not self.backend_version:
+        if (not isinstance(self.backend, str) or not self.backend.strip()
+                or not isinstance(self.backend_version, str) or not self.backend_version.strip()):
             raise SchemaError("backend logs require a backend name and version")
+        try:
+            status = BackendStatus(self.status)
+        except (TypeError, ValueError) as exc:
+            raise SchemaError(f"backend log status {self.status!r} is not recognised") from exc
+        object.__setattr__(self, "status", status)
         if self.candidate_count < 0:
             raise SchemaError("backend log candidate_count cannot be negative")
         if self.schema_version != ANNOTATION_SCHEMA_VERSION:

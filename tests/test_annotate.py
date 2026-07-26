@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -37,6 +38,87 @@ class _UnavailableBackend:
 
     def annotate(self, nodes):
         raise RuntimeError("HOMER database is unavailable")
+
+
+def _candidate(**changes):
+    """A valid direct schema row that one test can corrupt at a time."""
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    candidate = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        seqlet_count=150,
+    )
+    return replace(candidate, **changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"node_id": ""}, "identity fields"),
+        ({"candidate_id": "annotation:corrupted"}, "stable annotation match identity"),
+        ({"schema_version": "999"}, "candidate schema_version"),
+        ({"motif_length": 0}, "motif_length"),
+        ({"seqlet_count": -1}, "seqlet_count"),
+        ({"q_value": 1.01}, "q_value"),
+        ({"chance_occurrence_probability": 1.01}, "chance_occurrence_probability"),
+        ({"observed_to_null_ratio": -0.01}, "observed_to_null_ratio"),
+    ],
+)
+def test_annotation_candidate_schema_refuses_each_corrupted_guarded_value(changes, message):
+    """Removing the named AnnotationCandidate validation branch fails its row."""
+    from motifmultiverse.schema import SchemaError
+
+    with pytest.raises(SchemaError, match=message):
+        _candidate(**changes)
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"motif_length": 6}, "short motif"),
+        ({"source": "tomtom", "q_value": 0.0501}, "weak TomTom match"),
+        ({"seqlet_count": 99}, "low seqlet support"),
+    ],
+)
+def test_annotation_candidate_refuses_false_low_confidence_for_each_trigger(changes, reason):
+    """Each documented confidence trigger must reject a falsely-clear row."""
+    from motifmultiverse.schema import SchemaError
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    payload = {
+        "node_id": "node-a", "proposed_family_id": "FAM_ALPHA", "source": "tomtom",
+        "source_version": "5.5", "matched_motif_id": "JASPAR:MA0001", "motif_length": 10,
+        "seqlet_count": 150,
+    }
+    payload.update(changes)
+    candidate = AnnotationCandidate.create(**payload)
+    with pytest.raises(SchemaError, match="must be flagged"):
+        replace(candidate, low_confidence_annotation=False)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"backend": ""}, "backend name and version"),
+        ({"backend_version": ""}, "backend name and version"),
+        ({"status": "NOT_A_STATUS"}, "backend log status"),
+        ({"candidate_count": -1}, "candidate_count"),
+        ({"schema_version": "999"}, "backend log schema_version"),
+    ],
+)
+def test_annotation_backend_log_refuses_each_corrupted_guarded_value(changes, message):
+    """Removing the named AnnotationBackendLog validation branch fails its row."""
+    from motifmultiverse.schema import SchemaError
+    from motifmultiverse.schema.annotation import AnnotationBackendLog, BackendStatus
+
+    payload = {
+        "backend": "tomtom", "backend_version": "5.5", "status": BackendStatus.VERIFIED,
+        "candidate_count": 1,
+    }
+    payload.update(changes)
+    with pytest.raises(SchemaError, match=message):
+        AnnotationBackendLog(**payload)
 
 
 def test_annotation_keeps_conflicting_candidates_without_mutating_node_assignment():
@@ -213,6 +295,45 @@ def test_failed_backend_does_not_retain_a_partial_prefix_of_its_candidates():
     assert result.candidates == ()
     assert result.backend_logs[0].status.value == "UNVERIFIED"
     assert result.backend_logs[0].candidate_count == 0
+
+
+@pytest.mark.parametrize(
+    ("candidate_source", "candidate_version"),
+    [("tomtom", "5.5"), ("homer", "4.12")],
+)
+def test_backend_source_or_version_mismatch_is_unverified_without_erasing_success(
+    candidate_source, candidate_version,
+):
+    """Trusting a candidate's provenance over the reporting backend must fail this."""
+    from motifmultiverse.annotate import annotate_nodes
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    successful = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        seqlet_count=150,
+    )
+    mismatched = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_BETA", source=candidate_source,
+        source_version=candidate_version, matched_motif_id="DATABASE:MISMATCH", motif_length=10,
+        seqlet_count=150,
+    )
+
+    result = annotate_nodes(
+        [_node()], [
+            _StaticBackend("tomtom", "5.5", [successful]),
+            _StaticBackend("homer", "4.11", [mismatched]),
+        ],
+    )
+
+    assert [row.proposed_family_id for row in result.candidates] == ["FAM_ALPHA"]
+    assert [(log.backend, log.backend_version, log.status.value, log.candidate_count)
+            for log in result.backend_logs] == [
+        ("tomtom", "5.5", "VERIFIED", 1),
+        ("homer", "4.11", "UNVERIFIED", 0),
+    ]
+    assert (f"{candidate_source}/{candidate_version}" in result.backend_logs[1].detail
+            and "homer/4.11" in result.backend_logs[1].detail)
 
 
 def test_unreadable_optional_database_is_logged_without_erasing_another_backend(tmp_path):
