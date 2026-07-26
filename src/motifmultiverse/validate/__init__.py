@@ -1,8 +1,26 @@
-"""validate stage -- see README.md in this directory for rule / failure / check."""
+"""Affected-subset downstream stability validation.
+
+The all-peak reconstruction summary is retained as a diagnostic only.  A merge
+can change a small subset while the all-peak median is zero, so every decision
+is evaluated and labelled on the subset whose hit identities or coefficients
+actually changed.
+"""
 from __future__ import annotations
 
+import csv
+import hashlib
+import json
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass
+from numbers import Real
+from pathlib import Path
+from typing import Any
+
+from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
     PeakSplitManifest,
+    SchemaError,
     SplitRole,
     build_peak_split_manifest,
     peak_split_manifest_checksum,
@@ -20,24 +38,495 @@ from .base import (
 )
 
 __all__ = [
-    "AnalysisMode",
-    "CrossFitFold",
-    "DecisionSplitArtifact",
-    "PeakSplitManifest",
-    "SPLIT_ARTIFACT_SCHEMA_VERSION",
-    "SplitRole",
-    "ValidationSplitArtifact",
-    "assert_artifact_split_compatibility",
-    "assert_cross_fit_compatibility",
-    "assert_split_compatibility",
-    "build_peak_split_manifest",
-    "peak_split_manifest_checksum",
-    "run",
+    "AnalysisMode", "BackendUnavailable", "BackendVerification", "CrossFitFold",
+    "DecisionSplitArtifact", "PeakSplitManifest", "SPLIT_ARTIFACT_SCHEMA_VERSION",
+    "STABILITY_SCHEMA_VERSION", "StabilityBackend", "StabilityResult", "SplitRole",
+    "ValidationError", "ValidationSplitArtifact", "assert_artifact_split_compatibility",
+    "assert_cross_fit_compatibility", "assert_split_compatibility",
+    "build_peak_split_manifest", "evaluate_stability", "normalize_backend_output",
+    "peak_split_manifest_checksum", "run_backend_validation", "run",
+    "write_stability_artifacts",
 ]
 
+STABILITY_SCHEMA_VERSION = "1"
+MIN_AFFECTED_PEAKS = 30
+_REQUIRED_COLUMNS = ("peak_id", "hit_id", "coefficient", "reconstruction")
+_PERSISTED_RESULT_COLUMNS = (
+    "decision_id", "n_affected_peaks", "n_affected_hits", "family_coefficient_share",
+    "paired_delta_reconstruction_affected", "paired_delta_reconstruction_all", "hit_jaccard",
+    "coefficient_conservation", "status", "power_statement", "affected_interval", "schema_version",
+    "artifact_id", "split_manifest_checksum", "decision_artifact_id", "validation_artifact_id",
+    "provenance",
+)
 
-def run(*args, **kwargs):
-    """Not implemented in the pre-alpha skeleton."""
-    raise NotImplementedError(
-        "validate is a skeleton; see src/motifmultiverse/validate/README.md"
+
+class ValidationError(SchemaError):
+    """Validation data, backend output, or persisted artifacts are malformed."""
+
+
+class BackendUnavailable(ValidationError):
+    """An optional backend cannot be used in this environment."""
+
+
+@dataclass(frozen=True)
+class StabilityResult:
+    """Versioned, affected-subset evidence for one downstream decision."""
+
+    decision_id: str
+    n_affected_peaks: int
+    n_affected_hits: int
+    family_coefficient_share: float
+    paired_delta_reconstruction_affected: float | None
+    paired_delta_reconstruction_all: float
+    hit_jaccard: float | None
+    coefficient_conservation: float | None
+    status: str
+    power_statement: str
+    affected_interval: tuple[float, float] | None = None
+    schema_version: str = STABILITY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.decision_id, str) or not self.decision_id.strip():
+            raise ValidationError("stability decision_id must be a non-empty string")
+        for name in ("n_affected_peaks", "n_affected_hits"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValidationError(f"stability {name} must be a non-negative integer")
+        if self.schema_version != STABILITY_SCHEMA_VERSION:
+            raise ValidationError(
+                f"stability schema_version must be {STABILITY_SCHEMA_VERSION!r}"
+            )
+        _finite("family_coefficient_share", self.family_coefficient_share)
+        if not 0.0 <= self.family_coefficient_share <= 1.0:
+            raise ValidationError("stability family_coefficient_share must be in [0, 1]")
+        _finite("paired_delta_reconstruction_all", self.paired_delta_reconstruction_all)
+        for name in (
+            "paired_delta_reconstruction_affected", "hit_jaccard", "coefficient_conservation",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _finite(f"stability {name}", value)
+        if self.hit_jaccard is not None and not 0.0 <= self.hit_jaccard <= 1.0:
+            raise ValidationError("stability hit_jaccard must be in [0, 1]")
+        if self.coefficient_conservation is not None and not -1.0 <= self.coefficient_conservation <= 1.0:
+            raise ValidationError("stability coefficient_conservation must be in [-1, 1]")
+        if not isinstance(self.status, str) or not self.status.strip():
+            raise ValidationError("stability status must be a non-empty string")
+        if not isinstance(self.power_statement, str) or not self.power_statement.strip():
+            raise ValidationError("stability power_statement must be a non-empty string")
+        if self.affected_interval is not None:
+            if (
+                not isinstance(self.affected_interval, tuple)
+                or len(self.affected_interval) != 2
+            ):
+                raise ValidationError("stability affected_interval must be a two-value tuple or None")
+            _finite("stability affected_interval[0]", self.affected_interval[0])
+            _finite("stability affected_interval[1]", self.affected_interval[1])
+        if self.n_affected_peaks < MIN_AFFECTED_PEAKS:
+            if self.status != "LOW_RISK_RARE_NOT_VALIDATED":
+                raise ValidationError(
+                    "fewer than 30 affected peaks must be LOW_RISK_RARE_NOT_VALIDATED"
+                )
+            if self.affected_interval is not None:
+                raise ValidationError("rare affected subsets must not report an interval")
+            if "frequency-limited" not in self.power_statement.lower():
+                raise ValidationError("rare affected subsets require a frequency-limited power statement")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class BackendVerification:
+    """Per-backend verification state; unverified is evidence, not absence."""
+
+    backend: str
+    backend_version: str
+    status: str
+    detail: str = ""
+    schema_version: str = STABILITY_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("backend", "backend_version", "status"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError(f"backend verification {name} must be a non-empty string")
+        if self.status not in {"VERIFIED", "UNVERIFIED"}:
+            raise ValidationError("backend verification status must be VERIFIED or UNVERIFIED")
+        if not isinstance(self.detail, str):
+            raise ValidationError("backend verification detail must be a string")
+        if self.schema_version != STABILITY_SCHEMA_VERSION:
+            raise ValidationError("backend verification has an unsupported schema_version")
+
+
+class StabilityBackend:
+    """Backend adapter returning the pre-merge and post-merge standardized tables."""
+
+    name = "backend"
+    version = "unknown"
+    optional = False
+
+    def compare(self, lexicons: str | Path, decision_id: str) -> tuple[Any, Any]:
+        raise NotImplementedError
+
+
+def _finite(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValidationError(f"{name} must be a finite numeric value")
+    return float(value)
+
+
+def normalize_backend_output(output: Any, *, backend: str):
+    """Require one exact semantic schema before any backend is compared.
+
+    Backends may carry extra implementation columns, but their identity,
+    coefficient, and reconstruction values cannot be inferred or coerced from
+    backend-specific names.  Duplicate peak/hit rows are also refused: summing
+    them would manufacture a coefficient change.
+    """
+    import pandas as pd
+
+    if not isinstance(backend, str) or not backend.strip():
+        raise ValidationError("backend name must be a non-empty string")
+    if not isinstance(output, pd.DataFrame):
+        raise ValidationError(f"{backend} output must be a pandas DataFrame")
+    missing = [column for column in _REQUIRED_COLUMNS if column not in output.columns]
+    if missing:
+        raise ValidationError(f"{backend} output is missing standardized column(s): {missing}")
+    frame = output.loc[:, _REQUIRED_COLUMNS].copy()
+    if frame.empty:
+        raise ValidationError(f"{backend} output cannot be empty")
+    for column in ("peak_id", "hit_id"):
+        if any(not isinstance(value, str) or not value.strip() for value in frame[column]):
+            raise ValidationError(f"{backend} output {column} must contain non-empty string identities")
+    for column in ("coefficient", "reconstruction"):
+        if any(isinstance(value, bool) or not isinstance(value, Real) for value in frame[column]):
+            raise ValidationError(f"{backend} output {column} must have numeric values")
+        try:
+            frame[column] = pd.to_numeric(frame[column], errors="raise")
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"{backend} output {column} must be numeric") from exc
+        if not frame[column].map(lambda value: math.isfinite(float(value))).all():
+            raise ValidationError(f"{backend} output {column} must be finite")
+        frame[column] = frame[column].astype("float64")
+    if frame.duplicated(["peak_id", "hit_id"]).any():
+        raise ValidationError(f"{backend} output has duplicate standardized hit identities")
+    return frame.sort_values(["peak_id", "hit_id"], kind="stable").reset_index(drop=True)
+
+
+def _peak_reconstruction(frame, backend: str) -> dict[str, float]:
+    grouped = frame.groupby("peak_id", sort=False)["reconstruction"].agg(["min", "max"])
+    inconsistent = grouped.index[grouped["min"] != grouped["max"]].tolist()
+    if inconsistent:
+        raise ValidationError(
+            f"{backend} output has multiple reconstruction values for peak(s): {inconsistent}"
+        )
+    return {str(peak): float(value) for peak, value in grouped["min"].items()}
+
+
+def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityResult:
+    """Evaluate a merge on affected peaks and retain the all-peak dilution diagnostic."""
+    import numpy as np
+
+    before_frame = normalize_backend_output(before, backend="before")
+    after_frame = normalize_backend_output(after, backend="after")
+    before_reconstruction = _peak_reconstruction(before_frame, "before")
+    after_reconstruction = _peak_reconstruction(after_frame, "after")
+    if set(before_reconstruction) != set(after_reconstruction):
+        raise ValidationError("before and after outputs must cover exactly the same peak identities")
+
+    before_coefficients = {
+        (str(row.peak_id), str(row.hit_id)): float(row.coefficient)
+        for row in before_frame.itertuples(index=False)
+    }
+    after_coefficients = {
+        (str(row.peak_id), str(row.hit_id)): float(row.coefficient)
+        for row in after_frame.itertuples(index=False)
+    }
+    affected = sorted({
+        peak
+        for peak, hit_id in set(before_coefficients) | set(after_coefficients)
+        if before_coefficients.get((peak, hit_id)) != after_coefficients.get((peak, hit_id))
+    })
+    all_delta = [after_reconstruction[peak] - before_reconstruction[peak]
+                 for peak in sorted(before_reconstruction)]
+    affected_delta = [after_reconstruction[peak] - before_reconstruction[peak] for peak in affected]
+    affected_keys_before = {key for key in before_coefficients if key[0] in set(affected)}
+    affected_keys_after = {key for key in after_coefficients if key[0] in set(affected)}
+    affected_keys = affected_keys_before | affected_keys_after
+    union = affected_keys_before | affected_keys_after
+    hit_jaccard = None if not union else len(affected_keys_before & affected_keys_after) / len(union)
+    shared = sorted(affected_keys_before & affected_keys_after)
+    if len(shared) < 2:
+        conservation = None
+    else:
+        left = np.asarray([before_coefficients[key] for key in shared], dtype=float)
+        right = np.asarray([after_coefficients[key] for key in shared], dtype=float)
+        conservation_value = float(np.corrcoef(left, right)[0, 1])
+        conservation = conservation_value if math.isfinite(conservation_value) else None
+    denominator = sum(abs(value) for value in after_coefficients.values())
+    numerator = sum(abs(after_coefficients[key]) for key in affected_keys_after)
+    share = 0.0 if denominator == 0 else numerator / denominator
+    n_affected = len(affected)
+    if n_affected < MIN_AFFECTED_PEAKS:
+        status = "LOW_RISK_RARE_NOT_VALIDATED"
+        power = (
+            f"Evidence strength is frequency-limited: {n_affected} affected peaks is below "
+            f"the preregistered floor of {MIN_AFFECTED_PEAKS}; no interval or inferential "
+            "equivalence claim is reported."
+        )
+    elif affected_delta and math.isclose(float(np.median(affected_delta)), 0.0, abs_tol=1e-12):
+        status = "STABLE_AFFECTED_SUBSET"
+        power = (
+            f"Affected-subset stability is descriptive for {n_affected} affected peaks; "
+            "it is not an equivalence claim."
+        )
+    else:
+        status = "CHANGED_AFFECTED_SUBSET"
+        power = (
+            f"Affected-subset change is descriptive for {n_affected} affected peaks; "
+            "it is not an equivalence claim."
+        )
+    return StabilityResult(
+        decision_id=decision_id,
+        n_affected_peaks=n_affected,
+        n_affected_hits=len(affected_keys),
+        family_coefficient_share=float(share),
+        paired_delta_reconstruction_affected=(
+            None if not affected_delta else float(np.median(affected_delta))
+        ),
+        paired_delta_reconstruction_all=float(np.median(all_delta)),
+        hit_jaccard=hit_jaccard,
+        coefficient_conservation=conservation,
+        status=status,
+        power_statement=power,
     )
+
+
+def run_backend_validation(
+    lexicons: str | Path,
+    decision_id: str,
+    backends: Sequence[StabilityBackend],
+) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
+    """Run independent adapters without converting a missing optional one to success."""
+    results: list[StabilityResult] = []
+    verification: list[BackendVerification] = []
+    for backend in backends:
+        name = getattr(backend, "name", type(backend).__name__)
+        version = getattr(backend, "version", "unknown")
+        optional = bool(getattr(backend, "optional", False))
+        if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
+            raise ValidationError("stability backend requires non-empty name and version")
+        try:
+            before, after = backend.compare(lexicons, decision_id)
+            results.append(evaluate_stability(decision_id, before, after))
+            verification.append(BackendVerification(name, version, "VERIFIED"))
+        except BackendUnavailable as exc:
+            detail = f"{name} backend unavailable: {exc}"
+            if not optional:
+                raise BackendUnavailable(detail) from exc
+            verification.append(BackendVerification(name, version, "UNVERIFIED", detail))
+    return tuple(results), tuple(verification)
+
+
+def _artifact_id(
+    results: Sequence[StabilityResult],
+    verification: Sequence[BackendVerification],
+    provenance: Mapping[str, Any],
+    manifest: PeakSplitManifest,
+    decision: DecisionSplitArtifact,
+    validation: ValidationSplitArtifact,
+) -> str:
+    payload = {
+        "decision_artifact_id": decision.artifact_id,
+        "manifest_checksum": manifest.checksum,
+        "provenance": dict(provenance),
+        "results": [row.to_dict() for row in results],
+        "schema_version": STABILITY_SCHEMA_VERSION,
+        "validation_artifact_id": validation.artifact_id,
+        "verification": [asdict(row) for row in verification],
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"stability:{digest}"
+
+
+def write_stability_artifacts(
+    out_dir: str | Path,
+    results: Sequence[StabilityResult],
+    verification: Sequence[BackendVerification],
+    *,
+    manifest: PeakSplitManifest,
+    decision: DecisionSplitArtifact,
+    validation: ValidationSplitArtifact,
+    provenance: Mapping[str, Any],
+) -> tuple[Path, Path]:
+    """Persist typed stability evidence and backend verification with one identity."""
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    assert_artifact_split_compatibility(manifest, decision, validation)
+    result_list = tuple(sorted(results, key=lambda row: json.dumps(
+        row.to_dict(), sort_keys=True, separators=(",", ":")
+    )))
+    verification_list = tuple(sorted(verification, key=lambda row: (
+        row.backend, row.backend_version, row.status, row.detail,
+    )))
+    if any(row.decision_id != decision.decision_id for row in result_list):
+        raise ValidationError("stability result decision_id does not match the bound split artifact")
+    if not isinstance(provenance, Mapping) or not provenance:
+        raise ValidationError("stability artifacts require provenance")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    artifact_id = _artifact_id(
+        result_list, verification_list, provenance, manifest, decision, validation
+    )
+    metadata = {
+        b"motifmultiverse.artifact_id": artifact_id.encode(),
+        b"motifmultiverse.schema_version": STABILITY_SCHEMA_VERSION.encode(),
+        b"motifmultiverse.provenance": json.dumps(
+            dict(provenance), sort_keys=True, separators=(",", ":")
+        ).encode(),
+        b"motifmultiverse.split_manifest_checksum": manifest.checksum.encode(),
+        b"motifmultiverse.decision_artifact_id": decision.artifact_id.encode(),
+        b"motifmultiverse.validation_artifact_id": validation.artifact_id.encode(),
+    }
+    rows: list[dict[str, Any]] = []
+    for result in result_list:
+        row = result.to_dict()
+        row["affected_interval"] = (
+            None if result.affected_interval is None else json.dumps(result.affected_interval)
+        )
+        row.update({
+            "artifact_id": artifact_id,
+            "split_manifest_checksum": manifest.checksum,
+            "decision_artifact_id": decision.artifact_id,
+            "validation_artifact_id": validation.artifact_id,
+            "provenance": json.dumps(dict(provenance), sort_keys=True, separators=(",", ":")),
+        })
+        rows.append(row)
+    result_path = out / "stability_results.parquet"
+    table = pa.Table.from_pandas(
+        pd.DataFrame(rows, columns=_PERSISTED_RESULT_COLUMNS), preserve_index=False
+    )
+    pq.write_table(table.replace_schema_metadata(metadata), result_path)
+    verification_path = out / "backend_verification.tsv"
+    fields = ["backend", "backend_version", "status", "detail", "schema_version", "artifact_id",
+              "split_manifest_checksum", "decision_artifact_id", "validation_artifact_id"]
+    with verification_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
+        writer.writeheader()
+        for item in verification_list:
+            writer.writerow({
+                **asdict(item), "artifact_id": artifact_id,
+                "split_manifest_checksum": manifest.checksum,
+                "decision_artifact_id": decision.artifact_id,
+                "validation_artifact_id": validation.artifact_id,
+            })
+    return result_path, verification_path
+
+
+class _FrozenHitTableBackend(StabilityBackend):
+    name = "frozen-hit-table"
+    version = STABILITY_SCHEMA_VERSION
+
+    def __init__(
+        self,
+        before_path: str | Path,
+        after_path: str | Path,
+        validation_peak_ids: frozenset[str],
+    ) -> None:
+        self.before_path = Path(before_path)
+        self.after_path = Path(after_path)
+        self.validation_peak_ids = validation_peak_ids
+
+    def compare(self, lexicons: str | Path, decision_id: str) -> tuple[Any, Any]:
+        import pandas as pd
+
+        def read(path: Path):
+            if not path.exists():
+                raise ValidationError(f"frozen-hit-table input does not exist: {path}")
+            try:
+                return pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path, sep="\t")
+            except (OSError, ValueError) as exc:
+                raise ValidationError(f"frozen-hit-table cannot read {path}: {exc}") from exc
+
+        before = normalize_backend_output(read(self.before_path), backend=self.name)
+        after = normalize_backend_output(read(self.after_path), backend=self.name)
+        for label, frame in (("before", before), ("after", after)):
+            peak_ids = frozenset(str(value) for value in frame["peak_id"])
+            if peak_ids != self.validation_peak_ids:
+                raise ValidationError(
+                    f"frozen-hit-table {label} rows must contain exactly the split-bound "
+                    f"validation peaks; got {sorted(peak_ids)} expected "
+                    f"{sorted(self.validation_peak_ids)}"
+                )
+        return before, after
+
+
+def _read_manifest(path: str | Path) -> PeakSplitManifest:
+    source = Path(path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        assignments = {peak_id: SplitRole(role) for peak_id, role in payload["assignments"].items()}
+        return PeakSplitManifest(
+            schema_version=payload["schema_version"], assignments=assignments, checksum=payload["checksum"]
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"{source} is not a valid peak split manifest: {exc}") from exc
+
+
+def _read_artifact(path: str | Path, kind: str, manifest: PeakSplitManifest):
+    source = Path(path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        cls = DecisionSplitArtifact if kind == "decision" else ValidationSplitArtifact
+        return cls.from_dict(payload, manifest=manifest)
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"{source} is not a valid {kind} split artifact: {exc}") from exc
+
+
+def run(
+    lexicons: str | Path,
+    out_dir: str | Path,
+    *,
+    before_hits: str | Path,
+    after_hits: str | Path,
+    split_manifest: str | Path,
+    decision_artifact: str | Path,
+    validation_artifact: str | Path,
+) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
+    """Validate frozen before/after hit tables under an exact split binding."""
+    manifest = _read_manifest(split_manifest)
+    decision = _read_artifact(decision_artifact, "decision", manifest)
+    validation = _read_artifact(validation_artifact, "validation", manifest)
+    assert_artifact_split_compatibility(manifest, decision, validation)
+    provenance_record = record("validate")
+    try:
+        for source in (before_hits, after_hits, split_manifest, decision_artifact, validation_artifact):
+            provenance_record.add_input(source)
+    except OSError:
+        provenance_record.write(out_dir)
+        raise
+    provenance_record.write(out_dir)
+    results, verification = run_backend_validation(
+        lexicons,
+        decision.decision_id,
+        [_FrozenHitTableBackend(before_hits, after_hits, validation.validation_peak_ids)],
+    )
+    write_stability_artifacts(
+        out_dir,
+        results,
+        verification,
+        manifest=manifest,
+        decision=decision,
+        validation=validation,
+        provenance={
+            "stage": "validate",
+            "inputs": dict(provenance_record.inputs),
+            "software": dict(provenance_record.software),
+        },
+    )
+    return results, verification

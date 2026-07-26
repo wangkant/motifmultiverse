@@ -24,14 +24,14 @@ implementation preferences — they change what the tool is allowed to compute.
 | **C. annotate** | retain competing database-label candidates and low-confidence flags — **implemented** |
 | **D. adjudicate** | merge / refuse / deferred decisions with rationale and decider; emit human review — **implemented** |
 | **E. compile** | build tiered lexicons; separate discovery support from analysis admission — **implemented** |
-| **F. validate** | downstream stability: does the merge survive reconstruction? |
+| **F. validate** | downstream stability: affected-subset reconstruction and backend verification — **implemented** |
 | **G. infer** | robust inference across a specification multiverse |
 | **H. report** | render the audit trail, denominators and bias ledger |
 | **I. interpret** | describe what is inside a cluster (descriptive, not a test) — **implemented** |
 
 Each module directory carries a README with its rule, the failure that produced
 the rule, and how the rule is checked. `ingest`, `align`, `annotate`,
-`adjudicate`, `compile` and `interpret` are implemented; `validate`, `infer` and
+`adjudicate`, `compile`, `validate` and `interpret` are implemented; `infer` and
 `report` still raise `NotImplementedError`.
 
 **The evidence middle now runs.** `ingest` → `align` → `annotate` →

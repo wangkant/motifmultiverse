@@ -3,19 +3,29 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pandas as pd
 import pytest
 
+import motifmultiverse.adjudicate as adjudicate
 from motifmultiverse.schema import SchemaError, SplitRole, peak_split_manifest_checksum
 from motifmultiverse.validate import (
     AnalysisMode,
+    BackendUnavailable,
+    BackendVerification,
     CrossFitFold,
     DecisionSplitArtifact,
     PeakSplitManifest,
+    StabilityBackend,
+    StabilityResult,
     ValidationSplitArtifact,
     assert_artifact_split_compatibility,
     assert_cross_fit_compatibility,
     assert_split_compatibility,
     build_peak_split_manifest,
+    evaluate_stability,
+    normalize_backend_output,
+    run_backend_validation,
+    write_stability_artifacts,
 )
 
 
@@ -544,3 +554,158 @@ def test_split_persisted_artifact_rejects_malformed_fold_parser_values(
     payload["cross_fit_folds"] = replacement
     with pytest.raises(SchemaError, match=match):
         artifact_type.from_dict(payload, manifest=manifest)
+
+
+def _hit_table(*, affected: int = 20, total: int = 200, merged: bool = False):
+    rows = []
+    for number in range(total):
+        changed = merged and number < affected
+        rows.append({
+            "peak_id": f"peak-{number:03d}",
+            "hit_id": "family-merged" if changed else "family-original",
+            "coefficient": 2.0 if changed else 1.0,
+            "reconstruction": 1.0 if changed else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def _stability_result() -> StabilityResult:
+    return evaluate_stability(
+        "decision:affected-subset",
+        _hit_table(),
+        _hit_table(merged=True),
+    )
+
+
+def test_stability_uses_affected_subset_not_all_peak_median_dilution():
+    """A 20/200 changed subset cannot be hidden by an all-peak median of zero."""
+    result = _stability_result()
+
+    assert result.n_affected_peaks == 20
+    assert result.paired_delta_reconstruction_all == 0.0
+    assert result.paired_delta_reconstruction_affected == 1.0
+    assert result.status == "LOW_RISK_RARE_NOT_VALIDATED"
+    assert "no interval or inferential equivalence claim" in result.power_statement.lower()
+
+
+def test_stability_rare_events_omit_interval_and_state_frequency_limited_power():
+    result = evaluate_stability("decision:rare", _hit_table(total=40), _hit_table(
+        affected=29, total=40, merged=True,
+    ))
+
+    assert result.n_affected_peaks == 29
+    assert result.status == "LOW_RISK_RARE_NOT_VALIDATED"
+    assert result.affected_interval is None
+    assert "frequency-limited" in result.power_statement
+
+
+@pytest.mark.parametrize("column, value", [
+    ("peak_id", ""),
+    ("hit_id", None),
+    ("coefficient", "1.0"),
+    ("coefficient", float("inf")),
+    ("reconstruction", float("nan")),
+])
+def test_stability_normalization_rejects_corrupt_backend_output(column, value):
+    rows = _hit_table(total=1).copy()
+    if isinstance(value, str) and column in {"coefficient", "reconstruction"}:
+        rows[column] = rows[column].astype(object)
+    rows.loc[0, column] = value
+    with pytest.raises(SchemaError, match=column):
+        normalize_backend_output(rows, backend="test-backend")
+
+
+class _UnavailableBackend(StabilityBackend):
+    name = "optional-missing"
+    version = "1"
+    optional = True
+
+    def compare(self, lexicons, decision_id):
+        raise BackendUnavailable("optional-missing backend is not installed")
+
+
+class _AvailableBackend(StabilityBackend):
+    name = "available"
+    version = "1"
+
+    def compare(self, lexicons, decision_id):
+        return _hit_table(), _hit_table(merged=True)
+
+
+def test_missing_optional_backend_is_persisted_unverified_without_erasing_verified_results():
+    results, verification = run_backend_validation(
+        "lexicons", "decision:backend", [_UnavailableBackend(), _AvailableBackend()],
+    )
+
+    assert [result.decision_id for result in results] == ["decision:backend"]
+    assert {(row.backend, row.status) for row in verification} == {
+        ("optional-missing", "UNVERIFIED"), ("available", "VERIFIED"),
+    }
+    assert "optional-missing backend is not installed" in verification[0].detail
+
+
+def test_stability_result_satisfies_the_adjudication_evidence_protocol():
+    assert isinstance(_stability_result(), adjudicate.StabilityEvidence)
+
+
+def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
+    manifest = _manifest()
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest,
+        decision_id="decision:artifact",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest,
+        decision_id="decision:artifact",
+        result_id="stability:artifact",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    result = evaluate_stability("decision:artifact", _hit_table(), _hit_table(merged=True))
+    results_path, verification_path = write_stability_artifacts(
+        tmp_path,
+        [result],
+        [BackendVerification("frozen", "1", "VERIFIED")],
+        manifest=manifest,
+        decision=decision,
+        validation=validation,
+        provenance={"stage": "test", "input": "fixed"},
+    )
+
+    import pyarrow.parquet as pq
+
+    metadata = pq.read_schema(results_path).metadata
+    assert metadata[b"motifmultiverse.split_manifest_checksum"] == manifest.checksum.encode()
+    assert metadata[b"motifmultiverse.decision_artifact_id"] == decision.artifact_id.encode()
+    assert metadata[b"motifmultiverse.validation_artifact_id"] == validation.artifact_id.encode()
+    assert "UNVERIFIED" not in verification_path.read_text(encoding="utf-8")
+
+
+def test_stability_artifact_writer_refuses_a_manifest_mismatch(tmp_path):
+    manifest = _manifest()
+    other_manifest = build_peak_split_manifest({
+        **manifest.assignments,
+        "p-validation-extra": "VALIDATION",
+    })
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest,
+        decision_id="decision:mismatch",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    validation = ValidationSplitArtifact.create(
+        manifest=other_manifest,
+        decision_id="decision:mismatch",
+        result_id="stability:mismatch",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation-a"}),
+    )
+    result = evaluate_stability("decision:mismatch", _hit_table(), _hit_table(merged=True))
+
+    with pytest.raises(SchemaError, match="checksum"):
+        write_stability_artifacts(
+            tmp_path, [result], [], manifest=manifest, decision=decision,
+            validation=validation, provenance={"stage": "test"},
+        )

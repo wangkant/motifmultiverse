@@ -1,8 +1,8 @@
 """Command-line interface (T-08).
 
 Nine subcommands are wired with their real arguments and real ``--help``.
-``ingest``, ``align``, ``annotate``, ``adjudicate``, ``compile`` and
-``interpret`` are implemented; the remaining three raise
+``ingest``, ``align``, ``annotate``, ``adjudicate``, ``compile``, ``validate``
+and ``interpret`` are implemented; the remaining two raise
 :class:`NotImplementedError` naming the module README that specifies them.
 
 Every subcommand writes a provenance record before it raises (T-09), because a
@@ -61,8 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Bias-aware harmonization and robust inference of attribution-derived "
             "regulatory motifs across models and methods."
         ),
-        epilog=("pre-alpha: ingest, align, annotate, adjudicate, compile and interpret "
-                "are implemented; the remaining three subcommands raise "
+        epilog=("pre-alpha: ingest, align, annotate, adjudicate, compile, validate and interpret "
+                "are implemented; the remaining two subcommands raise "
                 "NotImplementedError and exit 3. Exit 4 means the tool "
                 "refused to produce a number. See docs/ROADMAP.md"),
     )
@@ -160,11 +160,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("validate", help="downstream stability of the compiled lexicons")
     a.add_argument("lexicons", help="lexicons/ from compile")
+    a.add_argument("--before-hits", required=True,
+                   help="frozen pre-merge standardized hit table (.parquet or .tsv)")
+    a.add_argument("--after-hits", required=True,
+                   help="frozen post-merge standardized hit table (.parquet or .tsv)")
+    a.add_argument("--split-manifest", required=True,
+                   help="exact frozen PeakSplitManifest JSON")
+    a.add_argument("--decision-artifact", required=True,
+                   help="manifest-bound decision split artifact JSON")
+    a.add_argument("--validation-artifact", required=True,
+                   help="manifest-bound validation split artifact JSON")
     a.add_argument("--fimo-heldout", action="store_true", help="held-out FIMO coverage")
     a.add_argument("--finemo-pilot", action="store_true", help="FiNeMo pilot instance calling")
     a.add_argument("--matched-peaks", action="store_true", help="matched-peak controls")
     a.add_argument("--out", default="validation/", help="output directory")
-    a.set_defaults(func=lambda ns: _run("validate", ns))
+    a.set_defaults(func=_run_validate)
 
     a = sub.add_parser("infer", help="robust inference across a specification multiverse")
     a.add_argument("instances", help="instances/ from validate")
@@ -339,6 +349,33 @@ def _run_compile(ns: argparse.Namespace) -> int:
         except compile_mod.BackendMissing as exc:
             print(f"round-trip: NOT verified -- {exc}")
     print(f"written: {ns.out}")
+    return 0
+
+
+def _run_validate(ns: argparse.Namespace) -> int:
+    from motifmultiverse import validate as validate_mod
+
+    results, verification = validate_mod.run(
+        ns.lexicons,
+        ns.out,
+        before_hits=ns.before_hits,
+        after_hits=ns.after_hits,
+        split_manifest=ns.split_manifest,
+        decision_artifact=ns.decision_artifact,
+        validation_artifact=ns.validation_artifact,
+    )
+    for result in results:
+        print(
+            f"validate: {result.decision_id} affected_peaks={result.n_affected_peaks} "
+            f"affected_delta={result.paired_delta_reconstruction_affected} "
+            f"all_peak_delta={result.paired_delta_reconstruction_all} status={result.status}"
+        )
+        print(f"  {result.power_statement}")
+    for backend in verification:
+        detail = f" ({backend.detail})" if backend.detail else ""
+        print(f"  {backend.backend} {backend.backend_version}: {backend.status}{detail}")
+    print(f"written: {Path(ns.out) / 'stability_results.parquet'}")
+    print(f"written: {Path(ns.out) / 'backend_verification.tsv'}")
     return 0
 
 

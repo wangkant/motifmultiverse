@@ -17,7 +17,7 @@ that this file and the table can be cross-checked line by line.
 | axis_id | bias | mechanism, in brief | control | enforced here |
 |---|---|---|---|---|
 | `BA-01` | Lexicon ascertainment | A motif absent from the local lexicon was never searched for, and its absence is read as zero contribution. | Shared union within a model/readout; `not-searched` encoded explicitly. | `schema.Missingness.NOT_SEARCHED` |
-| `BA-02` | Redundancy | Near-duplicate CWMs are either double-counted or split one coefficient between them. | family/variant ontology; merged-vs-split sensitivity. | ontology fields only; the sensitivity pass is `validate/`, a skeleton |
+| `BA-02` | Redundancy | Near-duplicate CWMs are either double-counted or split one coefficient between them. | family/variant ontology; merged-vs-split sensitivity. | ontology fields plus split-bound affected-subset sensitivity in `validate/`; interpretation of redundancy remains criterion-dependent |
 | `BA-03` | Alignment | Short overlaps and offset maximisation manufacture high similarity. | Two-sided overlap; null calibration; PPM and CWM on the same window. | — (the per-pair null is unbuilt; see `align/`) |
 | `BA-04` | Annotation | The top database hit is read as a specific TF identity. | Keep family separate from putative TF; carry source and confidence fields. | `schema.MotifNode` (`putative_tf_label`, `family_assignment_confidence`) |
 | `BA-05` | Model scale | Raw contribution units are not comparable between models. | Estimate the effect within each model; meta-analyse at a second level. | `guards.no_cross_model_cwm_avg`; `AnalysisConfig` refuses heterogeneity below three models |

@@ -7,8 +7,9 @@ motifs across models and methods.**
 ![version: 0.1.0.dev0](https://img.shields.io/badge/version-0.1.0.dev0-blue)
 ![API: unstable](https://img.shields.io/badge/API-unstable-red)
 
-> **This is mostly a skeleton.** Three of the nine analysis modules — `ingest`,
-> `compile` and `interpret` — are implemented; the other six raise
+> **This is still pre-alpha.** Seven of the nine analysis modules — `ingest`,
+> `align`, `annotate`, `adjudicate`, `compile`, `validate`, and `interpret` — are
+> implemented; `infer` and `report` still raise
 > `NotImplementedError`. What else runs today is the schema, the guards, the
 > provenance recorder, the CLI and the test suite. See
 > [Current state](#current-state) before investing time.
@@ -80,7 +81,7 @@ failed is not evidence.
 
 ## Current state
 
-Nine modules, six implemented. Each module directory carries a README stating its
+Nine modules, seven implemented. Each module directory carries a README stating its
 rule, the failure that produced the rule, and how the rule is checked.
 
 **What actually runs today:**
@@ -97,6 +98,12 @@ motifmultiverse annotate evidence/ --registry registry/ --tomtom --out evidence/
 motifmultiverse adjudicate evidence/ --registry registry/ --out adjudication/
 motifmultiverse compile registry/ \
     --decisions adjudication/merge_decisions.json --out lexicons/
+
+# validate requires frozen, standardized before/after hit tables and the exact
+# manifest-bound decision/validation split artifacts; see validate --help.
+motifmultiverse validate lexicons/ --before-hits before.parquet --after-hits after.parquet \
+    --split-manifest split-manifest.json --decision-artifact decision-split.json \
+    --validation-artifact validation-split.json --out validation/
 
 # and a query over a frozen hit table:
 motifmultiverse interpret hits.tsv \
@@ -157,11 +164,14 @@ caveat next to an effect size does not travel; the effect size does.
 Undeclared provenance is a recorded state (`DECLARATION_MISSING`) that costs the
 query its inference. It never resolves to the permissive grade.
 
-**What does not run:** validate, infer and report. The implemented middle path
-persists alignment evidence, retains competing annotation candidates, and records
-collapse/refusal/deferred adjudications. Undefined scientific thresholds remain
-explicitly deferred, so a run may intentionally compile an undeduplicated lexicon
-rather than guess a merge.
+**What does not run:** infer and report. The implemented middle path persists
+alignment evidence, retains competing annotation candidates, records
+collapse/refusal/deferred adjudications, and validates a merge on the affected
+subset of frozen standardized hit tables. An all-peak delta remains only a dilution
+diagnostic: fewer than 30 affected peaks are recorded as
+`LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim. Undefined
+scientific thresholds remain explicitly deferred, so a run may intentionally
+compile an undeduplicated lexicon rather than guess a merge.
 
 **Deliberately out of scope for v1:** computing attributions, discovering motifs,
 re-implementing a hit caller, cross-model raw CWM averaging (a design prohibition,
@@ -201,7 +211,7 @@ prose-only rule as enforced is the same class of error the guards exist to preve
 | [`docs/LESSONS.md`](docs/LESSONS.md) | every architecture constraint, indexed back to the failure that produced it |
 | [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) | stop-condition handoff protocol — the most portable file here |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | M1–M5, defined by completion criteria not dates |
-| `src/motifmultiverse/` | package: schema, guards, provenance, CLI, nine module skeletons |
+| `src/motifmultiverse/` | package: schema, guards, provenance, CLI, nine analysis modules |
 | `config/` | example project, specification and database configs |
 | `tests/` | schema, guard (incl. falsification), CLI and provenance tests |
 

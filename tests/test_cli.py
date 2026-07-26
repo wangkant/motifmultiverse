@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 
+import pandas as pd
 import pytest
 
 from motifmultiverse.cli import build_parser, main
+from motifmultiverse.schema import build_peak_split_manifest
+from motifmultiverse.validate import DecisionSplitArtifact, ValidationSplitArtifact
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
@@ -42,7 +45,6 @@ def test_all_eight_subcommands_are_registered():
 
 
 @pytest.mark.parametrize("argv", [
-    ["validate", "lexicons/"],
     ["infer", "instances/"],
     ["report", "project/"],
 ])
@@ -51,6 +53,63 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
     assert rc == 3
     err = capsys.readouterr().err
     assert "src/motifmultiverse/" in err and "README.md" in err
+
+
+def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_path):
+    lexicons = tmp_path / "lexicons"
+    lexicons.mkdir()
+    rows = [
+        {"peak_id": "p-validation", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0},
+    ]
+    before = tmp_path / "before.parquet"
+    after = tmp_path / "after.parquet"
+    pd.DataFrame(rows).to_parquet(before, index=False)
+    rows[0] = {"peak_id": "p-validation", "hit_id": "new", "coefficient": 2.0, "reconstruction": 1.0}
+    pd.DataFrame(rows).to_parquet(after, index=False)
+    manifest = build_peak_split_manifest({
+        "p-discovery": "DISCOVERY", "p-validation": "VALIDATION",
+    })
+    manifest_path = tmp_path / "split-manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": manifest.schema_version,
+        "assignments": {key: value.value for key, value in manifest.assignments.items()},
+        "checksum": manifest.checksum,
+    }), encoding="utf-8")
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:cli",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation"}),
+    )
+    validation = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id="decision:cli", result_id="stability:cli",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation"}),
+    )
+    decision_path = tmp_path / "decision-split.json"
+    validation_path = tmp_path / "validation-split.json"
+    decision_path.write_text(json.dumps(decision.to_dict()), encoding="utf-8")
+    validation_path.write_text(json.dumps(validation.to_dict()), encoding="utf-8")
+    out = tmp_path / "validation"
+
+    argv = [
+        "validate", str(lexicons), "--before-hits", str(before), "--after-hits", str(after),
+        "--split-manifest", str(manifest_path), "--decision-artifact", str(decision_path),
+        "--validation-artifact", str(validation_path), "--out", str(out),
+    ]
+    assert main(argv) == 0
+    assert (out / "stability_results.parquet").exists()
+    assert (out / "backend_verification.tsv").exists()
+
+    # A split-bound validation command must not silently include decision peaks.
+    corrupt = pd.read_parquet(after)
+    corrupt.loc[len(corrupt)] = {
+        "peak_id": "p-discovery", "hit_id": "old", "coefficient": 1.0, "reconstruction": 0.0,
+    }
+    corrupt.to_parquet(after, index=False)
+    refused_out = tmp_path / "refused-validation"
+    refused_argv = [str(refused_out) if value == str(out) else value for value in argv]
+    assert main(refused_argv) == 4
+    assert not (refused_out / "stability_results.parquet").exists()
 
 
 def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
