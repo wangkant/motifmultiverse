@@ -225,6 +225,42 @@ def test_health_is_emitted_first_even_when_everything_passes():
     assert result.emitted_order == ["health", "composition", "effects"]
 
 
+def test_contrast_health_shared_and_union_blocks_count_the_overlap():
+    """`shared_blocks`/`union_blocks` are required `ContrastHealth` interface fields
+    with no prior test coverage at all. Query spans blocks 0-9, comparator spans
+    blocks 5-14: five blocks in common (5..9), fifteen in the union (0..14).
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    query_ids = _ids(0, range(0, 10))
+    comparator_ids = _ids(1, range(5, 15))
+    contrast = interpret.contrast_health_report(
+        peaks, query_ids, comparator_ids, HealthFloors(), BLOCK)
+    assert contrast.shared_blocks == 5
+    assert contrast.union_blocks == 15
+
+
+def test_effects_gate_reads_the_single_contrast_passed_field(monkeypatch):
+    """The effects gate must read the one computed `ContrastHealth.passed`, not
+    re-derive the same AND from `.query.passed` / `.comparator.passed` inline.
+
+    This forces `.passed` to disagree with what those two sub-fields would
+    recompute (both real sides pass, but `.passed` is forced to False). If the
+    gate still recomputes its own condition instead of reading the field, the
+    force has no effect and effects would be emitted anyway.
+    """
+    real = interpret.contrast_health_report
+
+    def forced_false(*args, **kwargs):
+        ch = real(*args, **kwargs)
+        assert ch.passed is True and ch.query.passed and ch.comparator.passed
+        ch.passed = False
+        return ch
+
+    monkeypatch.setattr(interpret, "contrast_health_report", forced_false)
+    result = interpret.interpret_query(_rows(), _query(), n_bootstrap=20, seed=1)
+    assert result.effects is None
+
+
 # ------------------------------------------------------------------- dispatch
 @pytest.mark.parametrize("grade,mode", [
     (SelectionProvenance.EXTERNAL, OutputMode.FULL_INFERENCE),

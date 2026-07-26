@@ -644,7 +644,14 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     "stronger, prediction falsified', differing only in the comparator; no "
                     "baseline, no number (BA-18)."
                 )
-            if contrast.comparator is not None and not contrast.comparator.passed:
+            # `contrast.passed` is the single computed source of truth for "both
+            # sides healthy" (`query.passed and (comparator is None or
+            # comparator.passed)`). We are inside the `else` of `if not
+            # contrast.query.passed`, so `contrast.query.passed` is already True
+            # here, which makes `not contrast.passed` exactly equivalent to "a
+            # comparator was submitted and it failed" -- read from the one field
+            # instead of re-deriving that AND inline a second time.
+            if not contrast.passed:
                 # The query side earned composition, but an effect needs both sides
                 # healthy: a comparator that would itself have been refused as a
                 # query must not license a difference against it either.
