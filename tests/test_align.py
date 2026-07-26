@@ -44,11 +44,26 @@ def _load(name: str):
 
 
 def _revcomp(mat):
-    """Independent reimplementation of the BASE_ORDER=ACGT reverse-complement,
-    written separately from align's own helper so this test does not validate
-    the implementation against itself.
+    """Independent reimplementation of the BASE_ORDER=ACGT reverse-complement.
+
+    `align._reverse_complement` is a single vectorised fancy-indexing
+    expression (`mat[::-1, [3, 2, 1, 0]]`). This is deliberately NOT that
+    expression with the names changed: it walks rows with an explicit
+    Python loop, reverses position by index arithmetic (`n - 1 - i`) rather
+    than a slice, and looks up each base's complement from an explicit
+    ``{base: complement}`` map rather than a column-permutation list. A bug
+    in the production function's row-reversal or column-permutation (e.g. an
+    off-by-one, or A/G swapped instead of A/T) would not be reproduced here,
+    so this genuinely cross-checks the result rather than restating it.
     """
-    return mat[::-1, [3, 2, 1, 0]]
+    n_rows = mat.shape[0]
+    complement_of = {0: 3, 1: 2, 2: 1, 3: 0}
+    out = np.empty_like(mat)
+    for i in range(n_rows):
+        source_row = mat[n_rows - 1 - i]
+        for base, comp_base in complement_of.items():
+            out[i, comp_base] = source_row[base]
+    return out
 
 
 @pytest.fixture
@@ -337,11 +352,32 @@ def test_align_registry_excludes_nodes_without_a_ppm(tmp_path, shared_ppm, sign_
 
 
 def test_align_registry_rejects_zero_null_shuffles(tmp_path, shared_ppm, short_overlap_target):
+    """`align_registry` has its OWN fail-fast guard for `null_shuffles < 1`,
+    checked before the output directory is even created -- before
+    `out.mkdir`, before provenance is written, before the registry is
+    opened. `calibrate_pair_null` (called once per pair, deep in the loop
+    below all of that) has its own separately-tested guard for the same
+    condition, with a message that also contains "null_shuffles". So
+    asserting only on message text cannot tell the two guards apart:
+    deleting `align_registry`'s own guard and falling through to that
+    backstop would still raise a message-matching AlignmentError, just from
+    inside the loop, after `out_dir` and `provenance.json` already exist.
+
+    Assert on the one thing only the early guard can produce: `out_dir`
+    must never come into existence at all.
+    """
     registry = _registry_arrays_h5(tmp_path, {
         "a": {"ppm": shared_ppm}, "b": {"ppm": short_overlap_target},
     })
+    out = tmp_path / "evidence"
     with pytest.raises(AlignmentError, match="null.shuffles"):
-        align_registry(registry, tmp_path / "evidence", null_shuffles=0, seed=1)
+        align_registry(registry, out, null_shuffles=0, seed=1)
+    assert not out.exists(), (
+        "out_dir was created before align_registry's own null_shuffles guard "
+        "fired -- this can only happen if that guard was removed and "
+        "calibrate_pair_null's backstop guard (which runs after out.mkdir, "
+        "the provenance write, and the registry load) caught it instead"
+    )
 
 
 def test_run_is_the_orchestrator_entry_point():
