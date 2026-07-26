@@ -173,6 +173,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     a.add_argument("hits", help="frozen hit table (.tsv or .parquet)")
+    a.add_argument("--substrate-manifest", default=None,
+                   help="verified manifest for the one frozen caller specification")
     a.add_argument("--peaks", required=True, help="queried peak set (BED, or one region_id per line)")
     a.add_argument("--selection-provenance", default=None,
                    choices=[g.value for g in SelectionProvenance],
@@ -262,17 +264,27 @@ def _run_compile(ns: argparse.Namespace) -> int:
 
 def _run_interpret(ns: argparse.Namespace) -> int:
     from motifmultiverse import interpret as interpret_mod
+    from motifmultiverse.substrate import read_manifest
 
     # Provenance is written after the inputs are read and checksummed, but before
     # anything is computed: a record that cannot name its inputs describes nothing.
     rec = record("interpret", seed=ns.seed)
     hits = interpret_mod.read_hit_table(ns.hits)
+    substrate_id = hits[0].substrate_id
     rec.input_scale = hits[0].input_scale
-    for path in (ns.hits, ns.peaks, ns.comparator, ns.held_out):
+    rec.substrate_id = substrate_id
+    for path in (ns.hits, ns.substrate_manifest, ns.peaks, ns.comparator, ns.held_out):
         if path:
             rec.add_input(path)
     rec.write(ns.out)
 
+    if ns.substrate_manifest:
+        manifest = read_manifest(ns.substrate_manifest)
+        if substrate_id != manifest.substrate_id:
+            raise InterpretError(
+                "hit table substrate_id does not match --substrate-manifest; "
+                "refusing to interpret a different frozen caller run"
+            )
     query = PeakSetQuery(
         query_id=ns.query_id,
         region_ids=interpret_mod.read_peak_set(ns.peaks),

@@ -643,7 +643,7 @@ def _write_table(tmp_path):
         lines.append("\t".join([
             r.region_id, r.chrom, str(r.start), str(r.end), r.variant_id, r.family_id,
             "" if r.hit_coefficient is None else str(r.hit_coefficient),
-            r.missingness.value, str(r.input_scale), r.lexicon_id,
+            r.missingness.value, str(r.input_scale), r.lexicon_id, "e" * 64,
         ]))
     path.write_text("\n".join(lines) + "\n")
     return path

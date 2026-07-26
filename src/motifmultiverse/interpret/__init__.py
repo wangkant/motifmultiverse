@@ -105,6 +105,7 @@ def _coerce_row(row: dict[str, Any]) -> HitRecord:
         missingness=Missingness(str(row["missingness"])),
         input_scale=int(row["input_scale"]),
         lexicon_id=str(row["lexicon_id"]),
+        substrate_id=str(row.get("substrate_id") or MISSING_SENTINEL),
         variant_id=str(row.get("variant_id") or MISSING_SENTINEL),
         family_id=str(row.get("family_id") or MISSING_SENTINEL),
         hit_coefficient=None if coeff is None else float(coeff),
@@ -143,6 +144,13 @@ def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:
     lexicons = {r.lexicon_id for r in records}
     if len(lexicons) != 1:
         raise InterpretError(f"{p} mixes lexicons {sorted(lexicons)}; freeze one lexicon per table")
+    substrate_ids = {r.substrate_id for r in records}
+    if MISSING_SENTINEL in substrate_ids:
+        raise InterpretError(f"{p} has rows without a substrate_id; frozen hit tables must name one")
+    if len(substrate_ids) != 1:
+        raise InterpretError(
+            f"{p} mixes substrates {sorted(substrate_ids)}; a subset query must use one frozen run"
+        )
     return records
 
 
@@ -559,6 +567,7 @@ class Interpretation:
     notes: list[str]
     input_scale: int
     lexicon_id: str
+    substrate_id: str
     estimator: str = ESTIMATOR
     #: Every recognised value, and the subset that exists in this release. A
     #: consumer branches on `estimator` against this list rather than against a
@@ -590,6 +599,10 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     seed: int = 0) -> Interpretation:
     """Answer one peak-set query at the strength its selection provenance licenses."""
     floors = floors or HealthFloors()
+    substrate_ids = {h.substrate_id for h in hits}
+    if len(substrate_ids) != 1:
+        raise InterpretError("interpretation mixes substrates; subset queries require one frozen run")
+    substrate_id = next(iter(substrate_ids))
     # (1) before any number is computed. Two independent reads: `statistical_license`
     # decides what the query is allowed to compute, `claim_scope` decides what the
     # result may be evidence about. `mode` is kept only as the deprecated
@@ -729,6 +742,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         notes=notes,
         input_scale=hits[0].input_scale,
         lexicon_id=hits[0].lexicon_id,
+        substrate_id=substrate_id,
         health=query_health,   # deprecated alias of query_health; see docs/DATA_MODEL.md
     )
 

@@ -52,6 +52,7 @@ class ProvenanceRecord:
     software: dict[str, str] = field(default_factory=dict)
     random_seed: int | None = None
     input_scale: int | None = None
+    substrate_id: str | None = None
     timestamp_utc: str = ""
     schema_version: str = "1"
     #: The redaction policy as DATA, not as a comment. A later step that bundles
@@ -91,13 +92,15 @@ class ProvenanceRecord:
 
 
 def record(subcommand: str, out_dir: str | os.PathLike[str] | None = None,
-           seed: int | None = None, input_scale: int | None = None) -> ProvenanceRecord:
+           seed: int | None = None, input_scale: int | None = None,
+           substrate_id: str | None = None) -> ProvenanceRecord:
     """Build (and optionally write) the record for one invocation."""
     rec = ProvenanceRecord(
         command=" ".join([Path(sys.argv[0]).name, *sys.argv[1:]]),
         subcommand=subcommand,
         random_seed=seed,
         input_scale=input_scale,
+        substrate_id=substrate_id,
     )
     if out_dir is not None:
         rec.write(out_dir)

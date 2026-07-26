@@ -149,7 +149,7 @@ def test_ingest_refuses_an_undeclared_union_id_and_exits_4(tmp_path, capsys):
     assert "union_id" in capsys.readouterr().err
 
 
-def _tiny_substrate(tmp_path, n_blocks=6):
+def _tiny_substrate(tmp_path, n_blocks=6, substrate_id="e" * 64):
     """A hit table small enough to read, with two peaks per block."""
     from motifmultiverse.schema import HIT_TABLE_COLUMNS
     lines = ["\t".join(HIT_TABLE_COLUMNS)]
@@ -161,7 +161,7 @@ def _tiny_substrate(tmp_path, n_blocks=6):
             start = b * 1_000_000 + i * 1000
             lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
                                     f"UA_FAMA_{i}", "FAM_A", "1.0" if i == 0 else "0.2",
-                                    "used", "9999", "lex_v1"]))
+                                    "used", "9999", "lex_v1", substrate_id]))
     hits = tmp_path / "hits.tsv"
     hits.write_text("\n".join(lines) + "\n")
     (tmp_path / "q.txt").write_text("\n".join(query) + "\n")
@@ -187,14 +187,14 @@ def _bilateral_substrate(tmp_path, n_query_blocks=10, n_comparator_peaks=2):
         query_ids.append(rid)
         start = b * 1_000_000
         lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
-                                "UA_FAMA_0", "FAM_A", "1.0", "used", "9999", "lex_v1"]))
+                                "UA_FAMA_0", "FAM_A", "1.0", "used", "9999", "lex_v1", "e" * 64]))
     comparator_ids = []
     for i in range(n_comparator_peaks):
         rid = f"c{i}"
         comparator_ids.append(rid)
         start = i * 1000
         lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
-                                "UA_FAMA_1", "FAM_A", "0.2", "used", "9999", "lex_v1"]))
+                                "UA_FAMA_1", "FAM_A", "0.2", "used", "9999", "lex_v1", "e" * 64]))
     hits = tmp_path / "hits.tsv"
     hits.write_text("\n".join(lines) + "\n")
     (tmp_path / "q.txt").write_text("\n".join(query_ids) + "\n")
@@ -227,6 +227,91 @@ def test_interpret_writes_provenance_with_input_checksums(tmp_path):
     assert rec["input_scale"] == 9999
     assert set(rec["inputs"]) == {"hits.tsv", "q.txt", "c.txt"}
     assert all(len(v) == 64 for v in rec["inputs"].values())
+
+
+def test_interpret_refuses_a_table_that_does_not_match_the_substrate_manifest(tmp_path, capsys):
+    """A supplied manifest is a guard, never merely display metadata."""
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    manifest = build_manifest(
+        peak_universe_hash="c" * 64,
+        n_regions=12,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.3.1", lexicon_content_hash="a" * 64,
+            parameters={"lambda": 0.7}, preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.tsv": "d" * 64}, created_at="2026-07-25T00:00:00Z",
+    )
+    manifest_path = write_manifest(manifest, tmp_path / "substrate.manifest.json")
+    out = tmp_path / "o"
+
+    assert main([
+        "interpret", str(hits), "--substrate-manifest", str(manifest_path),
+        "--peaks", str(q), "--comparator", str(c), "--comparator-id", "odd",
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        *_floors(),
+    ]) == 4
+    assert "substrate_id" in capsys.readouterr().err
+    assert not (out / "interpretation.json").exists()
+
+
+def test_interpret_artifacts_record_the_verified_substrate_id(tmp_path):
+    """A successful interpretation retains the content identity that made it reproducible."""
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+
+    manifest = build_manifest(
+        peak_universe_hash="c" * 64,
+        n_regions=12,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.3.1", lexicon_content_hash="a" * 64,
+            parameters={"lambda": 0.7}, preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.tsv": "d" * 64}, created_at="2026-07-25T00:00:00Z",
+    )
+    hits, q, c = _tiny_substrate(tmp_path, substrate_id=manifest.substrate_id)
+    manifest_path = write_manifest(manifest, tmp_path / "substrate.manifest.json")
+    out = tmp_path / "o"
+
+    assert main([
+        "interpret", str(hits), "--substrate-manifest", str(manifest_path),
+        "--peaks", str(q), "--comparator", str(c), "--comparator-id", "odd",
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        *_floors(),
+    ]) == 0
+    assert json.loads((out / "interpretation.json").read_text())["substrate_id"] == manifest.substrate_id
+    assert json.loads((out / "provenance.json").read_text())[0]["substrate_id"] == manifest.substrate_id
+
+
+def test_interpret_refuses_a_malformed_substrate_manifest(tmp_path, capsys):
+    """Manifest structural corruption must be a refusal rather than an uncaught exception."""
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+
+    manifest = build_manifest(
+        peak_universe_hash="c" * 64,
+        n_regions=12,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.3.1", lexicon_content_hash="a" * 64,
+            parameters={"lambda": 0.7}, preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.tsv": "d" * 64}, created_at="2026-07-25T00:00:00Z",
+    )
+    hits, q, c = _tiny_substrate(tmp_path, substrate_id=manifest.substrate_id)
+    manifest_path = write_manifest(manifest, tmp_path / "substrate.manifest.json")
+    payload = json.loads(manifest_path.read_text())
+    payload["input_files"] = []
+    manifest_path.write_text(json.dumps(payload))
+
+    assert main([
+        "interpret", str(hits), "--substrate-manifest", str(manifest_path),
+        "--peaks", str(q), "--comparator", str(c), "--comparator-id", "odd",
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(tmp_path / "o"),
+        *_floors(),
+    ]) == 4
+    assert "invalid substrate manifest" in capsys.readouterr().err
 
 
 def test_interpret_refuses_without_a_baseline_and_exits_4(tmp_path, capsys):

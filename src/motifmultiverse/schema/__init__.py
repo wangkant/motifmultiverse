@@ -41,6 +41,7 @@ __all__ = [
     "StatisticalLicense", "ClaimScope", "RepresentationId", "VariantId",
     "resolve_query_permissions", "DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES",
     "IDENTITY_SCHEMA_VERSION",
+    "SUBSTRATE_SCHEMA_VERSION", "JsonValue", "CallerSpecification", "HitSubstrateManifest",
 ]
 
 # An explicit sentinel. Never 0, never NaN, never "".
@@ -55,6 +56,14 @@ class SchemaError(ValueError):
 
 class IdentityError(SchemaError):
     """An identifier was used across a namespace boundary without translation."""
+
+
+from .substrate import (  # noqa: E402  (SchemaError is the substrate validation base)
+    SUBSTRATE_SCHEMA_VERSION,
+    CallerSpecification,
+    HitSubstrateManifest,
+    JsonValue,
+)
 
 
 class Missingness(StrEnum):
@@ -761,7 +770,7 @@ def _output_mode_from_permissions(
 HIT_TABLE_COLUMNS = (
     "region_id", "chrom", "start", "end",
     "variant_id", "family_id", "hit_coefficient",
-    "missingness", "input_scale", "lexicon_id",
+    "missingness", "input_scale", "lexicon_id", "substrate_id",
 )
 
 
@@ -780,6 +789,7 @@ class HitRecord:
     missingness: Missingness
     input_scale: int
     lexicon_id: str
+    substrate_id: str = MISSING_SENTINEL
     variant_id: str = MISSING_SENTINEL
     family_id: str = MISSING_SENTINEL
     hit_coefficient: float | None = None
@@ -789,6 +799,10 @@ class HitRecord:
             self.missingness = Missingness(self.missingness)
         if self.start >= self.end:
             raise SchemaError(f"{self.region_id}: start {self.start} >= end {self.end}")
+        if self.substrate_id != MISSING_SENTINEL:
+            if (len(self.substrate_id) != 64
+                    or any(c not in "0123456789abcdef" for c in self.substrate_id)):
+                raise SchemaError(f"{self.region_id}: substrate_id must be a lowercase SHA-256 digest")
         if self.missingness is Missingness.USED:
             if self.variant_id == MISSING_SENTINEL:
                 raise SchemaError(f"{self.region_id}: a used hit must name a variant_id")
