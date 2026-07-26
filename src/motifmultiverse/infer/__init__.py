@@ -130,6 +130,46 @@ def bca_paired_block_interval(
             "report an interval computed from too little data."
         )
 
+    # Canonicalise each block's values to a fixed (sorted) order before anything
+    # ever sums them. A block's `Sequence[float]` represents an UNORDERED set of
+    # peak values; the caller's original list order is not semantic and must not
+    # be observable in the output. Sorting once here -- rather than trusting
+    # `statistic` to be order-invariant, or reaching for an order-independent
+    # summation like `math.fsum` -- is what actually delivers that: `statistic`
+    # is an arbitrary caller-supplied callable (e.g. a plain `sum()`-based mean
+    # difference) that this module does not control and cannot make
+    # order-invariant from the outside. `math.fsum` would only fix
+    # order-sensitivity in a summation *this module* performs; it does nothing
+    # for a caller's own reduction. Handing `statistic` a value sequence that is
+    # always identical (same content -> same order) for a given block, no matter
+    # what order the caller enumerated it in, is the only place in the pipeline
+    # that can make the guarantee hold for an arbitrary `statistic`. (A prior
+    # version skipped this: `_flatten` preserved caller order, so summing the
+    # same multiset in a different order produced a different float via
+    # non-associative addition -- usually by ~1 ULP, but that was enough to
+    # occasionally reorder two close bootstrap replicates relative to each
+    # other, and the BCa percentile lookup then interpolated between different
+    # order statistics, shifting the reported endpoint by far more than 1 ULP.
+    # 161/180 (seed, n_bootstrap) trials disagreed under pure within-block
+    # reordering before this fix; see
+    # test_bca_within_block_row_order_invariance_holds_across_many_seeds_and_bootstrap_sizes.)
+    # `key=(isnan, x)` rather than a plain `sorted(...)`: NaN's non-transitive
+    # comparisons (`nan < x` and `x < nan` are both False) break `sorted`'s usual
+    # guarantee that equal inputs sort to the same output regardless of input
+    # order -- a NaN anywhere in a block's raw values could otherwise let
+    # within-block order leak back in for the *other*, perfectly-finite values
+    # in that same block. Grouping on `isnan` first routes every NaN to one
+    # consistent end and leaves the finite values to compare normally among
+    # themselves, independent of where the caller put the NaN.
+    query_values = {
+        b: tuple(sorted(query_values.get(b, ()), key=lambda x: (math.isnan(x), x)))
+        for b in blocks
+    }
+    comparator_values = {
+        b: tuple(sorted(comparator_values.get(b, ()), key=lambda x: (math.isnan(x), x)))
+        for b in blocks
+    }
+
     theta_hat = statistic(_flatten(query_values, blocks), _flatten(comparator_values, blocks))
 
     # Jackknife acceleration, block-level: each block is dropped -- from BOTH
