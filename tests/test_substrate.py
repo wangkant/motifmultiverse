@@ -66,6 +66,22 @@ def test_hit_table_cannot_mix_substrate_ids(tmp_path):
         interpret.read_hit_table(table)
 
 
+def test_hit_table_refuses_a_missing_substrate_id_before_interpretation(tmp_path):
+    """The missing-ID guard is distinct from the mixed-substrate guard."""
+    table = tmp_path / "missing-substrate.tsv"
+    table.write_text(
+        "\t".join([
+            "region_id", "chrom", "start", "end", "variant_id", "family_id",
+            "hit_coefficient", "missingness", "input_scale", "lexicon_id", "substrate_id",
+        ])
+        + "\n"
+        + "r1\tchr1\t0\t10\tUA_FAMA_01\tFAM_A\t1.0\tused\t9999\tlex_v1\tNA\n"
+    )
+
+    with pytest.raises(interpret.InterpretError, match="without a substrate_id"):
+        interpret.read_hit_table(table)
+
+
 def test_identity_changes_for_every_semantic_caller_input():
     """Caller, version, lexicon, parameters, preprocessing, and universe all bind identity."""
     baseline = _manifest(lambda_value=0.7)

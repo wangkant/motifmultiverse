@@ -8,6 +8,7 @@ interval must not emit one with a caveat attached.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -16,6 +17,7 @@ from motifmultiverse import schema as schema_mod
 from motifmultiverse.schema import (
     DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
     HIT_TABLE_COLUMNS,
+    MISSING_SENTINEL,
     ClaimScope,
     HealthFloors,
     HitRecord,
@@ -37,6 +39,7 @@ PER_BLOCK = 4
 
 NOT_SEARCHED_PEAK = "r000_notsearched"
 NO_MATCH_PEAK = "r001_nomatch"
+SUBSTRATE_ID = "e" * 64
 
 
 def _rows() -> list[HitRecord]:
@@ -55,7 +58,7 @@ def _rows() -> list[HitRecord]:
             start = b * BLOCK + i * 1000
             is_query = i % 2 == 0
             common = dict(region_id=f"r{b:03d}_{i}", chrom="chr1", start=start, end=start + 500,
-                          input_scale=SCALE, lexicon_id=LEXICON)
+                          input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID)
             rows.append(HitRecord(
                 missingness=Missingness.USED, variant_id=f"UA_FAMA_{i:02d}", family_id="FAM_A",
                 hit_coefficient=1.0 + (b % 3) * 0.3 if is_query else 0.4, **common))
@@ -64,10 +67,10 @@ def _rows() -> list[HitRecord]:
                 hit_coefficient=0.5 + ((b if is_query else b + 1) % 3) * 0.2, **common))
     rows.append(HitRecord(region_id=NOT_SEARCHED_PEAK, chrom="chr1", start=900_000, end=900_500,
                           missingness=Missingness.NOT_SEARCHED,
-                          input_scale=SCALE, lexicon_id=LEXICON))
+                          input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
     rows.append(HitRecord(region_id=NO_MATCH_PEAK, chrom="chr1", start=1_900_000, end=1_900_500,
                           missingness=Missingness.NO_SEQUENCE_MATCH,
-                          input_scale=SCALE, lexicon_id=LEXICON))
+                          input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
     return rows
 
 
@@ -82,6 +85,13 @@ def _query(**over) -> PeakSetQuery:
               comparator_id="odd_peaks", comparator_region_ids=_ids(1))
     kw.update(over)
     return PeakSetQuery(**kw)
+
+
+def test_interpret_query_refuses_records_without_a_substrate_id():
+    """The direct API must not emit an artifact with the identity sentinel."""
+    rows = [replace(row, substrate_id=MISSING_SENTINEL) for row in _rows()]
+    with pytest.raises(interpret.InterpretError, match="without a substrate_id"):
+        interpret.interpret_query(rows, _query(), n_bootstrap=20)
 
 
 # ------------------------------------------------------------------ substrate
@@ -564,7 +574,8 @@ def test_no_withheld_pq_note_when_there_are_no_effects_to_withhold_them_from():
     """
     rows = []
     for i in range(4):
-        common = dict(chrom="chr1", input_scale=SCALE, lexicon_id=LEXICON)
+        common = dict(chrom="chr1", input_scale=SCALE, lexicon_id=LEXICON,
+                      substrate_id=SUBSTRATE_ID)
         rows.append(HitRecord(region_id=f"q{i}", start=i * 1000, end=i * 1000 + 500,
                               missingness=Missingness.NO_SEQUENCE_MATCH, **common))
         rows.append(HitRecord(region_id=f"c{i}", start=500_000 + i * 1000,

@@ -600,9 +600,15 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     """Answer one peak-set query at the strength its selection provenance licenses."""
     floors = floors or HealthFloors()
     substrate_ids = {h.substrate_id for h in hits}
+    if MISSING_SENTINEL in substrate_ids:
+        raise InterpretError("interpretation has records without a substrate_id")
     if len(substrate_ids) != 1:
         raise InterpretError("interpretation mixes substrates; subset queries require one frozen run")
     substrate_id = next(iter(substrate_ids))
+    if (not isinstance(substrate_id, str)
+            or len(substrate_id) != 64
+            or any(c not in "0123456789abcdef" for c in substrate_id)):
+        raise InterpretError("interpretation has an invalid substrate_id")
     # (1) before any number is computed. Two independent reads: `statistical_license`
     # decides what the query is allowed to compute, `claim_scope` decides what the
     # result may be evidence about. `mode` is kept only as the deprecated
