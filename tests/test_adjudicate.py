@@ -201,9 +201,60 @@ def test_criterion_loader_rejects_required_evidence_that_is_not_a_list(tmp_path)
     """`required_evidence: score` (a bare string, missing the YAML list brackets)
     must be refused, not silently iterated into one field name per character
     (`('s', 'c', 'o', 'r', 'e')`).
+
+    Regression note: an earlier version of this test used
+    `required_evidence="score"` with the default single predicate on field
+    `"a"`. That accidentally passed for the wrong reason even with the guard
+    (criteria.py:354-361) deleted: exploding `"score"` yields
+    `('s','c','o','r','e')`, which does not contain `"a"`, so the *unrelated*
+    undeclared-predicate-field check (`Criterion.__post_init__`,
+    ~line 193-199) fires instead and happens to mention "required_evidence"
+    too -- masking the guard's absence.
+
+    Use `required_evidence="a"` with a predicate on field `"a"` instead: a
+    single-character string explodes to the tuple `("a",)`, which *does*
+    declare the "a" predicate field, so the undeclared-field check stays
+    silent. This is the exact case the audit demonstrated loads with zero
+    error once the guard is removed, so only the guard under test can raise
+    here -- and we match on wording unique to its message, not merely the
+    substring "required_evidence".
     """
-    path = _write_registry(tmp_path, [_entry(required_evidence="score")])
-    with pytest.raises(CriteriaError, match="required_evidence"):
+    path = _write_registry(tmp_path, [
+        _entry(required_evidence="a", predicates=[{"field": "a", "operator": "is_true"}]),
+    ])
+    with pytest.raises(CriteriaError, match="must be a list of evidence field names"):
+        load_criteria(path)
+
+
+def test_criterion_not_yet_defined_never_reads_decision_if_matched():
+    """`decision_if_matched` is this module's own addition beyond the brief
+    (see `Criterion`'s docstring) and Task 12 will consume it, so the
+    guarantee that a `CRITERION_NOT_YET_DEFINED` criterion can never let it
+    override `DEFERRED` deserves its own pin -- even though the status branch
+    in `evaluate_criterion` is checked before predicates or
+    `decision_if_matched` are ever read, so this cannot structurally fire
+    today.
+    """
+    criterion = _criterion(status=CriterionStatus.CRITERION_NOT_YET_DEFINED)
+    assert criterion.decision_if_matched is Decision.COLLAPSE  # sanity: it IS set
+
+    # Evidence that would satisfy the criterion's only predicate (score >= 0.5)
+    # were it FROZEN, to prove DEFERRED wins even when a match "would" occur.
+    result = evaluate_criterion(criterion, {"score": 1.0})
+
+    assert result.decision is Decision.DEFERRED
+    assert result.matched is False
+
+
+def test_criterion_loader_rejects_entry_missing_a_required_top_level_key(tmp_path):
+    """A criterion entry missing one of the required top-level keys (e.g. a
+    typo'd or omitted `relationship`) must be refused at the loader level, not
+    merely at `Criterion` construction.
+    """
+    entry = _entry()
+    del entry["relationship"]
+    path = _write_registry(tmp_path, [entry])
+    with pytest.raises(CriteriaError, match="missing required key"):
         load_criteria(path)
 
 
