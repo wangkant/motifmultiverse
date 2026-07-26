@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any
 
 from .identity import (
@@ -47,6 +48,8 @@ __all__ = [
     "resolve_query_permissions", "DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES",
     "IDENTITY_SCHEMA_VERSION",
     "SUBSTRATE_SCHEMA_VERSION", "JsonValue", "CallerSpecification", "HitSubstrateManifest",
+    "SPLIT_MANIFEST_SCHEMA_VERSION", "SplitRole", "PeakSplitManifest",
+    "build_peak_split_manifest", "peak_split_manifest_checksum",
 ]
 
 
@@ -70,6 +73,99 @@ class SchemaError(ValueError):
 
 class IdentityError(SchemaError):
     """An identifier was used across a namespace boundary without translation."""
+
+
+SPLIT_MANIFEST_SCHEMA_VERSION = "1"
+
+
+class SplitRole(StrEnum):
+    """One mutually exclusive primary-analysis role for a peak."""
+
+    DISCOVERY = "DISCOVERY"
+    ADJUDICATION = "ADJUDICATION"
+    VALIDATION = "VALIDATION"
+    INFERENCE = "INFERENCE"
+
+
+def _require_sha256_digest(name: str, value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SchemaError(f"{name} must be a lowercase SHA-256 digest")
+
+
+def _is_nonempty_string(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def peak_split_manifest_checksum(
+    schema_version: str,
+    assignments: Mapping[str, SplitRole],
+) -> str:
+    """Hash the complete, canonically ordered primary split declaration."""
+    payload = {
+        "assignments": [
+            {"peak_id": peak_id, "role": role.value}
+            for peak_id, role in sorted(assignments.items())
+        ],
+        "schema_version": schema_version,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@dataclass(frozen=True)
+class PeakSplitManifest:
+    """A sealed, content-addressed primary-analysis assignment of peak IDs."""
+
+    schema_version: str
+    assignments: Mapping[str, SplitRole]
+    checksum: str
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SPLIT_MANIFEST_SCHEMA_VERSION:
+            raise SchemaError(
+                "peak split manifest schema_version must be "
+                f"{SPLIT_MANIFEST_SCHEMA_VERSION!r}"
+            )
+        if not isinstance(self.assignments, Mapping) or not self.assignments:
+            raise SchemaError("peak split manifest assignments must be a non-empty mapping")
+
+        frozen_assignments: dict[str, SplitRole] = {}
+        for peak_id, role in self.assignments.items():
+            if not _is_nonempty_string(peak_id):
+                raise SchemaError("peak split manifest peak IDs must be non-empty strings")
+            if not isinstance(role, SplitRole):
+                raise SchemaError("peak split manifest assignments must use SplitRole values")
+            frozen_assignments[peak_id] = role
+        expected = peak_split_manifest_checksum(self.schema_version, frozen_assignments)
+        _require_sha256_digest("peak split manifest checksum", self.checksum)
+        if self.checksum != expected:
+            raise SchemaError("peak split manifest checksum does not match canonical assignments")
+        object.__setattr__(self, "assignments", MappingProxyType(dict(sorted(frozen_assignments.items()))))
+
+
+def build_peak_split_manifest(assignments: Mapping[str, SplitRole | str]) -> PeakSplitManifest:
+    """Create a canonical manifest, accepting only exact enum spellings at I/O."""
+    if not isinstance(assignments, Mapping):
+        raise SchemaError("peak split manifest assignments must be a mapping")
+    normalized: dict[str, SplitRole] = {}
+    for peak_id, role in assignments.items():
+        try:
+            normalized[peak_id] = SplitRole(role)
+        except (TypeError, ValueError) as exc:
+            raise SchemaError(
+                f"peak split manifest role for {peak_id!r} is not a SplitRole"
+            ) from exc
+    checksum = peak_split_manifest_checksum(SPLIT_MANIFEST_SCHEMA_VERSION, normalized)
+    return PeakSplitManifest(
+        schema_version=SPLIT_MANIFEST_SCHEMA_VERSION,
+        assignments=normalized,
+        checksum=checksum,
+    )
 
 
 from .substrate import (  # noqa: E402  (SchemaError is the substrate validation base)
