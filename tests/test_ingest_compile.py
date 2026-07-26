@@ -384,6 +384,46 @@ def test_tier_override_with_an_invalid_analysis_tier_value_is_refused(tmp_path):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
 
 
+def test_tier_override_diverging_tiers_without_a_reason_is_refused(tmp_path):
+    """The divergence invariant must hold after a tiers override too, not just at
+    ingest time.
+
+    `MotifNode.__post_init__` refuses `discovery_tier != analysis_tier` unless
+    `tier_reason` is given explicitly. Ingest always writes
+    `discovery_tier == analysis_tier == CORE`, so that invariant is trivially
+    satisfied there; the only place a divergence can be *introduced* is a
+    `tiers` override applied by `_apply_tiers` at compile time -- and
+    `_apply_tiers` mutates a plain dict, never re-running the check that would
+    have rejected this exact state had it been constructed as a `MotifNode`
+    from scratch. An override that sets only `analysis_tier` (no
+    `tier_reason`) must be refused, not silently applied.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    node_id = nodes[0]["node_id"]
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"tiers": {node_id: {"analysis_tier": "expanded"}}}))
+    with pytest.raises(compile_mod.CompileError, match="tier_reason"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
+
+
+def test_tier_override_diverging_tiers_with_a_reason_is_applied(tmp_path):
+    """The companion case: the same divergence WITH an explicit tier_reason is a
+    legitimate, licensed override and must go through unchanged.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    node_id = nodes[0]["node_id"]
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"tiers": {
+        node_id: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}}}))
+    manifests = compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
+    assert manifests["core"].n_motifs == 4          # node_id demoted out of core
+    assert manifests["expanded"].n_motifs == 5
+
+
 def test_a_mistyped_decision_value_is_refused(tmp_path):
     """A mistyped `decision` (round-1 review finding 2) must not silently become a
     no-op collapse: before the fix this decision was compared against

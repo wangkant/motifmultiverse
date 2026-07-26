@@ -43,6 +43,7 @@ from motifmultiverse.ingest import GROUP_METACLUSTER, MODISCO_GROUPS, load_regis
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
     LEXICON_MANIFEST_SCHEMA_VERSION,
+    MISSING_SENTINEL,
     Decision,
     DecisionBundle,
     DecisionRecord,
@@ -72,12 +73,36 @@ class BackendMissing(RuntimeError):
 # Tier membership
 # --------------------------------------------------------------------------- #
 def _apply_tiers(nodes: list[dict[str, Any]], overrides: dict[str, Any]) -> list[dict[str, Any]]:
+    """Apply per-node ``tiers`` overrides, then re-check the invariant they can break.
+
+    ``MotifNode.__post_init__`` refuses ``discovery_tier != analysis_tier`` unless
+    ``tier_reason`` is given explicitly. Ingest always constructs nodes with
+    ``discovery_tier == analysis_tier == CORE``, so that check is trivially
+    satisfied there -- the only place a divergence can be *introduced* is here,
+    by an override that changes one of the pair but not the other. Because this
+    function works over plain dicts (not ``MotifNode`` instances), applying an
+    override never re-runs the dataclass validation that would have rejected the
+    resulting state had it been constructed from scratch. Re-run it explicitly:
+    an override is licensed to diverge the two tiers, but only alongside the same
+    explicit reason ``MotifNode`` would have demanded.
+    """
     out = []
     for node in nodes:
         node = dict(node)
         override = overrides.get(node["node_id"]) or {}
         node.update({k: v for k, v in override.items()
                      if k in {"discovery_tier", "analysis_tier", "tier_reason"}})
+        discovery_tier, analysis_tier = node.get("discovery_tier"), node.get("analysis_tier")
+        if (discovery_tier is not None and analysis_tier is not None
+                and discovery_tier != analysis_tier
+                and node.get("tier_reason", MISSING_SENTINEL) == MISSING_SENTINEL):
+            raise CompileError(
+                f"{node['node_id']}: tier override diverges discovery_tier "
+                f"({discovery_tier!r}) from analysis_tier ({analysis_tier!r}) with no "
+                "tier_reason. This is the same invariant MotifNode.__post_init__ "
+                "enforces at ingest time; an override that introduces the divergence "
+                "must supply the reason too, not silently apply."
+            )
         if node.get("analysis_tier") == Tier.EXCLUDED.value:
             continue
         out.append(node)
