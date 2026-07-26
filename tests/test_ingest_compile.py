@@ -223,6 +223,56 @@ def _decisions(tmp_path, registry, **fields):
     return path
 
 
+def _write_decisions(tmp_path, members, representative, cluster_id="c1",
+                     decision="collapse", **fields):
+    """A single decision, with caller-chosen members/representative (may be stale)."""
+    payload = {"cluster_id": cluster_id, "decision": decision, "members": members,
+               "representative": representative, "rationale": "r", "decided_by": "test"}
+    payload.update(fields)
+    path = tmp_path / "d.json"
+    path.write_text(json.dumps({"decisions": [payload]}))
+    return path
+
+
+def _overlapping_decisions(tmp_path, registry):
+    """Two collapse decisions that both claim the same node (V-08's compile-stage twin)."""
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    shared = nodes[1]["node_id"]
+    path = tmp_path / "d.json"
+    payload = {"decisions": [
+        {"cluster_id": "c1", "decision": "collapse",
+         "members": [nodes[0]["node_id"], shared], "representative": nodes[0]["node_id"],
+         "rationale": "r1", "decided_by": "test"},
+        {"cluster_id": "c2", "decision": "collapse",
+         "members": [shared, nodes[2]["node_id"]], "representative": shared,
+         "rationale": "r2", "decided_by": "test"},
+    ]}
+    path.write_text(json.dumps(payload))
+    return path
+
+
+def _decision_whose_representative_is_expanded_only(tmp_path, registry):
+    """A collapse whose representative is demoted out of `core` after the decision was made."""
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    rep = nodes[0]["node_id"]
+    other = nodes[1]["node_id"]
+    path = tmp_path / "d.json"
+    payload = {
+        "decisions": [{
+            "cluster_id": "c1", "decision": "collapse",
+            "members": [rep, other], "representative": rep,
+            "merge_confidence": "HIGH",
+            "rationale": "representative demoted to expanded after the decision was made",
+            "decided_by": "test",
+        }],
+        "tiers": {rep: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}},
+    }
+    path.write_text(json.dumps(payload))
+    return path
+
+
 @pytest.mark.parametrize("fields,trigger", [
     ({"merge_confidence": "MODERATE"}, "merge_confidence_not_high"),
     ({"merge_confidence": "LOW"}, "merge_confidence_not_high"),
@@ -285,6 +335,41 @@ def test_a_representative_that_is_not_a_member_is_refused(tmp_path):
         "rationale": "x", "decided_by": "test"}]}))
     with pytest.raises(compile_mod.CompileError, match="observed medoid"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
+
+
+def test_unknown_decision_member_is_refused(tmp_path):
+    registry = _registry(tmp_path)
+    decisions = _write_decisions(tmp_path, members=["missing-node"], representative="missing-node")
+    with pytest.raises(compile_mod.CompileError, match="unknown decision member"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
+
+
+def test_node_cannot_belong_to_two_collapse_clusters(tmp_path):
+    registry = _registry(tmp_path)
+    decisions = _overlapping_decisions(tmp_path, registry)
+    with pytest.raises(compile_mod.CompileError, match="multiple collapse clusters"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
+
+
+def test_representative_missing_from_tier_is_refused(tmp_path):
+    registry = _registry(tmp_path)
+    decisions = _decision_whose_representative_is_expanded_only(tmp_path, registry)
+    with pytest.raises(compile_mod.CompileError, match="representative is absent from tier core"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
+
+
+def test_a_refused_compile_still_writes_provenance(tmp_path):
+    """T-09: every subcommand writes provenance, including the ones that refuse.
+
+    A decisions payload rejected for referencing a stale node must not also
+    lose the record of what was attempted.
+    """
+    registry = _registry(tmp_path)
+    decisions = _write_decisions(tmp_path, members=["missing-node"], representative="missing-node")
+    out = tmp_path / "lex"
+    with pytest.raises(compile_mod.CompileError, match="unknown decision member"):
+        compile_mod.compile_lexicons(registry, out, decisions_path=decisions)
+    assert (out / "provenance.json").exists()
 
 
 def test_the_content_hash_is_deterministic_and_tracks_membership(tmp_path):

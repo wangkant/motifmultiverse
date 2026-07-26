@@ -41,7 +41,15 @@ from typing import Any
 from motifmultiverse import guards
 from motifmultiverse.ingest import GROUP_METACLUSTER, MODISCO_GROUPS, load_registry
 from motifmultiverse.provenance import record
-from motifmultiverse.schema import Decision, LexiconManifest, Tier, sensitivity_triggers
+from motifmultiverse.schema import (
+    Decision,
+    DecisionBundle,
+    DecisionRecord,
+    LexiconManifest,
+    SchemaError,
+    Tier,
+    sensitivity_triggers,
+)
 
 __all__ = [
     "CompileError", "BackendMissing", "TIERS",
@@ -89,6 +97,26 @@ def triggers_by_cluster(decisions: list[dict[str, Any]]) -> dict[str, list[str]]
             if d.get("decision") == Decision.COLLAPSE.value}
 
 
+def _assert_members_known(decisions: list[DecisionRecord], known_ids: set[str]) -> None:
+    """Every node a decision names must exist somewhere in this registry.
+
+    ``DecisionBundle.from_dict`` validates the payload's internal consistency but
+    has no registry to check against; this is the one place that does. A stale
+    decision -- one left over from a registry that has since been re-ingested --
+    is refused rather than silently dropped, because a dropped member changes the
+    lexicon's content without saying so.
+    """
+    for d in decisions:
+        for member in d.members:
+            if member not in known_ids:
+                raise CompileError(
+                    f"decision {d.cluster_id!r} names unknown decision member "
+                    f"{member!r}; it is not a node_id anywhere in this registry. A "
+                    "stale decision naming a node that no longer exists is refused, "
+                    "not silently ignored."
+                )
+
+
 def _members_for_tier(nodes: list[dict[str, Any]], decisions: list[dict[str, Any]],
                       tier: str) -> list[dict[str, Any]]:
     """Which nodes make up one tier's lexicon, after applicable collapses."""
@@ -106,16 +134,23 @@ def _members_for_tier(nodes: list[dict[str, Any]], decisions: list[dict[str, Any
         members = [m for m in (d.get("members") or []) if m in by_id]
         if not members:
             continue
-        representative = d.get("representative")
-        if representative is None or representative not in (d.get("members") or []):
-            raise CompileError(
-                f"collapse {d.get('cluster_id')!r} names representative "
-                f"{representative!r}, which is not one of its members. The "
-                "representative is an observed medoid, never a constructed average "
-                "(FP-05)."
-            )
         if tier == "sensitivity" and sensitivity_triggers(d):
             continue          # left split in the sensitivity lexicon, by named trigger
+        # The representative's membership was already validated against the
+        # decision's own member list (DecisionRecord.__post_init__); what is
+        # checked here is narrower and tier-specific: this collapse is about to
+        # be applied in `tier`, and its surviving members must not be silently
+        # dropped just because the representative itself did not survive into
+        # this particular tier.
+        representative = d.get("representative")
+        if representative not in by_id:
+            raise CompileError(
+                f"collapse {d.get('cluster_id')!r}: representative is absent from "
+                f"tier {tier} (representative={representative!r}), even though "
+                f"member(s) {sorted(members)} survive into it. The surviving "
+                "members are never silently dropped to accommodate a "
+                "representative missing from this tier."
+            )
         collapsed_away.update(m for m in members if m != representative)
     return [n for n in kept if n["node_id"] not in collapsed_away]
 
@@ -259,15 +294,25 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
 
     prov = record("compile", seed=seed)
     meta, nodes, arrays = load_registry(registry_dir)
-    payload: dict[str, Any] = {}
-    if decisions_path is not None:
-        prov.add_input(decisions_path)
-        payload = json.loads(Path(decisions_path).read_text())
-    decisions = list(payload.get("decisions") or [])
-    overrides = dict(payload.get("tiers") or {})
-    prov.write(out)
-
     try:
+        payload: dict[str, Any] = {}
+        if decisions_path is not None:
+            prov.add_input(decisions_path)
+            payload = json.loads(Path(decisions_path).read_text())
+        # Provenance is written before the decisions payload is validated, same as
+        # every other refusal below (a tier with no motifs, mixed motif lengths):
+        # a rejected compile still leaves a record of what was attempted (T-09).
+        prov.write(out)
+        try:
+            bundle = DecisionBundle.from_dict(payload)
+        except SchemaError as exc:
+            raise CompileError(str(exc)) from exc
+        _assert_members_known(bundle.decisions, {n["node_id"] for n in nodes})
+        # `_members_for_tier` / `triggers_by_cluster` predate `DecisionBundle` and
+        # still work over plain dicts; converting once here keeps them unchanged.
+        decisions = [asdict(d) for d in bundle.decisions]
+        overrides = bundle.tiers
+
         tiered = _apply_tiers(nodes, overrides)
         index: dict[str, list[dict[str, Any]]] = {}
         ordered_by_tier: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}

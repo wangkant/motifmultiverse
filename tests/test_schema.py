@@ -6,6 +6,7 @@ import pytest
 from motifmultiverse.schema import (
     AnalysisConfig,
     Decision,
+    DecisionBundle,
     DecisionRecord,
     EvidenceEdge,
     IdentityError,
@@ -101,6 +102,65 @@ def test_confidence_must_be_a_measure(bad):
     with pytest.raises(SchemaError):
         DecisionRecord("c0", Decision.COLLAPSE, ["a"], rationale="ok",
                        decided_by="x", confidence=bad)
+
+
+# ---- collapse decisions must name a representative that is one of members ---
+def test_collapse_requires_a_representative():
+    with pytest.raises(SchemaError, match="names no representative"):
+        DecisionRecord("c0", Decision.COLLAPSE, ["a", "b"],
+                       rationale="ok", decided_by="x")
+
+
+def test_collapse_representative_must_be_one_of_its_members():
+    with pytest.raises(SchemaError, match="observed medoid"):
+        DecisionRecord("c0", Decision.COLLAPSE, ["a", "b"],
+                       rationale="ok", decided_by="x", representative="c")
+
+
+def test_a_representative_is_not_required_outside_collapse():
+    d = DecisionRecord("c0", Decision.REFUSE_MERGE, ["a", "b"],
+                       rationale="geometry passed but TF identity differs",
+                       decided_by="curator")
+    assert d.representative is None
+
+
+# ---- DecisionRecord.from_dict / DecisionBundle.from_dict --------------------
+def test_decision_record_from_dict_rejects_an_unknown_key():
+    with pytest.raises(SchemaError, match="unknown key"):
+        DecisionRecord.from_dict({
+            "cluster_id": "c0", "decision": "refuse_merge", "members": ["a"],
+            "rationale": "r", "decided_by": "x", "confidenc": 0.9,   # typo'd field
+        })
+
+
+def test_decision_bundle_carries_a_schema_version():
+    bundle = DecisionBundle.from_dict({})
+    assert bundle.schema_version
+    assert bundle.decisions == []
+    assert bundle.tiers == {}
+
+
+def test_decision_bundle_rejects_an_unknown_top_level_key():
+    with pytest.raises(SchemaError, match="unknown key"):
+        DecisionBundle.from_dict({"decisions": [], "override": {}})   # renamed from "tiers"
+
+
+def test_decision_bundle_rejects_duplicate_cluster_ids():
+    dup = {"cluster_id": "c0", "decision": "refuse_merge", "members": ["a"],
+           "rationale": "r", "decided_by": "x"}
+    with pytest.raises(SchemaError, match="duplicate cluster_id"):
+        DecisionBundle.from_dict({"decisions": [dup, dict(dup)]})
+
+
+def test_decision_bundle_rejects_a_node_claimed_by_two_collapse_clusters():
+    payload = {"decisions": [
+        {"cluster_id": "c0", "decision": "collapse", "members": ["a", "b"],
+         "representative": "a", "rationale": "r0", "decided_by": "x"},
+        {"cluster_id": "c1", "decision": "collapse", "members": ["b", "c"],
+         "representative": "b", "rationale": "r1", "decided_by": "x"},
+    ]}
+    with pytest.raises(SchemaError, match="multiple collapse clusters"):
+        DecisionBundle.from_dict(payload)
 
 
 # ---- T-13: two tier fields, and a reason when they disagree -----------------

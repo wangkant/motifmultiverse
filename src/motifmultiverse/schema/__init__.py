@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from typing import Any
 
 __all__ = [
     "Missingness", "Decision", "Tier", "IdentityError", "SchemaError",
-    "MotifNode", "EvidenceEdge", "DecisionRecord", "AnalysisConfig",
+    "MotifNode", "EvidenceEdge", "DecisionRecord", "DecisionBundle", "AnalysisConfig",
     "NamespacedId", "translate", "assert_no_key_parsing", "MISSING_SENTINEL",
     "SelectionProvenance", "OutputMode", "MOST_CONSERVATIVE_OUTPUT_MODE",
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
@@ -26,7 +26,7 @@ __all__ = [
     "Estimator", "IMPLEMENTED_ESTIMATORS", "InferenceCapability", "ESTIMATOR_CAPABILITY",
     "MergeConfidence",
     "MERGE_CONFIDENCE_CRITERIA", "CRITERION_NOT_YET_DEFINED",
-    "SensitivityTrigger", "sensitivity_triggers",
+    "SensitivityTrigger", "sensitivity_triggers", "DECISION_BUNDLE_SCHEMA_VERSION",
 ]
 
 # An explicit sentinel. Never 0, never NaN, never "".
@@ -210,6 +210,18 @@ class EvidenceEdge:
             )
 
 
+def _reject_unknown_keys(payload: Mapping[str, Any], allowed: set[str], what: str) -> None:
+    """Shared by every ``from_dict`` in this module: an unrecognised key is refused,
+    not silently ignored -- that is how a renamed field becomes a no-op.
+    """
+    unknown = set(payload) - allowed
+    if unknown:
+        raise SchemaError(
+            f"{what} has unknown key(s) {sorted(unknown)}; expected a subset of "
+            f"{sorted(allowed)}."
+        )
+
+
 @dataclass
 class DecisionRecord:
     """Rule 4. Refusals are rows. Confidence is a measure, not a name lookup.
@@ -228,6 +240,10 @@ class DecisionRecord:
     decided_by: str
     confidence: float | None = None
     merge_confidence: MergeConfidence | None = None
+    #: The observed medoid a collapse cluster survives as. Required, and must be
+    #: one of ``members``, whenever ``decision`` is ``COLLAPSE`` -- see
+    #: ``__post_init__``. Never set from a decision that does not collapse.
+    representative: str | None = None
     family_ambiguity: bool = False
     threshold_sensitive: bool = False
 
@@ -250,6 +266,95 @@ class DecisionRecord:
                     f"{[g.value for g in MergeConfidence]}. It is a grade, not a number: "
                     "there is no scalar to threshold here (see MERGE_CONFIDENCE_CRITERIA)."
                 ) from exc
+        if self.decision == Decision.COLLAPSE:
+            if self.representative is None:
+                raise SchemaError(
+                    f"collapse {self.cluster_id!r} names no representative; a collapse "
+                    "decision must record which observed medoid the surviving motif is "
+                    "(FP-05)."
+                )
+            if self.representative not in self.members:
+                raise SchemaError(
+                    f"collapse {self.cluster_id!r} names representative "
+                    f"{self.representative!r}, which is not one of its members. The "
+                    "representative is an observed medoid, never a constructed average "
+                    "(FP-05)."
+                )
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> DecisionRecord:
+        """Parse one decision, refusing any key this record does not define.
+
+        A renamed or misspelled field must fail loudly here rather than being
+        silently dropped and read back as "not decided".
+        """
+        allowed = {f.name for f in fields(cls)}
+        _reject_unknown_keys(payload, allowed, f"decision {payload.get('cluster_id')!r}")
+        return cls(**payload)
+
+
+#: ``DecisionBundle`` schema revision. Bumped only if the payload shape changes.
+DECISION_BUNDLE_SCHEMA_VERSION = "1"
+
+#: The only keys a decisions payload may declare. Anything else is refused rather
+#: than ignored, per the same rule as ``DecisionRecord.from_dict``.
+_DECISION_BUNDLE_KEYS = frozenset({"schema_version", "decisions", "tiers"})
+
+
+@dataclass
+class DecisionBundle:
+    """A decisions JSON payload, parsed and validated once before ``compile`` applies it.
+
+    ``compile`` used to hand ``payload.get("decisions")`` -- a bare list of dicts --
+    straight to its tiering logic, which tolerated a decision naming a node that no
+    longer exists in the registry, and tolerated two collapse decisions both
+    claiming the same node. Both are silent content changes to the compiled
+    lexicon, and both are refused here instead: two decisions cannot claim the same
+    ``cluster_id``, and a node cannot be claimed by two different collapse clusters
+    at once, because a node's fate is decided exactly once.
+
+    What this class does **not** know is the registry: a decision naming a node
+    that has never existed at all is ``compile``'s check (it is the only place
+    that has the registry's node ids), and so is whether a tier-specific
+    representative actually survives into the tier being compiled.
+    """
+
+    schema_version: str
+    decisions: list[DecisionRecord]
+    tiers: dict[str, dict[str, str]]
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any] | None) -> DecisionBundle:
+        payload = payload or {}
+        _reject_unknown_keys(payload, set(_DECISION_BUNDLE_KEYS), "decisions payload")
+        decisions = [d if isinstance(d, DecisionRecord) else DecisionRecord.from_dict(d)
+                     for d in (payload.get("decisions") or [])]
+
+        seen_clusters: set[str] = set()
+        member_owner: dict[str, str] = {}
+        for d in decisions:
+            if d.cluster_id in seen_clusters:
+                raise SchemaError(
+                    f"duplicate cluster_id {d.cluster_id!r} in decisions; each cluster "
+                    "is decided exactly once"
+                )
+            seen_clusters.add(d.cluster_id)
+            if d.decision != Decision.COLLAPSE:
+                continue
+            for member in d.members:
+                owner = member_owner.get(member)
+                if owner is not None and owner != d.cluster_id:
+                    raise SchemaError(
+                        f"node {member!r} belongs to multiple collapse clusters "
+                        f"({owner!r} and {d.cluster_id!r}); a node's fate is decided once"
+                    )
+                member_owner[member] = d.cluster_id
+
+        return cls(
+            schema_version=str(payload.get("schema_version") or DECISION_BUNDLE_SCHEMA_VERSION),
+            decisions=decisions,
+            tiers=dict(payload.get("tiers") or {}),
+        )
 
 
 #: A union id names one model/readout's shared lexicon namespace. It is declared in
