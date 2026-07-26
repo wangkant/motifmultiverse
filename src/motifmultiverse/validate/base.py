@@ -119,6 +119,24 @@ def _require_artifact_id(kind: str, artifact_id: object, expected: str) -> None:
         raise SchemaError(f"{kind} split artifact artifact_id does not match its content")
 
 
+def _require_persisted_artifact_id(kind: str, artifact_id: object) -> None:
+    if not _is_nonempty_string(artifact_id):
+        raise SchemaError(f"{kind} split artifact payload artifact_id must be a non-empty string")
+
+
+def _peak_ids_from_payload(value: object, path: str) -> frozenset[str]:
+    if not isinstance(value, list):
+        raise SchemaError(f"{path} must be a list of non-empty string peak IDs")
+    peak_ids: list[str] = []
+    for index, peak_id in enumerate(value):
+        if not _is_nonempty_string(peak_id):
+            raise SchemaError(f"{path}[{index}] must be a non-empty string peak ID")
+        peak_ids.append(peak_id)
+    if len(set(peak_ids)) != len(peak_ids):
+        raise SchemaError(f"{path} must not contain duplicate peak IDs")
+    return frozenset(peak_ids)
+
+
 def _canonical_folds(kind: str, folds: tuple[CrossFitFold, ...]) -> tuple[CrossFitFold, ...]:
     if not isinstance(folds, tuple) or any(not isinstance(fold, CrossFitFold) for fold in folds):
         raise SchemaError(f"{kind} split artifact cross_fit_folds must be CrossFitFold values")
@@ -196,17 +214,22 @@ def _folds_from_payload(value: object) -> tuple[CrossFitFold, ...]:
     if not isinstance(value, list):
         raise SchemaError("split artifact cross_fit_folds must be a list")
     folds: list[CrossFitFold] = []
-    for row in value:
+    for index, row in enumerate(value):
         if not isinstance(row, Mapping) or set(row) != {
             "fold_id", "decision_peak_ids", "evaluation_peak_ids"
         }:
-            raise SchemaError("split artifact fold metadata is malformed")
-        decision_ids = row["decision_peak_ids"]
-        evaluation_ids = row["evaluation_peak_ids"]
-        if not isinstance(decision_ids, list) or not isinstance(evaluation_ids, list):
-            raise SchemaError("split artifact fold peak IDs must be lists")
+            raise SchemaError(f"cross_fit_folds[{index}] metadata is malformed")
+        fold_id = row["fold_id"]
+        if not _is_nonempty_string(fold_id):
+            raise SchemaError(f"cross_fit_folds[{index}].fold_id must be a non-empty string")
+        decision_ids = _peak_ids_from_payload(
+            row["decision_peak_ids"], f"cross_fit_folds[{index}].decision_peak_ids"
+        )
+        evaluation_ids = _peak_ids_from_payload(
+            row["evaluation_peak_ids"], f"cross_fit_folds[{index}].evaluation_peak_ids"
+        )
         folds.append(CrossFitFold(
-            row["fold_id"], frozenset(decision_ids), frozenset(evaluation_ids)
+            fold_id, decision_ids, evaluation_ids
         ))
     return tuple(folds)
 
@@ -306,8 +329,9 @@ class DecisionSplitArtifact:
         }
         if not isinstance(payload, Mapping) or set(payload) != expected_keys or payload.get("kind") != "decision":
             raise SchemaError("decision split artifact payload is malformed")
-        if payload["result_id"] is not None or not isinstance(payload["decision_peak_ids"], list) or not isinstance(payload["validation_peak_ids"], list):
+        if payload["result_id"] is not None:
             raise SchemaError("decision split artifact payload has invalid identity fields")
+        _require_persisted_artifact_id("decision", payload["artifact_id"])
         _require_checksum("decision split artifact payload split_manifest_checksum", payload["split_manifest_checksum"])
         try:
             mode = AnalysisMode(payload["mode"])
@@ -315,8 +339,8 @@ class DecisionSplitArtifact:
             raise SchemaError("decision split artifact payload has an invalid mode") from exc
         return cls(
             manifest=manifest, decision_id=payload["decision_id"],
-            decision_peak_ids=frozenset(payload["decision_peak_ids"]),
-            validation_peak_ids=frozenset(payload["validation_peak_ids"]),
+            decision_peak_ids=_peak_ids_from_payload(payload["decision_peak_ids"], "decision_peak_ids"),
+            validation_peak_ids=_peak_ids_from_payload(payload["validation_peak_ids"], "validation_peak_ids"),
             split_manifest_checksum=payload["split_manifest_checksum"], mode=mode,
             cross_fit_folds=_folds_from_payload(payload["cross_fit_folds"]),
             artifact_id=payload["artifact_id"], schema_version=payload["schema_version"],
@@ -394,8 +418,9 @@ class ValidationSplitArtifact:
         }
         if not isinstance(payload, Mapping) or set(payload) != expected_keys or payload.get("kind") != "validation":
             raise SchemaError("validation split artifact payload is malformed")
-        if not _is_nonempty_string(payload["result_id"]) or not isinstance(payload["decision_peak_ids"], list) or not isinstance(payload["validation_peak_ids"], list):
+        if not _is_nonempty_string(payload["result_id"]):
             raise SchemaError("validation split artifact payload has invalid identity fields")
+        _require_persisted_artifact_id("validation", payload["artifact_id"])
         _require_checksum("validation split artifact payload split_manifest_checksum", payload["split_manifest_checksum"])
         try:
             mode = AnalysisMode(payload["mode"])
@@ -403,8 +428,8 @@ class ValidationSplitArtifact:
             raise SchemaError("validation split artifact payload has an invalid mode") from exc
         return cls(
             manifest=manifest, decision_id=payload["decision_id"], result_id=payload["result_id"],
-            decision_peak_ids=frozenset(payload["decision_peak_ids"]),
-            validation_peak_ids=frozenset(payload["validation_peak_ids"]),
+            decision_peak_ids=_peak_ids_from_payload(payload["decision_peak_ids"], "decision_peak_ids"),
+            validation_peak_ids=_peak_ids_from_payload(payload["validation_peak_ids"], "validation_peak_ids"),
             split_manifest_checksum=payload["split_manifest_checksum"], mode=mode,
             cross_fit_folds=_folds_from_payload(payload["cross_fit_folds"]),
             artifact_id=payload["artifact_id"], schema_version=payload["schema_version"],

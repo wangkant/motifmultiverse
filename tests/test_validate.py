@@ -407,3 +407,140 @@ def test_split_artifact_deserialization_refuses_missing_or_empty_manifest_checks
     del payload["split_manifest_checksum"]
     with pytest.raises(SchemaError, match="malformed"):
         DecisionSplitArtifact.from_dict(payload, manifest=manifest)
+
+
+def _persisted_artifact(kind: str):
+    manifest = _manifest()
+    common = {
+        "manifest": manifest,
+        "decision_id": "decision-1",
+        "decision_peak_ids": frozenset({"p-discovery"}),
+        "validation_peak_ids": frozenset({"p-validation-a"}),
+    }
+    if kind == "decision":
+        artifact = DecisionSplitArtifact.create(**common)
+        return artifact, DecisionSplitArtifact, manifest
+    artifact = ValidationSplitArtifact.create(result_id="stability-1", **common)
+    return artifact, ValidationSplitArtifact, manifest
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+@pytest.mark.parametrize("artifact_id", ["", None, "not-an-artifact-id"])
+def test_split_persisted_artifact_requires_a_nonempty_exact_identity(kind, artifact_id):
+    artifact, artifact_type, manifest = _persisted_artifact(kind)
+    payload = artifact.to_dict()
+    payload["artifact_id"] = artifact_id
+    with pytest.raises(SchemaError, match="artifact_id"):
+        artifact_type.from_dict(payload, manifest=manifest)
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+def test_split_persisted_artifact_requires_an_identity_field(kind):
+    artifact, artifact_type, manifest = _persisted_artifact(kind)
+    payload = artifact.to_dict()
+    del payload["artifact_id"]
+    with pytest.raises(SchemaError, match="malformed"):
+        artifact_type.from_dict(payload, manifest=manifest)
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+def test_split_persisted_artifact_rejects_relabelled_mode_when_identity_is_blanked(kind):
+    artifact, artifact_type, manifest = _persisted_artifact(kind)
+    payload = artifact.to_dict()
+    payload["mode"] = AnalysisMode.EXPLORATORY.value
+    payload["artifact_id"] = ""
+    with pytest.raises(SchemaError, match="artifact_id"):
+        artifact_type.from_dict(payload, manifest=manifest)
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+@pytest.mark.parametrize("field, value", [
+    ("decision_peak_ids", [["nested"]]),
+    ("decision_peak_ids", [True]),
+    ("validation_peak_ids", [1]),
+    ("validation_peak_ids", "not-a-list"),
+])
+def test_split_persisted_artifact_rejects_malformed_peak_collections_with_field_paths(
+    kind, field, value,
+):
+    artifact, artifact_type, manifest = _persisted_artifact(kind)
+    payload = artifact.to_dict()
+    payload[field] = value
+    with pytest.raises(SchemaError, match=field):
+        artifact_type.from_dict(payload, manifest=manifest)
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+def test_split_persisted_artifact_rejects_nested_fold_collections_with_field_paths(kind):
+    manifest = _manifest()
+    peaks = frozenset({"p-discovery", "p-validation-a"})
+    folds = (
+        CrossFitFold("one", frozenset({"p-validation-a"}), frozenset({"p-discovery"})),
+        CrossFitFold("two", frozenset({"p-discovery"}), frozenset({"p-validation-a"})),
+    )
+    common = {
+        "manifest": manifest,
+        "decision_id": "decision-1",
+        "decision_peak_ids": peaks,
+        "validation_peak_ids": peaks,
+        "mode": AnalysisMode.CROSS_FIT,
+        "cross_fit_folds": folds,
+    }
+    if kind == "decision":
+        artifact = DecisionSplitArtifact.create(**common)
+        artifact_type = DecisionSplitArtifact
+    else:
+        artifact = ValidationSplitArtifact.create(result_id="stability-1", **common)
+        artifact_type = ValidationSplitArtifact
+    payload = artifact.to_dict()
+    payload["cross_fit_folds"][0]["decision_peak_ids"] = [["nested"]]
+    with pytest.raises(SchemaError, match=r"cross_fit_folds\[0\].decision_peak_ids\[0\]"):
+        artifact_type.from_dict(payload, manifest=manifest)
+
+
+@pytest.mark.parametrize("kind", ["decision", "validation"])
+@pytest.mark.parametrize("replacement, match", [
+    ("not-a-list", "cross_fit_folds must be a list"),
+    ([[]], r"cross_fit_folds\[0\] metadata"),
+    ([
+        {
+            "fold_id": True,
+            "decision_peak_ids": ["p-validation-a"],
+            "evaluation_peak_ids": ["p-discovery"],
+        },
+    ], r"cross_fit_folds\[0\].fold_id"),
+    ([
+        {
+            "fold_id": "one",
+            "decision_peak_ids": [1],
+            "evaluation_peak_ids": ["p-discovery"],
+        },
+    ], r"cross_fit_folds\[0\].decision_peak_ids\[0\]"),
+])
+def test_split_persisted_artifact_rejects_malformed_fold_parser_values(
+    kind, replacement, match,
+):
+    manifest = _manifest()
+    peaks = frozenset({"p-discovery", "p-validation-a"})
+    folds = (
+        CrossFitFold("one", frozenset({"p-validation-a"}), frozenset({"p-discovery"})),
+        CrossFitFold("two", frozenset({"p-discovery"}), frozenset({"p-validation-a"})),
+    )
+    common = {
+        "manifest": manifest,
+        "decision_id": "decision-1",
+        "decision_peak_ids": peaks,
+        "validation_peak_ids": peaks,
+        "mode": AnalysisMode.CROSS_FIT,
+        "cross_fit_folds": folds,
+    }
+    if kind == "decision":
+        artifact = DecisionSplitArtifact.create(**common)
+        artifact_type = DecisionSplitArtifact
+    else:
+        artifact = ValidationSplitArtifact.create(result_id="stability-1", **common)
+        artifact_type = ValidationSplitArtifact
+    payload = artifact.to_dict()
+    payload["cross_fit_folds"] = replacement
+    with pytest.raises(SchemaError, match=match):
+        artifact_type.from_dict(payload, manifest=manifest)
