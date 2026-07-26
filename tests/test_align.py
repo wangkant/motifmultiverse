@@ -18,6 +18,7 @@ Fixture arrays live in ``tests/fixtures/motifs/`` and are hand-verified there
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -27,11 +28,13 @@ from motifmultiverse.align import (
     DEFAULT_MIN_OVERLAP_BP,
     DEFAULT_MIN_OVERLAP_FRAC,
     AlignmentError,
+    AlignmentEvidence,
     align_registry,
     calibrate_pair_null,
     register_pair,
     run,
 )
+from motifmultiverse.schema import REGISTRY_SCHEMA_VERSION
 
 np = pytest.importorskip("numpy")
 pd = pytest.importorskip("pandas")
@@ -41,6 +44,43 @@ FIXTURES = Path(__file__).parent / "fixtures" / "motifs"
 
 def _load(name: str):
     return np.load(FIXTURES / name)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"orientation": "forward"},
+        {"registered_on": "signed_cwm"},
+        {"registration_rule_version": "forged"},
+        {"overlap_bp": 0},
+        {"overlap_frac_source": -0.1},
+        {"overlap_frac_target": 1.1},
+        {"ppm_similarity": float("inf")},
+        {"signed_cwm_similarity": float("nan")},
+        {"empirical_p_value": -0.01},
+        {"empirical_p_value": 1.01},
+        {"null_shuffles": 0},
+        {"seed": 1.5},
+    ],
+)
+def test_alignment_evidence_refuses_corrupted_fields(changes):
+    evidence = AlignmentEvidence(
+        source_node_id="a",
+        target_node_id="b",
+        orientation="+",
+        offset=0,
+        overlap_bp=10,
+        overlap_frac_source=1.0,
+        overlap_frac_target=1.0,
+        ppm_similarity=0.9,
+        signed_cwm_similarity=0.8,
+        empirical_p_value=0.01,
+        null_shuffles=100,
+        seed=7,
+    )
+
+    with pytest.raises(AlignmentError):
+        replace(evidence, **changes)
 
 
 def _revcomp(mat):
@@ -277,6 +317,7 @@ def _registry_arrays_h5(tmp_path, motifs: dict[str, dict[str, np.ndarray]]):
             "project": "p", "peak_universe_id": "u", "analyses": [],
             "n_models": 1, "cross_model_claims_restricted": True,
             "metacluster_states": {}, "trim_threshold": 0.3,
+            "schema_version": REGISTRY_SCHEMA_VERSION,
         },
         "nodes": nodes,
     }

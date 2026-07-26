@@ -39,9 +39,11 @@ identifier, so it is not a Rule 2 (`no_key_parsing`) violation.
 from __future__ import annotations
 
 import csv
+import math
 import os
 from dataclasses import asdict, dataclass, replace
 from itertools import combinations
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any
 
@@ -92,11 +94,78 @@ class AlignmentEvidence:
     overlap_frac_target: float
     ppm_similarity: float
     signed_cwm_similarity: float | None
-    empirical_p_value: float
+    empirical_p_value: float | None
     null_shuffles: int
     seed: int
     registered_on: str = "unsigned_ppm"
     registration_rule_version: str = REGISTRATION_RULE_VERSION
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("source_node_id", self.source_node_id),
+            ("target_node_id", self.target_node_id),
+            ("orientation", self.orientation),
+            ("registered_on", self.registered_on),
+            ("registration_rule_version", self.registration_rule_version),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise AlignmentError(f"{name} must be a non-empty string")
+        if self.source_node_id == self.target_node_id:
+            raise AlignmentError("alignment evidence must connect two distinct nodes")
+        if self.orientation not in {"+", "-"}:
+            raise AlignmentError("orientation must be '+' or '-'")
+        if self.registered_on != "unsigned_ppm":
+            raise AlignmentError("registered_on must be 'unsigned_ppm'")
+        if self.registration_rule_version != REGISTRATION_RULE_VERSION:
+            raise AlignmentError(
+                f"registration_rule_version must be {REGISTRATION_RULE_VERSION!r}"
+            )
+        for name, value in (
+            ("offset", self.offset),
+            ("overlap_bp", self.overlap_bp),
+            ("null_shuffles", self.null_shuffles),
+            ("seed", self.seed),
+        ):
+            if isinstance(value, bool) or not isinstance(value, Integral):
+                raise AlignmentError(f"{name} must be an integer")
+        if self.overlap_bp <= 0:
+            raise AlignmentError("overlap_bp must be positive")
+        if self.null_shuffles < 0:
+            raise AlignmentError("null_shuffles must be non-negative")
+
+        def finite_measure(name: str, value: Any, low: float, high: float) -> None:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, Real)
+                or not math.isfinite(float(value))
+                or not low <= float(value) <= high
+            ):
+                raise AlignmentError(
+                    f"{name} must be a finite measure in [{low}, {high}]"
+                )
+
+        finite_measure("overlap_frac_source", self.overlap_frac_source, 0.0, 1.0)
+        finite_measure("overlap_frac_target", self.overlap_frac_target, 0.0, 1.0)
+        finite_measure("ppm_similarity", self.ppm_similarity, -1.0, 1.0)
+        if self.signed_cwm_similarity is not None:
+            finite_measure(
+                "signed_cwm_similarity", self.signed_cwm_similarity, -1.0, 1.0
+            )
+        if self.null_shuffles == 0:
+            if self.empirical_p_value is not None:
+                raise AlignmentError(
+                    "uncalibrated alignment evidence requires empirical_p_value=None"
+                )
+        else:
+            if self.empirical_p_value is None:
+                raise AlignmentError(
+                    "calibrated alignment evidence requires an empirical_p_value"
+                )
+            finite_measure("empirical_p_value", self.empirical_p_value, 0.0, 1.0)
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self.null_shuffles > 0 and self.empirical_p_value is not None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -153,7 +222,10 @@ def _cosine(a: Any, b: Any) -> float:
     norm_a, norm_b = float(np.linalg.norm(flat_a)), float(np.linalg.norm(flat_b))
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    return float(np.dot(flat_a, flat_b) / (norm_a * norm_b))
+    value = float(np.dot(flat_a, flat_b) / (norm_a * norm_b))
+    # Roundoff can place a mathematically bounded cosine a few ulps outside
+    # [-1, 1]; clamp the computed value before schema validation.
+    return max(-1.0, min(1.0, value))
 
 
 def _candidate_windows(source_len: int, target_len: int):
@@ -250,7 +322,7 @@ def register_pair(source_ppm: Any, target_ppm: Any,
         overlap_frac_target=frac_target,
         ppm_similarity=score,
         signed_cwm_similarity=signed_similarity,
-        empirical_p_value=float("nan"),
+        empirical_p_value=None,
         null_shuffles=0,
         seed=0,
     )

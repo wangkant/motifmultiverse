@@ -187,6 +187,11 @@ class Criterion:
 
         if not self.criterion_id.strip():
             raise CriteriaError("a criterion requires a non-empty criterion_id")
+        if self.insufficient_evidence_action is not Decision.DEFERRED:
+            raise CriteriaError(
+                f"{self.criterion_id}: insufficient_evidence_action must be deferred; "
+                "missing evidence can never license collapse or assert a refusal"
+            )
         if not self.required_evidence:
             raise CriteriaError(f"{self.criterion_id}: required_evidence must name >=1 field")
 
@@ -266,7 +271,8 @@ def evaluate_criterion(criterion: Criterion, evidence: Mapping[str, Any]) -> Cri
        so no evidence, however complete, can make it evaluable.
     2. Evidence missing one of ``criterion.required_evidence`` (absent, or
        explicitly ``None`` -- never coerced to a false-y placeholder) ->
-       ``criterion.insufficient_evidence_action``.
+       ``Decision.DEFERRED``. Construction also requires the persisted
+       ``insufficient_evidence_action`` field to state that exact invariant.
     3. Otherwise, every predicate is evaluated. All satisfied ->
        ``criterion.decision_if_matched``. Any unsatisfied -> the fail-safe
        ``REFUSE_MERGE``, never a guessed collapse.
@@ -289,7 +295,7 @@ def evaluate_criterion(criterion: Criterion, evidence: Mapping[str, Any]) -> Cri
         return CriterionEvaluation(
             criterion_id=criterion.criterion_id,
             criterion_version=criterion.version,
-            decision=criterion.insufficient_evidence_action,
+            decision=Decision.DEFERRED,
             matched=False,
             rationale=(
                 f"{criterion.criterion_id} v{criterion.version}: missing required "

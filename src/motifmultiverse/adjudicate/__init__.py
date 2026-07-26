@@ -13,9 +13,12 @@ from motifmultiverse.align import AlignmentEvidence
 from motifmultiverse.schema import (
     DECISION_BUNDLE_PRODUCER,
     DECISION_BUNDLE_SCHEMA_VERSION,
+    REGISTRY_SCHEMA_VERSION,
     Decision,
     DecisionBundle,
     DecisionRecord,
+    MotifNode,
+    RegistryMetadata,
     SchemaError,
     decision_bundle_artifact_id,
 )
@@ -38,6 +41,12 @@ __all__ = [
 ]
 
 ADJUDICATION_SCHEMA_VERSION = "1"
+_MEDOID_TIE_FIELDS = (
+    "motif_completeness",
+    "seqlet_count",
+    "core_ic",
+    "cross_context_recurrence",
+)
 
 
 class AdjudicationError(SchemaError):
@@ -250,29 +259,52 @@ def _family_evidence(
 
 def _medoid_metadata(
     members: tuple[str, ...],
-    candidates: Sequence[AnnotationCandidate],
     node_metadata: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     metadata: dict[str, dict[str, Any]] = {}
     for node_id in members:
         values = {
             key: node_metadata.get(node_id, {}).get(key)
-            for key in (
-                "motif_completeness",
-                "seqlet_count",
-                "core_ic",
-                "cross_context_recurrence",
-            )
+            for key in _MEDOID_TIE_FIELDS
             if node_metadata.get(node_id, {}).get(key) is not None
         }
-        rows = [candidate for candidate in candidates if candidate.node_id == node_id]
-        if "seqlet_count" not in values:
-            counts = [row.seqlet_count for row in rows if row.seqlet_count is not None]
-            if counts:
-                values["seqlet_count"] = max(counts)
         if values:
             metadata[node_id] = values
     return metadata
+
+
+def _missing_authoritative_tie_metadata(
+    members: tuple[str, ...],
+    pairwise_similarity: Mapping[tuple[str, str], float],
+    metadata: Mapping[str, Mapping[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """Return missing persisted fields only when mean-similarity leaders tie."""
+    if len(members) < 2:
+        return {}
+    means = {
+        member: sum(
+            _pair_similarity(member, other, pairwise_similarity)
+            for other in members
+            if other != member
+        ) / (len(members) - 1)
+        for member in members
+    }
+    best = max(means.values())
+    leaders = tuple(member for member in members if means[member] == best)
+    if len(leaders) < 2:
+        return {}
+    return {
+        member: tuple(
+            field_name
+            for field_name in _MEDOID_TIE_FIELDS
+            if metadata.get(member, {}).get(field_name) is None
+        )
+        for member in leaders
+        if any(
+            metadata.get(member, {}).get(field_name) is None
+            for field_name in _MEDOID_TIE_FIELDS
+        )
+    }
 
 
 def _criterion_for(
@@ -420,37 +452,6 @@ def adjudicate_component(
         **stability_values,
     }
 
-    if relationship in {"AMBIGUOUS_CROSS_FAMILY", "SAME_FAMILY_VARIANT"}:
-        evaluation = evaluate_criterion(criterion, base_evidence)
-        evidence_for = (
-            f"registered matrix similarity up to "
-            f"{max((edge.ppm_similarity for edge in pair_edges.values()), default=float('nan')):.3f}",
-        )
-        evidence_against = (
-            (
-                f"conflicting proposed families: {sorted(proposed_families)}"
-                if family_conflict
-                else f"same family retains distinct variant identities: {sorted(variant_ids)}"
-            ),
-        )
-        return OntologyDecision(
-            decision_id=decision_id,
-            node_ids=members,
-            relationship=relationship,
-            decision=evaluation.decision,
-            family_id=family_id,
-            representative_node_id=None,
-            criterion_id=criterion.criterion_id,
-            criterion_version=criterion.version,
-            evidence_ids=tuple(sorted(set(evidence_ids))),
-            evidence_for=evidence_for,
-            evidence_against=evidence_against,
-            rationale=evaluation.rationale,
-            decided_by=decided_by,
-            manual_override=False,
-            provenance=provenance,
-        )
-
     expected_pairs = {
         _pair_key(left, right)
         for index, left in enumerate(members)
@@ -482,14 +483,86 @@ def adjudicate_component(
             provenance=provenance,
         )
 
+    if relationship in {"AMBIGUOUS_CROSS_FAMILY", "SAME_FAMILY_VARIANT"}:
+        evaluation = evaluate_criterion(criterion, base_evidence)
+        evidence_for = (
+            f"registered matrix similarity up to "
+            f"{max((edge.ppm_similarity for edge in pair_edges.values()), default=float('nan')):.3f}",
+        )
+        evidence_against = (
+            (
+                f"conflicting proposed families: {sorted(proposed_families)}"
+                if family_conflict
+                else f"same family retains distinct variant identities: {sorted(variant_ids)}"
+            ),
+        )
+        structural_decision = (
+            Decision.REFUSE_MERGE
+            if relationship == "AMBIGUOUS_CROSS_FAMILY"
+            else evaluation.decision
+        )
+        rationale = evaluation.rationale
+        if relationship == "AMBIGUOUS_CROSS_FAMILY":
+            rationale = (
+                "conflicting authoritative family assignments always REFUSE_MERGE; "
+                f"criterion context: {evaluation.rationale}"
+            )
+        return OntologyDecision(
+            decision_id=decision_id,
+            node_ids=members,
+            relationship=relationship,
+            decision=structural_decision,
+            family_id=family_id,
+            representative_node_id=None,
+            criterion_id=criterion.criterion_id,
+            criterion_version=criterion.version,
+            evidence_ids=tuple(sorted(set(evidence_ids))),
+            evidence_for=evidence_for,
+            evidence_against=evidence_against,
+            rationale=rationale,
+            decided_by=decided_by,
+            manual_override=False,
+            provenance=provenance,
+        )
+
     similarities = {
         pair: edge.ppm_similarity
         for pair, edge in pair_edges.items()
     }
+    medoid_metadata = _medoid_metadata(members, node_metadata)
+    missing_tie_metadata = _missing_authoritative_tie_metadata(
+        members, similarities, medoid_metadata
+    )
+    if missing_tie_metadata:
+        return OntologyDecision(
+            decision_id=decision_id,
+            node_ids=members,
+            relationship=relationship,
+            decision=Decision.DEFERRED,
+            family_id=family_id,
+            representative_node_id=None,
+            criterion_id=criterion.criterion_id,
+            criterion_version=criterion.version,
+            evidence_ids=tuple(sorted(set(evidence_ids))),
+            evidence_for=tuple(
+                f"registered pair {pair}" for pair in sorted(pair_edges)
+            ),
+            evidence_against=(
+                f"missing authoritative medoid tie metadata {missing_tie_metadata}",
+            ),
+            rationale=(
+                "mean-similarity medoid leaders tie, but authoritative medoid tie metadata "
+                "is unavailable; adjudication defers rather than substituting identifier "
+                "parsing, zeros, or lexical order as scientific evidence"
+            ),
+            decided_by=decided_by,
+            manual_override=False,
+            provenance=provenance,
+        )
     medoid = choose_medoid(
         members,
         similarities,
-        node_metadata=_medoid_metadata(members, usable_candidates, node_metadata),
+        node_metadata=medoid_metadata,
     )
     evaluations = []
     for member in members:
@@ -656,6 +729,8 @@ def write_adjudication_artifacts(
 ) -> tuple[Path, Path, Path]:
     """Write the full audit table, validated compile handoff, and human review."""
     import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
     import yaml
 
     if not provenance:
@@ -697,12 +772,23 @@ def write_adjudication_artifacts(
         "manual_override", "override_operator", "override_rationale", "provenance",
         "schema_version",
     ]
-    pd.DataFrame(ontology_rows, columns=ontology_columns).to_parquet(
-        ontology_path, index=False
+    table = pa.Table.from_pandas(
+        pd.DataFrame(ontology_rows, columns=ontology_columns),
+        preserve_index=False,
     )
+    file_metadata = dict(table.schema.metadata or {})
+    file_metadata.update({
+        b"motifmultiverse.artifact_kind": b"ontology-decisions",
+        b"motifmultiverse.artifact_id": ontology_artifact_id.encode("utf-8"),
+        b"motifmultiverse.schema_version": ADJUDICATION_SCHEMA_VERSION.encode("utf-8"),
+        b"motifmultiverse.provenance": json.dumps(
+            dict(provenance), sort_keys=True, separators=(",", ":")
+        ).encode("utf-8"),
+    })
+    pq.write_table(table.replace_schema_metadata(file_metadata), ontology_path)
 
     records = [_merge_record(decision) for decision in decision_list]
-    artifact_id = decision_bundle_artifact_id(records, {})
+    artifact_id = decision_bundle_artifact_id(records, {}, provenance)
     bundle = DecisionBundle(
         schema_version=DECISION_BUNDLE_SCHEMA_VERSION,
         artifact_id=artifact_id,
@@ -747,13 +833,19 @@ def _read_alignment_edges(path: Path) -> list[AlignmentEvidence]:
 
     try:
         rows = pd.read_parquet(path).to_dict("records")
-        return [
+        edges = [
             AlignmentEvidence(**{
                 key: _none_if_missing(value)
                 for key, value in row.items()
             })
             for row in rows
         ]
+        if any(not edge.is_calibrated for edge in edges):
+            raise ValueError(
+                "persisted alignment evidence must carry a calibrated p-value "
+                "and positive null_shuffles"
+            )
+        return edges
     except (OSError, TypeError, ValueError) as exc:
         raise AdjudicationError(f"{path} is not valid alignment evidence: {exc}") from exc
 
@@ -795,48 +887,47 @@ def _read_stability_results(path: Path) -> list[StabilityEvidence]:
         raise AdjudicationError(f"{path} is not valid stability evidence: {exc}") from exc
 
 
-def _read_node_metadata(registry_dir: str | Path | None) -> tuple[Path | None, dict[str, dict[str, Any]]]:
-    if registry_dir is None:
-        return None, {}
+def _read_node_metadata(registry_dir: str | Path) -> tuple[Path, dict[str, dict[str, Any]]]:
     registry_path = Path(registry_dir) / "registry.json"
     try:
         payload = json.loads(registry_path.read_text(encoding="utf-8"))
-        nodes = payload["nodes"]
-        if not isinstance(nodes, list):
+        raw_metadata = payload["registry_metadata"]
+        raw_nodes = payload["nodes"]
+        if not isinstance(raw_metadata, Mapping):
+            raise TypeError("registry_metadata must be a mapping")
+        if "schema_version" not in raw_metadata:
+            raise TypeError("registry_metadata requires schema_version")
+        registry_metadata = RegistryMetadata(**raw_metadata)
+        if registry_metadata.schema_version != REGISTRY_SCHEMA_VERSION:
+            raise TypeError("registry schema version is not supported")
+        if not isinstance(raw_nodes, list):
             raise TypeError("nodes must be a list")
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        nodes = [MotifNode(**node) for node in raw_nodes]
+        from motifmultiverse.guards import variant_id_unique
+
+        identity_guard = variant_id_unique(nodes)
+        if not identity_guard.passed:
+            raise SchemaError(identity_guard.detail)
+    except (OSError, KeyError, TypeError, SchemaError, json.JSONDecodeError) as exc:
         raise AdjudicationError(
             f"{registry_path} is not a readable motif registry: {exc}"
         ) from exc
 
-    contexts_by_variant: dict[str, set[str]] = {}
-    for node in nodes:
-        variant_id = node.get("variant_id")
-        context = node.get("context")
-        if isinstance(variant_id, str) and isinstance(context, str):
-            contexts_by_variant.setdefault(variant_id, set()).add(context)
-
     metadata: dict[str, dict[str, Any]] = {}
     for node in nodes:
-        node_id = node.get("node_id")
-        if not isinstance(node_id, str) or not node_id:
-            raise AdjudicationError("registry node metadata requires a non-empty node_id")
-        provenance = node.get("provenance")
-        provenance = provenance if isinstance(provenance, Mapping) else {}
-        variant_id = node.get("variant_id")
+        if node.node_id in metadata:
+            raise AdjudicationError(
+                f"registry contains duplicate node_id {node.node_id!r}"
+            )
         values = {
-            "family_id": node.get("family_id"),
-            "variant_id": variant_id,
-            "motif_completeness": provenance.get("motif_completeness"),
-            "seqlet_count": node.get("seqlet_count"),
-            "core_ic": node.get("core_ic"),
-            "cross_context_recurrence": (
-                len(contexts_by_variant.get(variant_id, ()))
-                if isinstance(variant_id, str)
-                else None
-            ),
+            "family_id": node.family_id,
+            "variant_id": node.variant_id,
+            "motif_completeness": node.motif_completeness,
+            "seqlet_count": node.seqlet_count,
+            "core_ic": node.core_ic,
+            "cross_context_recurrence": node.cross_context_recurrence,
         }
-        metadata[node_id] = {
+        metadata[node.node_id] = {
             key: value for key, value in values.items() if value is not None
         }
     return registry_path, metadata
@@ -846,11 +937,11 @@ def adjudicate_evidence(
     evidence_dir: str | Path,
     out_dir: str | Path,
     *,
+    registry_dir: str | Path,
     criteria_path: str | Path | None = None,
     review_path: str | Path = "review.yaml",
     policy: str = "conservative",
     decided_by: str = "motifmultiverse.adjudicate",
-    registry_dir: str | Path | None = None,
 ) -> tuple[OntologyDecision, ...]:
     """Read prior-stage evidence, adjudicate every component, and write artifacts."""
     from motifmultiverse.provenance import record, sha256_file
@@ -873,8 +964,7 @@ def adjudicate_evidence(
     provenance_record = record("adjudicate")
     try:
         input_paths = [alignment_path, annotation_path, criteria_path]
-        if registry_path is not None:
-            input_paths.append(registry_path)
+        input_paths.append(registry_path)
         for path in input_paths:
             provenance_record.add_input(path)
         if stability_path.exists():

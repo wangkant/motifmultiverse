@@ -19,6 +19,7 @@ from motifmultiverse.schema import (
     DECISION_BUNDLE_PRODUCER,
     DECISION_BUNDLE_SCHEMA_VERSION,
     IDENTITY_SCHEMA_VERSION,
+    REGISTRY_SCHEMA_VERSION,
     Decision,
     MetaclusterState,
     RegistryMetadata,
@@ -78,11 +79,17 @@ def test_ingest_builds_a_registry_with_the_six_field_groups(tmp_path):
     assert len(nodes) == 5                      # 3 pos + 2 neg
     n = nodes[0]
     assert n.model == "modelA" and n.readout == "r1" and n.context == "promoter"
-    assert n.metacluster == "pos" and n.denovo_pattern_id == "pos_patterns.pattern_0"
+    assert (
+        n.metacluster == "pos"
+        and n.denovo_pattern_id == "modelA_r1::pos_patterns.pattern_0"
+    )
     assert n.motif_length == MOTIF_LEN and n.seqlet_count == 250
     assert n.core_ic is not None and n.trimmed_core is not None
+    assert n.motif_completeness == (n.trimmed_core[1] - n.trimmed_core[0]) / MOTIF_LEN
+    assert n.cross_context_recurrence is None
     assert n.provenance["modisco_h5_sha256"] and n.provenance["analysis_id"] == "modelA_r1"
     assert meta.project == "test-project"
+    assert meta.schema_version == REGISTRY_SCHEMA_VERSION
 
 
 def test_ingest_writes_arrays_and_provenance(tmp_path):
@@ -99,6 +106,17 @@ def test_ingest_writes_arrays_and_provenance(tmp_path):
         assert set(arrays[records[0]["node_id"]].keys()) == {"cwm", "hypothetical_cwm", "ppm"}
     finally:
         arrays.close()
+
+
+def test_registry_loader_refuses_an_unversioned_persisted_registry(tmp_path):
+    out = tmp_path / "registry"
+    ingest.ingest_project(_project(tmp_path), out)
+    payload = json.loads((out / "registry.json").read_text())
+    payload["registry_metadata"].pop("schema_version")
+    (out / "registry.json").write_text(json.dumps(payload))
+
+    with pytest.raises(SchemaError, match="schema_version"):
+        ingest.load_registry(out)
 
 
 @pytest.mark.parametrize("neg_group,search,expected", [
@@ -154,6 +172,28 @@ def test_three_models_lift_the_restriction(tmp_path):
     assert meta.n_models == 3 and meta.cross_model_claims_restricted is False
 
 
+def test_ingest_keeps_registry_identities_unique_across_shared_union_contexts(tmp_path):
+    analyses = [
+        {
+            "id": f"a{i}",
+            "model": "model",
+            "readout": "readout",
+            "union_id": "SHARED",
+            "context": context,
+            "modisco_h5": str(_modisco(tmp_path / f"{i}.h5", n_pos=1, n_neg=0)),
+        }
+        for i, context in enumerate(("promoter", "enhancer"))
+    ]
+    _, nodes = ingest.ingest_project(
+        _project(tmp_path, analyses=analyses),
+        tmp_path / "registry",
+    )
+
+    assert len({node.variant_id for node in nodes}) == len(nodes)
+    assert len({node.denovo_pattern_id for node in nodes}) == len(nodes)
+    assert all(node.cross_context_recurrence is None for node in nodes)
+
+
 def test_union_id_must_be_declared_not_derived(tmp_path):
     analyses = [{"id": "a1", "model": "m", "readout": "r", "context": "promoter",
                  "modisco_h5": str(_modisco(tmp_path / "a.h5"))}]
@@ -178,8 +218,12 @@ def test_pattern_ids_are_opaque_join_tokens(tmp_path):
     import pathlib
     _, nodes = ingest.ingest_project(_project(tmp_path), tmp_path / "registry")
     assert {n.denovo_pattern_id for n in nodes} == {
-        "pos_patterns.pattern_0", "pos_patterns.pattern_1", "pos_patterns.pattern_2",
-        "neg_patterns.pattern_0", "neg_patterns.pattern_1"}
+        "modelA_r1::pos_patterns.pattern_0",
+        "modelA_r1::pos_patterns.pattern_1",
+        "modelA_r1::pos_patterns.pattern_2",
+        "modelA_r1::neg_patterns.pattern_0",
+        "modelA_r1::neg_patterns.pattern_1",
+    }
     for mod in (ingest, compile_mod):
         src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
         assert guards.no_key_parsing(src).passed, mod.__name__
@@ -239,11 +283,12 @@ def _adjudication_payload(*, decisions=(), tiers=None):
     """Identity-bearing Task 12 handoff, allowing one test to corrupt inner data."""
     tiers = dict(tiers or {})
     decisions = list(decisions)
+    provenance = {"test_fixture": "tests/test_ingest_compile.py"}
     return {
         "schema_version": DECISION_BUNDLE_SCHEMA_VERSION,
-        "artifact_id": decision_bundle_artifact_id(decisions, tiers),
+        "artifact_id": decision_bundle_artifact_id(decisions, tiers, provenance),
         "producer": DECISION_BUNDLE_PRODUCER,
-        "provenance": {"test_fixture": "tests/test_ingest_compile.py"},
+        "provenance": provenance,
         "decisions": decisions,
         "tiers": tiers,
     }

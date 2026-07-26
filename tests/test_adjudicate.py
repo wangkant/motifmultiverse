@@ -8,13 +8,20 @@ below.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 import yaml
 
-from motifmultiverse.schema import Decision
+from motifmultiverse.schema import (
+    MISSING_SENTINEL,
+    REGISTRY_SCHEMA_VERSION,
+    Decision,
+    MotifNode,
+    RegistryMetadata,
+)
 from motifmultiverse.schema.criteria import (
     CRITERIA_SCHEMA_VERSION,
     CriteriaError,
@@ -188,6 +195,16 @@ def test_criterion_loader_rejects_an_invalid_insufficient_evidence_action(tmp_pa
     """
     path = _write_registry(tmp_path, [_entry(insufficient_evidence_action="deffered")])
     with pytest.raises(CriteriaError):
+        load_criteria(path)
+
+
+def test_criterion_loader_rejects_collapse_as_missing_evidence_action(tmp_path):
+    """A valid Decision enum is still corrupt when it licenses missing evidence."""
+    path = _write_registry(
+        tmp_path,
+        [_entry(insufficient_evidence_action="collapse")],
+    )
+    with pytest.raises(CriteriaError, match="must be deferred"):
         load_criteria(path)
 
 
@@ -537,7 +554,7 @@ def _alignment(left="node-a", right="node-b", *, similarity=0.99,
     return AlignmentEvidence(
         source_node_id=left,
         target_node_id=right,
-        orientation="forward",
+        orientation="+",
         offset=0,
         overlap_bp=10,
         overlap_frac_source=overlap_source,
@@ -579,6 +596,18 @@ def _collapse_criterion(*, require_stability=True):
         insufficient_evidence_action=Decision.DEFERRED,
         decision_if_matched=Decision.COLLAPSE,
     )
+
+
+def _complete_medoid_metadata(*node_ids):
+    return {
+        node_id: {
+            "motif_completeness": 1.0,
+            "seqlet_count": 150,
+            "core_ic": 10.0,
+            "cross_context_recurrence": 1,
+        }
+        for node_id in node_ids
+    }
 
 
 @dataclass(frozen=True)
@@ -668,6 +697,37 @@ def test_family_conflict_refuses_merge_even_when_matrix_similarity_is_high():
     assert result.evidence_against
 
 
+@pytest.mark.parametrize(
+    "configured_decision",
+    [Decision.DEFERRED, Decision.COLLAPSE],
+)
+def test_family_conflict_always_refuses_merge_despite_configured_output(configured_decision):
+    """Family conflict is a hard ontology invariant, not a configurable outcome."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    adversarial = Criterion(
+        criterion_id="AMBIGUOUS_CROSS_FAMILY",
+        version="adversarial",
+        status=CriterionStatus.FROZEN,
+        relationship="AMBIGUOUS_CROSS_FAMILY",
+        required_evidence=("family_conflict",),
+        predicates=(Predicate(field="family_conflict", operator="is_true"),),
+        insufficient_evidence_action=Decision.DEFERRED,
+        decision_if_matched=configured_decision,
+    )
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment(similarity=0.999)],
+        [_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_BETA")],
+        [],
+        {"AMBIGUOUS_CROSS_FAMILY": adversarial},
+        "automated:test",
+    )
+
+    assert result.relationship == "AMBIGUOUS_CROSS_FAMILY"
+    assert result.decision is Decision.REFUSE_MERGE
+
+
 def test_missing_required_downstream_evidence_is_deferred_not_guessed():
     """Filling an absent status or treating high similarity as sufficient fails."""
     from motifmultiverse.adjudicate import adjudicate_component
@@ -679,6 +739,7 @@ def test_missing_required_downstream_evidence_is_deferred_not_guessed():
         [],
         {"TRUE_DUPLICATE": _collapse_criterion(require_stability=True)},
         "automated:test",
+        node_metadata=_complete_medoid_metadata("node-a", "node-b"),
     )
 
     assert result.decision is Decision.DEFERRED
@@ -700,6 +761,7 @@ def test_present_downstream_evidence_can_satisfy_a_frozen_test_criterion():
         [_StabilityStub(decision_id, 12, "STABLE")],
         {"TRUE_DUPLICATE": _collapse_criterion(require_stability=True)},
         "automated:test",
+        node_metadata=_complete_medoid_metadata("node-a", "node-b"),
     )
 
     assert result.decision is Decision.COLLAPSE
@@ -769,6 +831,51 @@ def test_nontransitive_connected_component_is_deferred_not_single_linkage_collap
     assert "non-transitive" in result.rationale
 
 
+def test_nontransitive_family_conflict_is_deferred_before_structural_refusal():
+    """A structural label cannot bypass the all-pairs evidence requirement."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b", "node-c"],
+        [_alignment("node-a", "node-b"), _alignment("node-b", "node-c")],
+        [
+            _annotation("node-a", "FAM_ALPHA"),
+            _annotation("node-b", "FAM_BETA"),
+            _annotation("node-c", "FAM_BETA"),
+        ],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+    )
+
+    assert result.relationship == "AMBIGUOUS_CROSS_FAMILY"
+    assert result.decision is Decision.DEFERRED
+    assert "non-transitive" in result.rationale
+
+
+def test_nontransitive_same_family_variants_are_deferred_before_structural_refusal():
+    """Distinct variants still need independent evidence for every proposed pair."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b", "node-c"],
+        [_alignment("node-a", "node-b"), _alignment("node-b", "node-c")],
+        [_annotation(node_id, "FAM_ALPHA") for node_id in ("node-a", "node-b", "node-c")],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+        node_metadata={
+            "node-a": {"variant_id": "UA_ALPHA_01"},
+            "node-b": {"variant_id": "UA_ALPHA_02"},
+            "node-c": {"variant_id": "UA_ALPHA_03"},
+        },
+    )
+
+    assert result.relationship == "SAME_FAMILY_VARIANT"
+    assert result.decision is Decision.DEFERRED
+    assert "non-transitive" in result.rationale
+
+
 def test_same_family_distinct_variants_reach_the_structural_refusal_criterion():
     """Routing explicit variant identity into TRUE_DUPLICATE makes this unreachable."""
     from motifmultiverse.adjudicate import adjudicate_component
@@ -821,6 +928,28 @@ def test_component_medoid_uses_authoritative_metadata_without_relabelling_motif_
 
     assert result.decision is Decision.COLLAPSE
     assert result.representative_node_id == "node-z"
+
+
+def test_component_defers_when_similarity_tie_lacks_authoritative_medoid_metadata():
+    """Lexical fallback is deterministic but is not scientific evidence."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment()],
+        [],
+        [],
+        {"TRUE_DUPLICATE": _collapse_criterion(require_stability=False)},
+        "automated:test",
+        node_metadata={
+            "node-a": {"motif_completeness": 1.0},
+            "node-b": {"motif_completeness": 1.0},
+        },
+    )
+
+    assert result.decision is Decision.DEFERRED
+    assert result.representative_node_id is None
+    assert "authoritative medoid tie metadata" in result.rationale
 
 
 def test_malformed_stability_evidence_is_a_controlled_refusal():
@@ -957,12 +1086,59 @@ def test_full_ontology_and_review_identity_changes_when_a_scientific_field_chang
     assert json.loads(original_table["provenance"].iat[0])["input"] == "a" * 64
 
 
+def test_merge_bundle_identity_changes_when_provenance_changes(tmp_path):
+    """The compile handoff identity covers provenance, not only decision rows."""
+    import json
+
+    from motifmultiverse.adjudicate import write_adjudication_artifacts
+
+    write_adjudication_artifacts(
+        tmp_path / "a",
+        [_ontology_decision()],
+        provenance={"criteria_sha256": "a" * 64},
+    )
+    write_adjudication_artifacts(
+        tmp_path / "b",
+        [_ontology_decision()],
+        provenance={"criteria_sha256": "b" * 64},
+    )
+    first = json.loads((tmp_path / "a" / "merge_decisions.json").read_text())
+    second = json.loads((tmp_path / "b" / "merge_decisions.json").read_text())
+
+    assert first["decisions"] == second["decisions"]
+    assert first["artifact_id"] != second["artifact_id"]
+
+
+def test_empty_ontology_parquet_carries_identity_and_provenance_in_file_metadata(tmp_path):
+    """A zero-row artifact still has an independently inspectable identity."""
+    import json
+
+    import pyarrow.parquet as pq
+
+    from motifmultiverse.adjudicate import write_adjudication_artifacts
+
+    provenance = {"criteria_sha256": "c" * 64}
+    write_adjudication_artifacts(tmp_path, [], provenance=provenance)
+    metadata = pq.read_metadata(tmp_path / "ontology_decisions.parquet").metadata
+
+    assert metadata[b"motifmultiverse.artifact_id"].decode().startswith(
+        "ontology-decisions:"
+    )
+    assert json.loads(metadata[b"motifmultiverse.provenance"]) == provenance
+    assert metadata[b"motifmultiverse.schema_version"].decode() == "1"
+
+
 def test_permissive_policy_is_refused_until_criterion_safe_semantics_are_frozen(tmp_path):
     """Accepting a policy label that changes no behavior creates false provenance."""
     from motifmultiverse.adjudicate import AdjudicationError, adjudicate_evidence
 
     with pytest.raises(AdjudicationError, match="only conservative"):
-        adjudicate_evidence(tmp_path, tmp_path / "out", policy="permissive")
+        adjudicate_evidence(
+            tmp_path,
+            tmp_path / "out",
+            policy="permissive",
+            registry_dir=tmp_path / "registry",
+        )
 
 
 @pytest.mark.parametrize(
@@ -971,6 +1147,10 @@ def test_permissive_policy_is_refused_until_criterion_safe_semantics_are_frozen(
         (lambda payload: payload.update(schema_version="999"), "schema_version"),
         (lambda payload: payload.update(artifact_id="merge-decisions:corrupted"), "artifact_id"),
         (lambda payload: payload.pop("provenance"), "provenance"),
+        (
+            lambda payload: payload["provenance"].update(criteria_sha256="c" * 64),
+            "artifact_id",
+        ),
         (lambda payload: payload.update(producer="handwritten"), "producer"),
     ],
 )
@@ -993,6 +1173,57 @@ def test_decision_bundle_strict_handoff_refuses_each_corrupted_artifact(
 
     with pytest.raises(SchemaError, match=message):
         DecisionBundle.from_adjudication_artifact(payload)
+
+
+def _write_adjudication_registry(
+    tmp_path,
+    *,
+    completeness_a=0.8,
+    completeness_b=0.9,
+    collide_variant_ids=False,
+):
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    metadata = RegistryMetadata(
+        project="adjudication-test",
+        peak_universe_id="peaks",
+        analyses=[{"model": "model-a"}],
+        n_models=1,
+        cross_model_claims_restricted=True,
+        metacluster_states={},
+        trim_threshold=0.3,
+        schema_version=REGISTRY_SCHEMA_VERSION,
+    )
+    nodes = []
+    for index, (node_id, completeness, seqlets) in enumerate((
+        ("node-a", completeness_a, 500),
+        ("node-b", completeness_b, 1),
+    )):
+        variant_index = 1 if collide_variant_ids else index + 1
+        nodes.append(
+            MotifNode(
+                node_id=node_id,
+                model="model-a",
+                readout="readout",
+                context="promoter",
+                metacluster="pos",
+                denovo_pattern_id=f"opaque-{node_id}",
+                variant_id=f"UA_ALPHA_{variant_index:02d}",
+                family_id=MISSING_SENTINEL,
+                motif_length=10,
+                trimmed_core=[0, 10],
+                motif_completeness=completeness,
+                seqlet_count=seqlets,
+                core_ic=10.0,
+                cross_context_recurrence=1,
+            )
+        )
+    payload = {
+        "registry_metadata": metadata.__dict__,
+        "nodes": [node.to_dict() for node in nodes],
+    }
+    (registry / "registry.json").write_text(json.dumps(payload, default=str))
+    return registry
 
 
 def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
@@ -1020,10 +1251,13 @@ def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
         evidence / "annotation_candidates.parquet", index=False
     )
     out = tmp_path / "adjudication"
+    registry = _write_adjudication_registry(tmp_path)
 
     assert main([
         "adjudicate",
         str(evidence),
+        "--registry",
+        str(registry),
         "--review",
         "human-review.yaml",
         "--out",
@@ -1036,4 +1270,127 @@ def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
     provenance = json.loads((out / "provenance.json").read_text())
     assert len(provenance) == 1
     assert provenance[0]["subcommand"] == "adjudicate"
-    assert "deferred" in capsys.readouterr().out.lower()
+    assert "refuse_merge" in capsys.readouterr().out.lower()
+
+
+def test_cli_adjudicate_requires_an_authoritative_registry():
+    """The real CLI cannot silently run without representative metadata."""
+    from motifmultiverse.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["adjudicate", "evidence/"])
+    assert exc.value.code == 2
+
+
+def test_adjudicate_refuses_a_registry_with_colliding_semantic_identities(tmp_path):
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_evidence
+
+    registry = _write_adjudication_registry(tmp_path, collide_variant_ids=True)
+    with pytest.raises(AdjudicationError, match="variant_id"):
+        adjudicate_evidence(
+            tmp_path / "evidence",
+            tmp_path / "out",
+            registry_dir=registry,
+        )
+
+
+def test_adjudicate_refuses_uncalibrated_persisted_alignment_evidence(tmp_path):
+    import pandas as pd
+
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_evidence
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    row = _alignment().to_dict()
+    row["empirical_p_value"] = None
+    row["null_shuffles"] = 0
+    pd.DataFrame([row]).to_parquet(evidence / "alignment_edges.parquet", index=False)
+    pd.DataFrame(columns=[
+        "candidate_id", "node_id", "proposed_family_id", "source", "source_version",
+        "matched_motif_id", "match_score", "occurrence_null_value", "motif_length",
+        "seqlet_count", "low_confidence_annotation", "provenance",
+    ]).to_parquet(evidence / "annotation_candidates.parquet", index=False)
+    registry = _write_adjudication_registry(tmp_path)
+
+    with pytest.raises(AdjudicationError, match="calibrated"):
+        adjudicate_evidence(evidence, tmp_path / "out", registry_dir=registry)
+
+
+def test_adjudicate_refuses_forged_alignment_registration_provenance(tmp_path):
+    import pandas as pd
+
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_evidence
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    row = _alignment().to_dict()
+    row["registered_on"] = "signed_cwm"
+    pd.DataFrame([row]).to_parquet(evidence / "alignment_edges.parquet", index=False)
+    pd.DataFrame(columns=[
+        "candidate_id", "node_id", "proposed_family_id", "source", "source_version",
+        "matched_motif_id", "match_score", "occurrence_null_value", "motif_length",
+        "seqlet_count", "low_confidence_annotation", "provenance",
+    ]).to_parquet(evidence / "annotation_candidates.parquet", index=False)
+    registry = _write_adjudication_registry(tmp_path)
+
+    with pytest.raises(AdjudicationError, match="registered_on"):
+        adjudicate_evidence(evidence, tmp_path / "out", registry_dir=registry)
+
+
+def test_cli_adjudicate_registry_metadata_changes_the_representative(tmp_path):
+    """The end-to-end path uses persisted completeness, not lexical ID or zeros."""
+    import pandas as pd
+
+    from motifmultiverse.cli import main
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    pd.DataFrame([_alignment().to_dict()]).to_parquet(
+        evidence / "alignment_edges.parquet", index=False
+    )
+    pd.DataFrame(columns=[
+        "candidate_id", "node_id", "proposed_family_id", "source", "source_version",
+        "matched_motif_id", "match_score", "occurrence_null_value", "motif_length",
+        "seqlet_count", "low_confidence_annotation", "provenance",
+    ]).to_parquet(evidence / "annotation_candidates.parquet", index=False)
+    criteria = _write_registry(
+        tmp_path,
+        [{
+            "criterion_id": "TRUE_DUPLICATE",
+            "version": "tie-test",
+            "status": "FROZEN",
+            "relationship": "TRUE_DUPLICATE",
+            "required_evidence": ["ppm_similarity"],
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.9}],
+            "insufficient_evidence_action": "deferred",
+            "decision_if_matched": "collapse",
+        }],
+    )
+
+    representatives = []
+    for name, values in (
+        ("prefer-a", (0.9, 0.8)),
+        ("prefer-b", (0.8, 0.9)),
+    ):
+        run_root = tmp_path / name
+        run_root.mkdir()
+        registry = _write_adjudication_registry(
+            run_root,
+            completeness_a=values[0],
+            completeness_b=values[1],
+        )
+        out = run_root / "out"
+        assert main([
+            "adjudicate",
+            str(evidence),
+            "--registry",
+            str(registry),
+            "--criteria",
+            str(criteria),
+            "--out",
+            str(out),
+        ]) == 0
+        table = pd.read_parquet(out / "ontology_decisions.parquet")
+        representatives.append(table["representative_node_id"].iat[0])
+
+    assert representatives == ["node-a", "node-b"]

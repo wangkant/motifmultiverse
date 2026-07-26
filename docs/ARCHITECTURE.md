@@ -20,9 +20,9 @@ implementation preferences — they change what the tool is allowed to compute.
 | module | responsibility |
 |---|---|
 | **A. ingest** | normalise heterogeneous discovery outputs; attach provenance; establish namespaces — **implemented** |
-| **B. align** | pairwise registration and similarity, with a persisted per-pair null |
-| **C. annotate** | database matches, family assignment, confidence and low-confidence flagging |
-| **D. adjudicate** | merge / refuse decisions with rationale and decider; emit human review |
+| **B. align** | pairwise registration and similarity, with a persisted per-pair null — **implemented** |
+| **C. annotate** | retain competing database-label candidates and low-confidence flags — **implemented** |
+| **D. adjudicate** | merge / refuse / deferred decisions with rationale and decider; emit human review — **implemented** |
 | **E. compile** | build tiered lexicons; separate discovery support from analysis admission — **implemented** |
 | **F. validate** | downstream stability: does the merge survive reconstruction? |
 | **G. infer** | robust inference across a specification multiverse |
@@ -30,17 +30,16 @@ implementation preferences — they change what the tool is allowed to compute.
 | **I. interpret** | describe what is inside a cluster (descriptive, not a test) — **implemented** |
 
 Each module directory carries a README with its rule, the failure that produced
-the rule, and how the rule is checked. `ingest`, `compile` and `interpret` are
-implemented; the other six raise `NotImplementedError`.
+the rule, and how the rule is checked. `ingest`, `align`, `annotate`,
+`adjudicate`, `compile` and `interpret` are implemented; `validate`, `infer` and
+`report` still raise `NotImplementedError`.
 
-**What runs today is the two ends, not the middle.** `ingest` → `compile` is a real
-path from discovery output to a frozen, content-addressed lexicon, and `interpret`
-consumes a frozen hit table at the other end. Between them, `align`, `annotate` and
-`adjudicate` do not exist, so what `compile` currently emits is undeduplicated
-discovery output. Those three were left for later on purpose: their central criteria
-depend on the two design questions that are still open (`annotate` was never
-specified; `align`'s per-pair null was never persisted), and implementing them now
-would mean inventing the answers.
+**The evidence middle now runs.** `ingest` → `align` → `annotate` →
+`adjudicate` → `compile` is a real path from discovery output to a frozen,
+content-addressed lexicon. Annotation retains candidates rather than silently
+assigning identity, and adjudication defers when the frozen design does not state
+a required threshold; implemented does not mean an unknown scientific criterion
+was filled with a plausible number.
 
 ### 2.1 A loader contract, discovered by reading the loader
 

@@ -34,6 +34,24 @@ def test_valid_node_builds():
     assert _node().identity == NamespacedId("variant_id", "UA_FAM_00")
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"motif_completeness": "0.9"},
+        {"motif_completeness": 1.1},
+        {"seqlet_count": 1.5},
+        {"core_ic": "10.0"},
+        {"core_ic": float("nan")},
+        {"core_ic": float("inf")},
+        {"cross_context_recurrence": 0},
+    ],
+)
+def test_medoid_registry_fields_reject_non_authoritative_values(changes):
+    """Nullable is safe; malformed or out-of-domain tie evidence is not."""
+    with pytest.raises(SchemaError):
+        _node(**changes)
+
+
 @pytest.mark.parametrize("bad", ["", "nofmt", "UA-FAM-00", "UA_FAM", "UA_FAM_X"])
 def test_malformed_variant_id_rejected(bad):
     with pytest.raises(SchemaError):

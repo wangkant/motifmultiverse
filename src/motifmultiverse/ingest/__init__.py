@@ -31,6 +31,7 @@ from typing import Any
 from motifmultiverse.provenance import ProvenanceRecord, record, sha256_file
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
+    REGISTRY_SCHEMA_VERSION,
     UNION_ID_RE,
     AnalysisConfig,
     MetaclusterState,
@@ -169,6 +170,7 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
     nodes: list[MotifNode] = []
     states: dict[str, dict[str, str]] = {}
     arrays: dict[str, dict[str, Any]] = {}
+    counters_by_union: dict[str, int] = {}
 
     for analysis in cfg.analyses:
         analysis_id = str(analysis["id"])
@@ -183,7 +185,6 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
         with h5py.File(h5_path, "r") as h5:
             states[analysis_id] = {g: group_state(h5, g, searched[g]).value
                                    for g in MODISCO_GROUPS}
-            counter = 0
             for group in MODISCO_GROUPS:
                 if states[analysis_id][group] != MetaclusterState.PRESENT.value:
                     continue
@@ -196,6 +197,8 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
                            if "sequence" in pattern else None)
                     start, end = _trim(cwm, trim_threshold)
                     node_id = f"{analysis_id}::{group}.{pattern_name}"
+                    union_id = str(analysis["union_id"])
+                    counter = counters_by_union.get(union_id, 0)
                     nodes.append(MotifNode(
                         node_id=node_id,
                         model=str(analysis["model"]),
@@ -203,15 +206,24 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
                         context=str(analysis["context"]),
                         metacluster=GROUP_METACLUSTER[group],
                         # An opaque join token. Nothing parses digits out of it (V-09).
-                        denovo_pattern_id=f"{group}.{pattern_name}",
+                        denovo_pattern_id=node_id,
                         # The middle segment is a placeholder, not a claim: family_id
                         # is the authoritative field, and annotate is unspecified.
-                        variant_id=f"{analysis['union_id']}_UNASSIGNED_{counter:02d}",
+                        variant_id=f"{union_id}_UNASSIGNED_{counter:02d}",
                         family_id=MISSING_SENTINEL,
                         motif_length=int(cwm.shape[0]),
                         trimmed_core=[start, end],
                         seqlet_count=_seqlet_count(pattern),
                         core_ic=_core_ic(ppm, start, end),
+                        # Completeness is the observed contribution-bearing core
+                        # span as a fraction of the observed motif span. It is
+                        # explicit registry data, not motif length under a new
+                        # name and not a value reconstructed from an identifier.
+                        motif_completeness=(
+                            (end - start) / int(cwm.shape[0])
+                            if int(cwm.shape[0]) > 0
+                            else None
+                        ),
                         discovery_tier=Tier.CORE,
                         analysis_tier=Tier.CORE,
                         provenance={"analysis_id": analysis_id,
@@ -219,7 +231,13 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
                                     "trim_threshold": trim_threshold},
                     ))
                     arrays[node_id] = {"cwm": cwm, "hypothetical_cwm": hcwm, "ppm": ppm}
-                    counter += 1
+                    counters_by_union[union_id] = counter + 1
+
+    from motifmultiverse.guards import variant_id_unique
+
+    identity_guard = variant_id_unique(nodes)
+    if not identity_guard.passed:
+        raise IngestError(identity_guard.detail)
 
     meta = RegistryMetadata(
         project=cfg.project,
@@ -229,6 +247,7 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
         cross_model_claims_restricted=cfg.cross_model_claims_restricted,
         metacluster_states=states,
         trim_threshold=trim_threshold,
+        schema_version=REGISTRY_SCHEMA_VERSION,
     )
     _write_registry(out, meta, nodes, arrays)
     prov.write(out)
@@ -260,7 +279,17 @@ def load_registry(registry_dir: str | os.PathLike[str]) -> tuple[RegistryMetadat
     d = Path(registry_dir)
     blob = json.loads((d / "registry.json").read_text())
     try:
+        if "schema_version" not in blob["registry_metadata"]:
+            raise SchemaError(
+                f"{d}/registry.json registry_metadata is missing required schema_version"
+            )
         meta = RegistryMetadata(**blob["registry_metadata"])
-    except (TypeError, KeyError) as exc:
+        nodes = [MotifNode(**node) for node in blob["nodes"]]
+        from motifmultiverse.guards import variant_id_unique
+
+        identity_guard = variant_id_unique(nodes)
+        if not identity_guard.passed:
+            raise SchemaError(identity_guard.detail)
+    except (TypeError, KeyError, SchemaError) as exc:
         raise SchemaError(f"{d}/registry.json is not a registry: {exc}") from exc
     return meta, blob["nodes"], h5py.File(d / "arrays.h5", "r")

@@ -80,7 +80,7 @@ failed is not evidence.
 
 ## Current state
 
-Nine modules, three implemented. Each module directory carries a README stating its
+Nine modules, six implemented. Each module directory carries a README stating its
 rule, the failure that produced the rule, and how the rule is checked.
 
 **What actually runs today:**
@@ -89,11 +89,14 @@ rule, the failure that produced the rule, and how the rule is checked.
 pip install -e ".[dev]"
 
 motifmultiverse --help              # 9 subcommands with real arguments
-motifmultiverse align registry/ --out evidence/   # writes provenance, then exits 3
 
-# a minimal path from discovery output to a frozen lexicon:
+# a minimal path from discovery output through adjudication to a frozen lexicon:
 motifmultiverse ingest project.yaml --out registry/
-motifmultiverse compile registry/ --decisions decisions.json --out lexicons/
+motifmultiverse align registry/ --out evidence/
+motifmultiverse annotate evidence/ --registry registry/ --tomtom --out evidence/
+motifmultiverse adjudicate evidence/ --registry registry/ --out adjudication/
+motifmultiverse compile registry/ \
+    --decisions adjudication/merge_decisions.json --out lexicons/
 
 # and a query over a frozen hit table:
 motifmultiverse interpret hits.tsv \
@@ -101,7 +104,7 @@ motifmultiverse interpret hits.tsv \
     --selection-provenance CLUSTERED_WITH_SPLIT --held-out heldout.txt
 
 ruff check src tests
-pytest                              # 163 passed, 1 skipped
+pytest
 ```
 
 **That one skip matters.** The `compile` round-trip test calls the real hit-caller
@@ -154,11 +157,11 @@ caveat next to an effect size does not travel; the effect size does.
 Undeclared provenance is a recorded state (`DECLARATION_MISSING`) that costs the
 query its inference. It never resolves to the permissive grade.
 
-**What does not run:** align, annotate, adjudicate, validate, infer, report — so
-there is no alignment evidence, no family assignment and no adjudication between
-`ingest` and `compile`. What `compile` produces today is a lexicon of *undeduplicated*
-discovery output, which is a real artifact but not a harmonised one. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md) — **M2** is the lower bound of a usable tool.
+**What does not run:** validate, infer and report. The implemented middle path
+persists alignment evidence, retains competing annotation candidates, and records
+collapse/refusal/deferred adjudications. Undefined scientific thresholds remain
+explicitly deferred, so a run may intentionally compile an undeduplicated lexicon
+rather than guess a merge.
 
 **Deliberately out of scope for v1:** computing attributions, discovering motifs,
 re-implementing a hit caller, cross-model raw CWM averaging (a design prohibition,

@@ -1,7 +1,8 @@
 """Command-line interface (T-08).
 
 Nine subcommands are wired with their real arguments and real ``--help``.
-``ingest``, ``compile`` and ``interpret`` are implemented; the other six raise
+``ingest``, ``align``, ``annotate``, ``adjudicate``, ``compile`` and
+``interpret`` are implemented; the remaining three raise
 :class:`NotImplementedError` naming the module README that specifies them.
 
 Every subcommand writes a provenance record before it raises (T-09), because a
@@ -60,8 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Bias-aware harmonization and robust inference of attribution-derived "
             "regulatory motifs across models and methods."
         ),
-        epilog=("pre-alpha: ingest, compile and interpret are implemented; the other six "
-                "subcommands raise NotImplementedError and exit 3. Exit 4 means the tool "
+        epilog=("pre-alpha: ingest, align, annotate, adjudicate, compile and interpret "
+                "are implemented; the remaining three subcommands raise "
+                "NotImplementedError and exit 3. Exit 4 means the tool "
                 "refused to produce a number. See docs/ROADMAP.md"),
     )
     p.add_argument("--version", action="version", version=f"motifmultiverse {__version__}")
@@ -120,8 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("evidence", help="evidence/ from annotate")
     a.add_argument("--policy", choices=["conservative"], default="conservative",
                    help="only the frozen conservative policy is currently defined")
-    a.add_argument("--registry", default=None,
-                   help="optional registry/ supplying explicit variant and medoid metadata")
+    a.add_argument(
+        "--registry",
+        required=True,
+        help="authoritative versioned registry/ supplying variant and medoid metadata",
+    )
     a.add_argument("--criteria", default=None,
                    help="versioned executable criterion registry "
                         "(default: packaged config/criteria.v1.yaml)")
@@ -142,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("registry", help="registry/ from ingest")
     a.add_argument("--decisions", default=None,
-                   help="decisions JSON: {'tiers': {...}, 'decisions': [...]}")
+                   help="identity-bearing merge_decisions.json emitted by adjudicate")
     a.add_argument("--tiers", default=",".join(COMPILE_TIERS),
                    help=f"comma-separated tiers (default: {','.join(COMPILE_TIERS)})")
     a.add_argument("--verify-roundtrip", choices=["auto", "require", "skip"], default="auto",

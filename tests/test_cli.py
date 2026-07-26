@@ -94,7 +94,7 @@ def test_cli_threads_the_seed_into_the_provenance_record(tmp_path):
 def test_provenance_appends_rather_than_overwrites(tmp_path):
     out = tmp_path / "o"
     main(["align", "registry/", "--out", str(out)])
-    main(["adjudicate", "evidence/", "--out", str(out)])
+    main(["report", "project/", "--out", str(out)])
     assert len(json.loads((out / "provenance.json").read_text())) == 2
 
 

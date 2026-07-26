@@ -10,8 +10,9 @@ and suppresses the reading when a pre-registered floor fails. **`interpret` does
 (`src/motifmultiverse/interpret/`). Remaining: BCa intervals and the wild cluster
 bootstrap-*t* required by `FP-15`.
 
-Note that `annotate` does not appear in any milestone below. It is not waiting for an
-implementation — it was **never specified**; see its README.
+`annotate` now implements the deliberately narrow candidate-evidence contract:
+database matches and confidence flags survive as competing rows for adjudication;
+they do not silently assign a family.
 
 ## M1 — standardised ingest and provenance  ← **done**
 
@@ -33,17 +34,21 @@ what its tier contrast does and does not vary.
 backend, and when it is absent the tool says the round trip did not happen rather
 than assuming it would have passed.
 
-Note this milestone sits *before* M2 in effort and *after* it in meaning: a lexicon
-compiled without `align`, `annotate` and `adjudicate` is undeduplicated discovery
-output. It is a real artifact; it is not a harmonised one.
+Note this milestone sits *before* M2 in effort and *after* it in meaning: compile
+can consume the strict, identity-bearing adjudication handoff, while an explicitly
+deferred relationship remains uncollapsed.
 
-## M2 — evidence graph and lexicon compiler  ← **lower bound of a usable tool**
+## M2 — evidence graph and lexicon compiler  ← **implemented; reference-fixture validation pending**
 
 *Done when:* alignment, adjudication and compilation reproduce the reference
 implementation's alignment audit, medoid selection and `core` / `expanded` / split
 lexicons on the regression fixtures, with refusals recorded as refusals.
 
-**Before M2 the tool produces no usable lexicon.** Everything earlier is plumbing.
+**`align`, candidate-only `annotate`, `adjudicate`, and `compile` implement this
+path.** Alignment persists the full-search null; adjudication records refusals and
+selects observed medoids from authoritative registry metadata. The remaining M2
+work is validation against the external reference regression fixtures. Criteria
+whose scientific magnitude was never frozen remain `DEFERRED`, by design.
 
 ## M3 — stability adapters (FIMO / HOMER / FiNeMo)
 

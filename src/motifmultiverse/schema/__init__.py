@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
@@ -35,7 +36,7 @@ __all__ = [
     "SelectionProvenance", "OutputMode", "MOST_CONSERVATIVE_OUTPUT_MODE",
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
     "HIT_TABLE_COLUMNS", "PeakSetQuery", "HealthFloors",
-    "MetaclusterState", "RegistryMetadata", "LexiconManifest",
+    "MetaclusterState", "RegistryMetadata", "REGISTRY_SCHEMA_VERSION", "LexiconManifest",
     "LEXICON_MANIFEST_SCHEMA_VERSION", "UNION_ID_RE",
     "Estimator", "IMPLEMENTED_ESTIMATORS", "InferenceCapability", "ESTIMATOR_CAPABILITY",
     "MergeConfidence",
@@ -184,6 +185,8 @@ class MotifNode:
     motif_length: int | None = None
     seqlet_count: int | None = None
     core_ic: float | None = None
+    motif_completeness: float | None = None
+    cross_context_recurrence: int | None = None
     source_peak_count: int | None = None
     putative_tf_label: str = MISSING_SENTINEL
     annotation_matches: dict[str, Any] = field(default_factory=dict)
@@ -210,6 +213,32 @@ class MotifNode:
         if self.family_assignment_confidence is not None:
             if not 0.0 <= self.family_assignment_confidence <= 1.0:
                 raise SchemaError("family_assignment_confidence must be a measure in [0, 1]")
+        if self.motif_completeness is not None:
+            if (
+                isinstance(self.motif_completeness, bool)
+                or not isinstance(self.motif_completeness, (int, float))
+                or not 0.0 <= self.motif_completeness <= 1.0
+            ):
+                raise SchemaError("motif_completeness must be a measure in [0, 1]")
+        if self.seqlet_count is not None and (
+            isinstance(self.seqlet_count, bool)
+            or not isinstance(self.seqlet_count, int)
+            or self.seqlet_count < 0
+        ):
+            raise SchemaError("seqlet_count must be a non-negative integer")
+        if self.core_ic is not None and (
+            isinstance(self.core_ic, bool)
+            or not isinstance(self.core_ic, (int, float))
+            or not math.isfinite(self.core_ic)
+            or self.core_ic < 0
+        ):
+            raise SchemaError("core_ic must be a non-negative measure")
+        if self.cross_context_recurrence is not None and (
+            isinstance(self.cross_context_recurrence, bool)
+            or not isinstance(self.cross_context_recurrence, int)
+            or self.cross_context_recurrence < 1
+        ):
+            raise SchemaError("cross_context_recurrence must be a positive integer")
 
     @property
     def identity(self) -> NamespacedId:
@@ -342,7 +371,7 @@ class DecisionRecord:
 
 
 #: ``DecisionBundle`` schema revision. Bumped only if the payload shape changes.
-DECISION_BUNDLE_SCHEMA_VERSION = "2"
+DECISION_BUNDLE_SCHEMA_VERSION = "3"
 DECISION_BUNDLE_PRODUCER = "motifmultiverse.adjudicate"
 
 #: The only keys a decisions payload may declare. Anything else is refused rather
@@ -355,8 +384,9 @@ _DECISION_BUNDLE_KEYS = frozenset({
 def decision_bundle_artifact_id(
     decisions: Sequence[Mapping[str, Any] | DecisionRecord],
     tiers: Mapping[str, Any],
+    provenance: Mapping[str, Any],
 ) -> str:
-    """Content identity for the compile-facing portion of an adjudication bundle."""
+    """Full content identity for an adjudication bundle, including provenance."""
     normalized_decisions = [
         asdict(decision) if isinstance(decision, DecisionRecord) else dict(decision)
         for decision in decisions
@@ -364,6 +394,7 @@ def decision_bundle_artifact_id(
     payload = {
         "schema_version": DECISION_BUNDLE_SCHEMA_VERSION,
         "producer": DECISION_BUNDLE_PRODUCER,
+        "provenance": dict(provenance),
         "decisions": normalized_decisions,
         "tiers": dict(tiers),
     }
@@ -503,10 +534,12 @@ class DecisionBundle:
             )
         if not payload["provenance"]:
             raise SchemaError("merge decisions artifact requires provenance")
-        expected_id = decision_bundle_artifact_id(payload["decisions"], payload["tiers"])
+        expected_id = decision_bundle_artifact_id(
+            payload["decisions"], payload["tiers"], payload["provenance"]
+        )
         if payload["artifact_id"] != expected_id:
             raise SchemaError(
-                "merge decisions artifact_id does not match its decisions and tiers"
+                "merge decisions artifact_id does not match its decisions, tiers, and provenance"
             )
         return cls.from_dict(payload)
 
@@ -561,6 +594,12 @@ class MetaclusterState(StrEnum):
     NOT_SEARCHED = "not_searched"
 
 
+#: Persisted motif-registry schema revision. The metadata object carries this
+#: value and registry readers require the key, so tie-breaking fields cannot be
+#: silently absent under an old, unversioned shape.
+REGISTRY_SCHEMA_VERSION = "1"
+
+
 @dataclass
 class RegistryMetadata:
     """What ``ingest`` emits alongside the motif nodes.
@@ -578,8 +617,14 @@ class RegistryMetadata:
     cross_model_claims_restricted: bool
     metacluster_states: dict[str, dict[str, str]]
     trim_threshold: float
+    schema_version: str = REGISTRY_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        if self.schema_version != REGISTRY_SCHEMA_VERSION:
+            raise SchemaError(
+                f"registry schema_version must be {REGISTRY_SCHEMA_VERSION!r}; "
+                f"got {self.schema_version!r}"
+            )
         if self.cross_model_claims_restricted != (self.n_models < 3):
             raise SchemaError(
                 f"cross_model_claims_restricted={self.cross_model_claims_restricted} "
