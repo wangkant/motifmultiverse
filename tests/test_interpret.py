@@ -306,10 +306,29 @@ def test_every_effect_carries_block_size_replicates_and_seed():
         assert e["comparator_id"] == "odd_peaks"
 
 
-def test_p_value_is_floored_at_one_over_b_plus_one():
+def test_percentile_bootstrap_does_not_emit_p_or_q_values():
     result = interpret.interpret_query(_rows(), _query(), n_bootstrap=50, seed=1)
-    for e in result.effects:
-        assert e["p_value"] >= 1.0 / (e["n_bootstrap_valid"] + 1) - 1e-12
+    for effect in result.effects:
+        assert effect["estimator"] == "percentile_block_bootstrap"
+        assert effect["inference_capability"] == "ESTIMATION_ONLY"
+        assert effect["p_value"] is None
+        assert effect["q_value"] is None
+
+
+def test_estimation_only_note_appears_exactly_once_per_interpretation():
+    """The withheld-p/q note is a property of the interpretation, not of each effect.
+
+    It must show up once in ``notes`` no matter how many families are tested, and
+    it must not be duplicated across the record's other serialization surfaces.
+    """
+    note = (
+        "The implemented percentile block bootstrap supports estimation only. "
+        "Hypothesis-test p and q values are withheld until the preregistered "
+        "wild cluster bootstrap-t estimator is used."
+    )
+    result = interpret.interpret_query(_rows(), _query(), n_bootstrap=50, seed=1)
+    assert len(result.effects) > 1                    # more than one family in the fixture
+    assert result.notes.count(note) == 1
 
 
 def test_same_seed_reproduces_the_interval_exactly():

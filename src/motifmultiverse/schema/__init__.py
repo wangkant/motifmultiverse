@@ -23,7 +23,8 @@ __all__ = [
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
     "HIT_TABLE_COLUMNS", "PeakSetQuery", "HealthFloors",
     "MetaclusterState", "RegistryMetadata", "LexiconManifest", "UNION_ID_RE",
-    "Estimator", "IMPLEMENTED_ESTIMATORS", "MergeConfidence",
+    "Estimator", "IMPLEMENTED_ESTIMATORS", "InferenceCapability", "ESTIMATOR_CAPABILITY",
+    "MergeConfidence",
     "MERGE_CONFIDENCE_CRITERIA", "CRITERION_NOT_YET_DEFINED",
     "SensitivityTrigger", "sensitivity_triggers",
 ]
@@ -444,6 +445,35 @@ class Estimator(StrEnum):
 #: **abandoned**. Under block-correlated structure it understates the variance,
 #: so adding it back would be a regression rather than a feature.
 IMPLEMENTED_ESTIMATORS = frozenset({Estimator.PERCENTILE_BLOCK_BOOTSTRAP})
+
+
+class InferenceCapability(StrEnum):
+    """What a result's uncertainty numbers license a reader to do with them.
+
+    A percentile bootstrap's replicate tail is not a calibrated hypothesis
+    test: the proportion of replicates crossing zero looks like a *p* value
+    but has none of the guarantees one requires. ``ESTIMATION_ONLY`` results
+    may report a point estimate and an interval; only ``INTERVAL_AND_TEST``
+    results may additionally report ``p_value`` / ``q_value``. This is
+    strictly narrower than "an estimator was implemented" -- a result must be
+    *licensed* for a test, not merely produced by code capable of a division.
+    """
+
+    ESTIMATION_ONLY = "ESTIMATION_ONLY"
+    INTERVAL_AND_TEST = "INTERVAL_AND_TEST"
+
+
+#: Which capability each recognised estimator is licensed for (`FP-15`). The
+#: percentile and BCa bootstraps are interval estimators only; the block-level
+#: wild cluster bootstrap-*t* is `FP-15`'s specified hypothesis test. Declared
+#: for every value in :class:`Estimator`, implemented or not, so a caller does
+#: not have to wait for an estimator to ship to know what it will be licensed
+#: to emit.
+ESTIMATOR_CAPABILITY: dict[Estimator, InferenceCapability] = {
+    Estimator.PERCENTILE_BLOCK_BOOTSTRAP: InferenceCapability.ESTIMATION_ONLY,
+    Estimator.BCA_PAIRED_BLOCK_BOOTSTRAP: InferenceCapability.ESTIMATION_ONLY,
+    Estimator.WILD_CLUSTER_BOOTSTRAP_T: InferenceCapability.INTERVAL_AND_TEST,
+}
 
 
 class SelectionProvenance(StrEnum):

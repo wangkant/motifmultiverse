@@ -68,6 +68,13 @@ A named item, because the gap is currently carried in prose on every result.
 - **label permutation stays abandoned.** It is not a fallback: under
   block-correlated structure it understates the variance.
 
+Until the wild cluster bootstrap-*t* exists, `interpret` withholds `p_value` and
+`q_value` outright rather than reporting the percentile bootstrap's replicate tail
+as one: every result carries `inference_capability` (`schema.InferenceCapability`),
+today always `ESTIMATION_ONLY`, and only a result licensed `INTERVAL_AND_TEST` may
+carry a hypothesis test. A number that looks like a *p* value but is not one is
+worse than no number.
+
 *Done when:* both are implemented, `schema.IMPLEMENTED_ESTIMATORS` contains all
 three recognised values, and a caller that branched on `estimator` needs no change —
 which is why the enumeration ships now rather than with the implementation.
