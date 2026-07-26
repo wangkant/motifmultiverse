@@ -461,7 +461,11 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                 motif_type=motif_type,
                 include_rc=include_rc,
                 loader_backend=loader_backend,
-                loader_parameters=loader_parameters,
+                # A fresh copy per tier: the three manifests must not share one
+                # dict object. Nothing in this package mutates it in place today,
+                # but a future in-place mutation on one tier's manifest must not
+                # silently corrupt the other two.
+                loader_parameters=dict(loader_parameters),
                 comparisons=_compare(tier, index),
                 source_registry=str(Path(registry_dir).name),
                 sensitivity_triggers={k: v for k, v in triggers_by_cluster(decisions).items() if v},

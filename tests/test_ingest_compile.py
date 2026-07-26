@@ -493,6 +493,24 @@ def test_loader_parameters_hash_by_effective_value_not_spelling(tmp_path):
             != none_spelling["core"].lexicon_content_hash)
 
 
+def test_each_tier_manifest_owns_its_own_loader_parameters_dict(tmp_path):
+    """The three tier manifests must not share one `loader_parameters` dict object.
+
+    `compile_lexicons` resolves `loader_parameters` once and currently hands the
+    *same* dict to every tier's `LexiconManifest`. Nothing in this package mutates
+    it in place today, but a future caller that does (e.g. `manifest.loader_parameters
+    ["x"] = 1`) would silently corrupt all three tiers' manifests at once. Each
+    tier must own an independent copy.
+    """
+    registry = _registry(tmp_path)
+    manifests = compile_mod.compile_lexicons(registry, tmp_path / "lex")
+    assert manifests["core"].loader_parameters is not manifests["expanded"].loader_parameters
+    assert manifests["core"].loader_parameters is not manifests["sensitivity"].loader_parameters
+    manifests["core"].loader_parameters["motif_lambda_default"] = 999.0
+    assert manifests["expanded"].loader_parameters["motif_lambda_default"] == 0.7
+    assert manifests["sensitivity"].loader_parameters["motif_lambda_default"] == 0.7
+
+
 def test_a_lexicon_of_mixed_motif_lengths_is_refused(tmp_path):
     """The loader stacks every motif into one array, so lengths must agree."""
     registry = _registry(tmp_path)
