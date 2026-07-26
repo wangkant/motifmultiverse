@@ -14,6 +14,7 @@ makes this an executable, falsifiable claim rather than a comment.
 """
 from __future__ import annotations
 
+import math
 import random
 
 import pytest
@@ -64,19 +65,13 @@ def test_bca_different_seed_can_change_the_result():
     assert ci_a != ci_b
 
 
-def test_bca_different_row_order_same_block_membership_gives_same_result():
-    """Row order must never leak into the result -- only block membership matters."""
+def test_bca_different_top_level_dict_order_same_block_membership_gives_same_result():
+    """Dict-insertion order of the block keys themselves must never leak in."""
     n = 40
-    # Construction order 1: blocks inserted 0..n-1, ascending.
-    query_values_a = {("chr1", i): [float(i) + 0.5, float(i) - 0.2] for i in range(n)}
+    query_values_a = {("chr1", i): [float(i) + 0.5] for i in range(n)}
     comparator_values_a = {("chr1", i): [float(i) * 0.8] for i in range(n)}
 
-    # Construction order 2: same block membership and same per-block values, but
-    # blocks are inserted in reverse, and the two peaks within each query block are
-    # listed in the opposite order.
-    query_values_b = {
-        ("chr1", i): [float(i) - 0.2, float(i) + 0.5] for i in reversed(range(n))
-    }
+    query_values_b = {("chr1", i): [float(i) + 0.5] for i in reversed(range(n))}
     comparator_values_b = {("chr1", i): [float(i) * 0.8] for i in reversed(range(n))}
 
     assert list(query_values_a) != list(query_values_b)  # actually different row order
@@ -88,6 +83,65 @@ def test_bca_different_row_order_same_block_membership_gives_same_result():
         query_values_b, comparator_values_b, statistic=_mean_diff, n_bootstrap=500, seed=11,
     )
     assert ci_a == ci_b
+
+
+def test_bca_within_block_row_order_invariance_holds_across_many_seeds_and_bootstrap_sizes():
+    """`ci_a == ci_b` at one (seed, n_bootstrap) is not evidence the property holds.
+
+    A round-1 audit found that reordering peaks *within* a block (same block
+    membership, same content, different original list order) changed the final
+    interval in 61% of 180 (seed, n_bootstrap) trials against the first cut of
+    this function, by up to ~2e-3 absolute -- and the single-seed version of this
+    test that shipped in round 1 happened to land in the ~39% where the two
+    constructions agreed by luck. `sum()` over floats is not associative, so a
+    different accumulation order for the *same multiset* can produce a
+    bit-different replicate value; because a bootstrap replicate's neighbours in
+    the sorted array are not infinitesimally close, that bit-level difference can
+    flip which two order statistics the BCa percentile interpolates between,
+    producing a real (not epsilon) shift in the reported endpoint.
+
+    This sweeps the same scale the audit used (60 seeds x 3 n_bootstrap sizes =
+    180 trials), with 5 peaks per block and only `MIN_ESTIMABLE_BLOCKS` (30)
+    blocks -- few enough relative to `n_bootstrap` that a block is drawn more
+    than once within a replicate on effectively every trial, which is exactly
+    the condition that exposed the defect. A fix that merely reorders the
+    unlucky seed cannot pass this; it has to make within-block order genuinely
+    not matter.
+    """
+    n_blocks = MIN_ESTIMABLE_BLOCKS
+    peaks_per_block = 5
+
+    base_query = {
+        ("chr1", i): [float(i) + 0.1 * k for k in range(peaks_per_block)]
+        for i in range(n_blocks)
+    }
+    base_comparator = {
+        ("chr1", i): [float(i) * 0.5 + 0.2 * k for k in range(peaks_per_block)]
+        for i in range(n_blocks)
+    }
+    # Same block membership, same per-block multiset of values, reversed order
+    # within every block.
+    reordered_query = {b: list(reversed(v)) for b, v in base_query.items()}
+    reordered_comparator = {b: list(reversed(v)) for b, v in base_comparator.items()}
+
+    mismatches = []
+    for seed in range(60):
+        for n_bootstrap in (50, 137, 500):
+            ci_a = bca_paired_block_interval(
+                base_query, base_comparator, statistic=_mean_diff,
+                n_bootstrap=n_bootstrap, seed=seed,
+            )
+            ci_b = bca_paired_block_interval(
+                reordered_query, reordered_comparator, statistic=_mean_diff,
+                n_bootstrap=n_bootstrap, seed=seed,
+            )
+            if ci_a != ci_b:
+                mismatches.append((seed, n_bootstrap, ci_a, ci_b))
+
+    assert not mismatches, (
+        f"{len(mismatches)}/180 (seed, n_bootstrap) trials disagreed under pure "
+        f"within-block reordering; first few: {mismatches[:5]}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -250,3 +304,45 @@ def test_bca_jackknife_and_resampling_survive_asymmetric_block_membership():
     )
     assert lo <= hi
     assert lo > float("-inf") and hi < float("inf")
+
+
+def test_bca_refuses_when_the_statistic_is_never_finite():
+    """NaN/Inf must never propagate into a reported interval, only a refusal.
+
+    Every jackknife and bootstrap replicate a non-finite `statistic` would
+    produce is excluded (`math.isfinite` guards on both loops); with zero
+    survivors that is far below `MIN_ESTIMABLE_BLOCKS`, so the function refuses
+    outright rather than reporting a NaN- or Inf-contaminated interval.
+    """
+    n = MIN_ESTIMABLE_BLOCKS
+    query_values = {("chr1", i): [float(i)] for i in range(n)}
+    comparator_values = {("chr1", i): [float(i) * 2] for i in range(n)}
+
+    with pytest.raises(InferError):
+        bca_paired_block_interval(
+            query_values, comparator_values, statistic=lambda q, c: float("nan"),
+            n_bootstrap=200, seed=0,
+        )
+    with pytest.raises(InferError):
+        bca_paired_block_interval(
+            query_values, comparator_values, statistic=lambda q, c: float("inf"),
+            n_bootstrap=200, seed=0,
+        )
+
+
+def test_bca_zero_variance_returns_a_finite_degenerate_interval_never_nan():
+    """Constant data (every block identical) means constant jackknife replicates:
+    the acceleration denominator is exactly 0. That must fall back to a_hat=0
+    (see the `denominator > 0 else 0.0` guard), not divide by zero into a NaN
+    that then contaminates the whole interval.
+    """
+    n = MIN_ESTIMABLE_BLOCKS
+    query_values = {("chr1", i): [3.0] for i in range(n)}
+    comparator_values = {("chr1", i): [1.0] for i in range(n)}
+
+    lo, hi = bca_paired_block_interval(
+        query_values, comparator_values, statistic=_mean_diff, n_bootstrap=500, seed=0,
+    )
+    assert math.isfinite(lo)
+    assert math.isfinite(hi)
+    assert lo == hi == pytest.approx(2.0)
