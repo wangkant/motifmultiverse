@@ -141,6 +141,28 @@ two labels, which a downstream re-tiering gate really did read.
 `Decision` therefore includes `REFUSE_MERGE`, every record requires a `rationale`
 and a `decided_by`, and a `confidence` outside `[0, 1]` is rejected.
 
+## Interpretation record — three health views, one deprecated alias
+
+`interpret.Interpretation` (see `src/motifmultiverse/interpret/README.md`) carries three
+separate health records rather than one:
+
+| field | what it reports health of |
+|---|---|
+| `query_health` | the submitted query peak set alone |
+| `comparator_health` | the submitted comparator peak set alone, or `None` if none was submitted |
+| `contrast_health` | both sides together (`interpret.ContrastHealth`: `query`, `comparator`, `shared_blocks`, `union_blocks`, `passed`, `floor_failures`), or `None` if there was no comparator to contrast against |
+
+An effect is emitted only when **both** `query_health` and `comparator_health` pass their
+floors — checking the query alone and differencing against an unexamined comparator can
+silently produce an effect size from a comparator that would itself have been refused as a
+query. Failures in `contrast_health.floor_failures` are prefixed `query:` or `comparator:` so
+a reader does not have to re-derive which side is responsible.
+
+**Deprecated:** `Interpretation.health` is kept for one release as an alias of
+`query_health` — readable both as an attribute (`result.health`) and as a `to_dict()` key
+(`blob["health"]`) — so existing readers keyed on the old, single ambiguous `health` field do
+not break. It will be removed in a later release; new readers should use `query_health`.
+
 ## Two tiers, not one (T-13)
 
 `discovery_tier` answers *how strongly was this pattern discovered?*

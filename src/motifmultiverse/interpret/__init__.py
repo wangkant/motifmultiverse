@@ -48,9 +48,10 @@ from motifmultiverse.schema import (
 )
 
 __all__ = [
-    "InterpretError", "HealthReport", "FamilyComposition", "FamilyEffect",
-    "Interpretation", "read_hit_table", "read_peak_set", "peak_universe",
-    "health_report", "compose", "estimate_effects", "interpret_query",
+    "InterpretError", "HealthReport", "ContrastHealth", "FamilyComposition",
+    "FamilyEffect", "Interpretation", "read_hit_table", "read_peak_set",
+    "peak_universe", "health_report", "contrast_health_report", "compose",
+    "estimate_effects", "interpret_query",
     "ESTIMATOR", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP",
 ]
 
@@ -263,8 +264,11 @@ def health_report(peaks: dict[str, Peak], submitted: Sequence[str],
     submitted_unique = list(dict.fromkeys(submitted))
     present = [peaks[r] for r in submitted_unique if r in peaks]
     coverage = len(present) / len(submitted_unique) if submitted_unique else None
-    blocks = {p.block for p in present}
     searched = [p for p in present if p.searched]
+    # NOT_SEARCHED peaks are not evidence of absence, so a block that contains
+    # only NOT_SEARCHED peaks does not contribute to the effective sample size
+    # either -- counting it would let an unsearched region inflate n_blocks.
+    blocks = {p.block for p in searched}
     with_hit = [p for p in searched if p.has_used_hit]
     explained = len(with_hit) / len(searched) if searched else None
 
@@ -294,6 +298,62 @@ def health_report(peaks: dict[str, Peak], submitted: Sequence[str],
             "min_blocks": float(floors.min_blocks),
             "min_explained_fraction": floors.min_explained_fraction,
         },
+        floor_failures=failures,
+    )
+
+
+@dataclass
+class ContrastHealth:
+    """Both sides of a contrast, so an effect is never one-sided evidence.
+
+    A comparator built from its own peak set can fail exactly the floors a
+    query can: too few peaks in the universe, too few blocks, too little of it
+    explained by the frozen lexicon. Checking only the query's health and then
+    differencing against an unexamined comparator can silently produce an
+    effect size from a comparator that would itself have been refused as a
+    query. ``comparator`` is ``None`` when no comparator was submitted at all
+    (as opposed to one that was submitted and failed), so the two absences are
+    not conflated.
+    """
+
+    query: HealthReport
+    comparator: HealthReport | None
+    shared_blocks: int
+    union_blocks: int
+    passed: bool
+    floor_failures: list[str]
+
+
+def contrast_health_report(peaks: dict[str, Peak], query_ids: Sequence[str],
+                           comparator_ids: Sequence[str], floors: HealthFloors,
+                           block_size: int) -> ContrastHealth:
+    """Health of the query and, if one was submitted, of the comparator.
+
+    Failures are prefixed ``query:`` or ``comparator:`` so a reader can tell
+    which side is responsible without re-deriving it. ``passed`` requires both
+    sides to clear their floors; a comparator that was never submitted does
+    not count against it, since there is then no contrast to gate.
+    """
+    query_health = health_report(peaks, query_ids, floors, block_size)
+    comparator_health = (
+        health_report(peaks, comparator_ids, floors, block_size) if comparator_ids else None
+    )
+
+    q_ids = list(dict.fromkeys(query_ids))
+    c_ids = list(dict.fromkeys(comparator_ids))
+    q_blocks = {peaks[r].block for r in q_ids if r in peaks and peaks[r].searched}
+    c_blocks = {peaks[r].block for r in c_ids if r in peaks and peaks[r].searched}
+
+    failures = [f"query: {f}" for f in query_health.floor_failures]
+    if comparator_health is not None:
+        failures += [f"comparator: {f}" for f in comparator_health.floor_failures]
+
+    return ContrastHealth(
+        query=query_health,
+        comparator=comparator_health,
+        shared_blocks=len(q_blocks & c_blocks),
+        union_blocks=len(q_blocks | c_blocks),
+        passed=query_health.passed and (comparator_health is None or comparator_health.passed),
         floor_failures=failures,
     )
 
@@ -462,7 +522,9 @@ class Interpretation:
     selection_provenance: str
     output_mode: str
     emitted_order: list[str]
-    health: dict[str, Any]
+    query_health: dict[str, Any]
+    comparator_health: dict[str, Any] | None
+    contrast_health: dict[str, Any] | None
     floor_failures: list[str]
     interpretation_emitted: bool
     suppression_reason: str | None
@@ -479,6 +541,10 @@ class Interpretation:
         default_factory=lambda: [e.value for e in Estimator])
     estimators_implemented: list[str] = field(
         default_factory=lambda: sorted(e.value for e in IMPLEMENTED_ESTIMATORS))
+    #: Deprecated alias of `query_health`, retained for one release so an
+    #: existing reader keyed on `health` (attribute or `to_dict()` key) does
+    #: not break. See docs/DATA_MODEL.md. Slated for removal after this release.
+    health: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -533,20 +599,32 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
             f"{query.query_id}: the query is empty, so no ratio it produces has a denominator"
         )
 
-    health = health_report(peaks, region_ids, floors, block_size)   # (2) health, always
+    # (2) health, always -- both sides, before composition or effects, so a
+    # comparator built from an unhealthy peak set cannot silently license an
+    # effect the query side alone would have earned.
+    contrast = contrast_health_report(peaks, region_ids, comparator_ids, floors, block_size)
     emitted = ["health"]
 
     composition: list[dict[str, Any]] | None = None
     effects: list[dict[str, Any]] | None = None
     suppression: str | None = None
 
-    if not health.passed:
+    # The operative failures: what actually caused *this* interpretation to be
+    # suppressed. A comparator that was never relevant to this mode (descriptive
+    # modes never touch it) must not appear here just because it happens to be
+    # unhealthy -- that would report a failure for nothing that was suppressed.
+    # `contrast.floor_failures` (unconditional, both sides) still travels in
+    # full inside `contrast_health` below, for transparency.
+    floor_failures: list[str] = [f"query: {f}" for f in contrast.query.floor_failures]
+
+    if not contrast.query.passed:
         # (3) Suppression, not annotation. A caveat beside a number does not travel.
         suppression = (
-            "reading suppressed: " + "; ".join(health.floor_failures)
+            "reading suppressed: " + "; ".join(floor_failures)
             + ". The health numbers above stand; no composition and no effect is reported."
         )
     else:
+        floor_failures = []
         composition = [asdict(c) for c in compose(peaks, region_ids)]
         emitted.append("composition")
         if mode in (OutputMode.FULL_INFERENCE, OutputMode.FULL_INFERENCE_HELD_OUT):
@@ -557,24 +635,42 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     "stronger, prediction falsified', differing only in the comparator; no "
                     "baseline, no number (BA-18)."
                 )
-            effects = [asdict(e) for e in estimate_effects(
-                peaks, region_ids, comparator_ids, query.comparator_id,
-                n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)]
-            emitted.append("effects")
-            guards.comparator_declared(effects).raise_if_failed()
+            if contrast.comparator is not None and not contrast.comparator.passed:
+                # The query side earned composition, but an effect needs both sides
+                # healthy: a comparator that would itself have been refused as a
+                # query must not license a difference against it either.
+                comparator_failures = [f"comparator: {f}" for f in contrast.comparator.floor_failures]
+                floor_failures = comparator_failures
+                suppression = (
+                    "effects suppressed: " + "; ".join(comparator_failures)
+                    + ". Composition above stands; no effect is reported because the "
+                    "comparator side does not clear its floors."
+                )
+            else:
+                effects = [asdict(e) for e in estimate_effects(
+                    peaks, region_ids, comparator_ids, query.comparator_id,
+                    n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)]
+                emitted.append("effects")
+                guards.comparator_declared(effects).raise_if_failed()
         else:
             notes.append(
                 f"{mode.value}: descriptive decomposition only. No interval and no p value is "
                 "reported, because the selection criterion cannot be separated from the signal."
             )
 
+    query_health = asdict(contrast.query)
+    comparator_health = asdict(contrast.comparator) if contrast.comparator is not None else None
+    contrast_health = asdict(contrast) if contrast.comparator is not None else None
+
     result = Interpretation(
         query_id=query.query_id,
         selection_provenance=query.selection_provenance.value,
         output_mode=mode.value,
         emitted_order=emitted,
-        health=asdict(health),
-        floor_failures=health.floor_failures,
+        query_health=query_health,
+        comparator_health=comparator_health,
+        contrast_health=contrast_health,
+        floor_failures=floor_failures,
         interpretation_emitted=composition is not None,
         suppression_reason=suppression,
         composition=composition,
@@ -582,19 +678,22 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         notes=notes,
         input_scale=hits[0].input_scale,
         lexicon_id=hits[0].lexicon_id,
+        health=query_health,   # deprecated alias of query_health; see docs/DATA_MODEL.md
     )
 
     # The guards run on the finished record, not on intermediate state, so that
-    # what is checked is exactly what a reader would receive.
+    # what is checked is exactly what a reader would receive. health_before_effect
+    # reads the query view only: it gates composition, which is a query-only
+    # reading, not the bilateral contrast that gates effects.
     guards.selection_provenance_declared([{
         "query_id": query.query_id,
         "selection_provenance": query.selection_provenance.value,
         "output_mode": mode.value,
     }]).raise_if_failed()
     guards.health_before_effect({
-        "health": result.health,
+        "health": result.query_health,
         "emitted_order": result.emitted_order,
-        "floor_failures": result.floor_failures,
+        "floor_failures": contrast.query.floor_failures,
         "effects": result.effects or [],
         "interpretation_emitted": result.interpretation_emitted,
     }).raise_if_failed()

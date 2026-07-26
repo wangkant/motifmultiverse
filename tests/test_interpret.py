@@ -195,12 +195,29 @@ def test_health_numbers_carry_their_denominators():
     assert h.explained_fraction == pytest.approx(h.n_with_used_hit / h.n_searched)
 
 
+def test_not_searched_blocks_do_not_satisfy_min_blocks():
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    ids = [NOT_SEARCHED_PEAK, NO_MATCH_PEAK]
+    health = interpret.health_report(
+        peaks, ids, HealthFloors(min_blocks=2, min_intersection_coverage=0.0,
+                                 min_explained_fraction=0.0), BLOCK)
+    assert health.n_blocks == 1
+    assert any("n_blocks=1" in failure for failure in health.floor_failures)
+
+
 def test_a_floor_failure_suppresses_the_reading_instead_of_annotating_it():
     result = interpret.interpret_query(_rows(), _query(region_ids=_ids(0)[:4]), n_bootstrap=50)
     assert result.floor_failures                      # too few blocks
     assert result.composition is None and result.effects is None
     assert result.interpretation_emitted is False
     assert "suppressed" in (result.suppression_reason or "")
+
+
+def test_bad_comparator_health_suppresses_effects():
+    q = _query(comparator_region_ids=_ids(1)[:2])
+    result = interpret.interpret_query(_rows(), q, n_bootstrap=20)
+    assert result.effects is None
+    assert any("comparator" in failure for failure in result.floor_failures)
 
 
 def test_health_is_emitted_first_even_when_everything_passes():
