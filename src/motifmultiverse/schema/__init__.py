@@ -9,8 +9,10 @@ See ``docs/DATA_MODEL.md``. The rules encoded here (T-12) are not stylistic:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from typing import Any
@@ -27,7 +29,8 @@ from .identity import (
 
 __all__ = [
     "Missingness", "Decision", "Tier", "IdentityError", "SchemaError",
-    "MotifNode", "EvidenceEdge", "DecisionRecord", "DecisionBundle", "AnalysisConfig",
+    "MotifNode", "EvidenceEdge", "DecisionRecord", "DecisionBundle", "OntologyDecision",
+    "AnalysisConfig",
     "NamespacedId", "translate", "assert_no_key_parsing", "MISSING_SENTINEL",
     "SelectionProvenance", "OutputMode", "MOST_CONSERVATIVE_OUTPUT_MODE",
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
@@ -38,11 +41,21 @@ __all__ = [
     "MergeConfidence",
     "MERGE_CONFIDENCE_CRITERIA", "CRITERION_NOT_YET_DEFINED",
     "SensitivityTrigger", "sensitivity_triggers", "DECISION_BUNDLE_SCHEMA_VERSION",
+    "DECISION_BUNDLE_PRODUCER", "decision_bundle_artifact_id",
     "StatisticalLicense", "ClaimScope", "RepresentationId", "VariantId",
     "resolve_query_permissions", "DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES",
     "IDENTITY_SCHEMA_VERSION",
     "SUBSTRATE_SCHEMA_VERSION", "JsonValue", "CallerSpecification", "HitSubstrateManifest",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily expose adjudication's schema object without an import cycle."""
+    if name == "OntologyDecision":
+        from motifmultiverse.adjudicate import OntologyDecision
+
+        return OntologyDecision
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # An explicit sentinel. Never 0, never NaN, never "".
 MISSING_SENTINEL = "NA"
@@ -329,11 +342,33 @@ class DecisionRecord:
 
 
 #: ``DecisionBundle`` schema revision. Bumped only if the payload shape changes.
-DECISION_BUNDLE_SCHEMA_VERSION = "1"
+DECISION_BUNDLE_SCHEMA_VERSION = "2"
+DECISION_BUNDLE_PRODUCER = "motifmultiverse.adjudicate"
 
 #: The only keys a decisions payload may declare. Anything else is refused rather
 #: than ignored, per the same rule as ``DecisionRecord.from_dict``.
-_DECISION_BUNDLE_KEYS = frozenset({"schema_version", "decisions", "tiers"})
+_DECISION_BUNDLE_KEYS = frozenset({
+    "schema_version", "artifact_id", "producer", "provenance", "decisions", "tiers",
+})
+
+
+def decision_bundle_artifact_id(
+    decisions: Sequence[Mapping[str, Any] | DecisionRecord],
+    tiers: Mapping[str, Any],
+) -> str:
+    """Content identity for the compile-facing portion of an adjudication bundle."""
+    normalized_decisions = [
+        asdict(decision) if isinstance(decision, DecisionRecord) else dict(decision)
+        for decision in decisions
+    ]
+    payload = {
+        "schema_version": DECISION_BUNDLE_SCHEMA_VERSION,
+        "producer": DECISION_BUNDLE_PRODUCER,
+        "decisions": normalized_decisions,
+        "tiers": dict(tiers),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"merge-decisions:{hashlib.sha256(encoded).hexdigest()}"
 
 #: The only keys one node's `tiers` override may declare.
 _TIER_OVERRIDE_KEYS = frozenset({"discovery_tier", "analysis_tier", "tier_reason"})
@@ -392,11 +427,20 @@ class DecisionBundle:
     schema_version: str
     decisions: list[DecisionRecord]
     tiers: dict[str, dict[str, str]]
+    artifact_id: str | None = None
+    producer: str | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any] | None) -> DecisionBundle:
         payload = payload or {}
         _reject_unknown_keys(payload, set(_DECISION_BUNDLE_KEYS), "decisions payload")
+        schema_version = str(payload.get("schema_version") or DECISION_BUNDLE_SCHEMA_VERSION)
+        if schema_version != DECISION_BUNDLE_SCHEMA_VERSION:
+            raise SchemaError(
+                f"decision bundle schema_version must be {DECISION_BUNDLE_SCHEMA_VERSION!r}; "
+                f"got {schema_version!r}"
+            )
         decisions = [d if isinstance(d, DecisionRecord) else DecisionRecord.from_dict(d)
                      for d in (payload.get("decisions") or [])]
 
@@ -424,10 +468,68 @@ class DecisionBundle:
         _validate_tier_overrides(tiers)
 
         return cls(
-            schema_version=str(payload.get("schema_version") or DECISION_BUNDLE_SCHEMA_VERSION),
+            schema_version=schema_version,
             decisions=decisions,
             tiers=tiers,
+            artifact_id=payload.get("artifact_id"),
+            producer=payload.get("producer"),
+            provenance=dict(payload.get("provenance") or {}),
         )
+
+    @classmethod
+    def from_adjudication_artifact(
+        cls,
+        payload: Mapping[str, Any] | None,
+    ) -> DecisionBundle:
+        """Validate the exact identity-bearing handoff emitted by adjudicate."""
+        if not isinstance(payload, Mapping):
+            raise SchemaError("merge decisions artifact must be a JSON object")
+        required = {"schema_version", "artifact_id", "producer", "provenance", "decisions", "tiers"}
+        missing = required - set(payload)
+        if missing:
+            raise SchemaError(
+                f"merge decisions artifact missing required key(s) {sorted(missing)}"
+            )
+        schema_version = str(payload["schema_version"])
+        if schema_version != DECISION_BUNDLE_SCHEMA_VERSION:
+            raise SchemaError(
+                f"decision bundle schema_version must be {DECISION_BUNDLE_SCHEMA_VERSION!r}; "
+                f"got {schema_version!r}"
+            )
+        if payload["producer"] != DECISION_BUNDLE_PRODUCER:
+            raise SchemaError(
+                f"merge decisions producer must be {DECISION_BUNDLE_PRODUCER!r}; "
+                f"got {payload['producer']!r}"
+            )
+        if not payload["provenance"]:
+            raise SchemaError("merge decisions artifact requires provenance")
+        expected_id = decision_bundle_artifact_id(payload["decisions"], payload["tiers"])
+        if payload["artifact_id"] != expected_id:
+            raise SchemaError(
+                "merge decisions artifact_id does not match its decisions and tiers"
+            )
+        return cls.from_dict(payload)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "artifact_id": self.artifact_id,
+            "producer": self.producer,
+            "provenance": dict(self.provenance),
+            "decisions": [
+                {
+                    **asdict(decision),
+                    "decision": decision.decision.value,
+                    "merge_confidence": (
+                        decision.merge_confidence.value
+                        if decision.merge_confidence is not None
+                        else None
+                    ),
+                }
+                for decision in self.decisions
+            ],
+            "tiers": self.tiers,
+        }
 
 
 #: A union id names one model/readout's shared lexicon namespace. It is declared in

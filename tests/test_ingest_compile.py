@@ -16,12 +16,16 @@ import pytest
 from motifmultiverse import compile as compile_mod
 from motifmultiverse import guards, ingest
 from motifmultiverse.schema import (
+    DECISION_BUNDLE_PRODUCER,
+    DECISION_BUNDLE_SCHEMA_VERSION,
     IDENTITY_SCHEMA_VERSION,
+    Decision,
     MetaclusterState,
     RegistryMetadata,
     RepresentationId,
     SchemaError,
     VariantId,
+    decision_bundle_artifact_id,
 )
 
 h5py = pytest.importorskip("h5py")
@@ -227,8 +231,22 @@ def _decisions(tmp_path, registry, **fields):
     decision = {"cluster_id": "c1", "decision": "collapse", "members": members,
                 "representative": members[0], "rationale": "r", "decided_by": "test"}
     decision.update(fields)
-    path.write_text(json.dumps({"decisions": [decision]}))
+    path.write_text(json.dumps(_adjudication_payload(decisions=[decision])))
     return path
+
+
+def _adjudication_payload(*, decisions=(), tiers=None):
+    """Identity-bearing Task 12 handoff, allowing one test to corrupt inner data."""
+    tiers = dict(tiers or {})
+    decisions = list(decisions)
+    return {
+        "schema_version": DECISION_BUNDLE_SCHEMA_VERSION,
+        "artifact_id": decision_bundle_artifact_id(decisions, tiers),
+        "producer": DECISION_BUNDLE_PRODUCER,
+        "provenance": {"test_fixture": "tests/test_ingest_compile.py"},
+        "decisions": decisions,
+        "tiers": tiers,
+    }
 
 
 def _write_decisions(tmp_path, members, representative, cluster_id="c1",
@@ -238,7 +256,7 @@ def _write_decisions(tmp_path, members, representative, cluster_id="c1",
                "representative": representative, "rationale": "r", "decided_by": "test"}
     payload.update(fields)
     path = tmp_path / "d.json"
-    path.write_text(json.dumps({"decisions": [payload]}))
+    path.write_text(json.dumps(_adjudication_payload(decisions=[payload])))
     return path
 
 
@@ -248,15 +266,15 @@ def _overlapping_decisions(tmp_path, registry):
     arrays.close()
     shared = nodes[1]["node_id"]
     path = tmp_path / "d.json"
-    payload = {"decisions": [
+    decisions = [
         {"cluster_id": "c1", "decision": "collapse",
          "members": [nodes[0]["node_id"], shared], "representative": nodes[0]["node_id"],
          "rationale": "r1", "decided_by": "test"},
         {"cluster_id": "c2", "decision": "collapse",
          "members": [shared, nodes[2]["node_id"]], "representative": shared,
          "rationale": "r2", "decided_by": "test"},
-    ]}
-    path.write_text(json.dumps(payload))
+    ]
+    path.write_text(json.dumps(_adjudication_payload(decisions=decisions)))
     return path
 
 
@@ -267,17 +285,19 @@ def _decision_whose_representative_is_expanded_only(tmp_path, registry):
     rep = nodes[0]["node_id"]
     other = nodes[1]["node_id"]
     path = tmp_path / "d.json"
-    payload = {
-        "decisions": [{
+    decisions = [{
             "cluster_id": "c1", "decision": "collapse",
             "members": [rep, other], "representative": rep,
             "merge_confidence": "HIGH",
             "rationale": "representative demoted to expanded after the decision was made",
             "decided_by": "test",
-        }],
-        "tiers": {rep: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}},
+        }]
+    tier_overrides = {
+        rep: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}
     }
-    path.write_text(json.dumps(payload))
+    path.write_text(json.dumps(
+        _adjudication_payload(decisions=decisions, tiers=tier_overrides)
+    ))
     return path
 
 
@@ -336,11 +356,12 @@ def test_a_representative_that_is_not_a_member_is_refused(tmp_path):
     _, nodes, arrays = ingest.load_registry(registry)
     arrays.close()
     decisions = tmp_path / "d.json"
-    decisions.write_text(json.dumps({"decisions": [{
+    decision_rows = [{
         "cluster_id": "c1", "decision": "collapse",
         "members": [nodes[0]["node_id"], nodes[1]["node_id"]],
         "representative": "a_constructed_average", "confidence": 0.9,
-        "rationale": "x", "decided_by": "test"}]}))
+        "rationale": "x", "decided_by": "test"}]
+    decisions.write_text(json.dumps(_adjudication_payload(decisions=decision_rows)))
     with pytest.raises(compile_mod.CompileError, match="observed medoid"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=decisions)
 
@@ -372,7 +393,9 @@ def test_tier_override_naming_an_unknown_node_is_refused(tmp_path):
     """
     registry = _registry(tmp_path)
     path = tmp_path / "d.json"
-    path.write_text(json.dumps({"tiers": {"missing-node": {"analysis_tier": "expanded"}}}))
+    path.write_text(json.dumps(_adjudication_payload(
+        tiers={"missing-node": {"analysis_tier": "expanded"}}
+    )))
     with pytest.raises(compile_mod.CompileError, match="unknown node"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
 
@@ -387,7 +410,9 @@ def test_tier_override_with_an_invalid_analysis_tier_value_is_refused(tmp_path):
     arrays.close()
     node_id = nodes[0]["node_id"]
     path = tmp_path / "d.json"
-    path.write_text(json.dumps({"tiers": {node_id: {"analysis_tier": "coree"}}}))
+    path.write_text(json.dumps(_adjudication_payload(
+        tiers={node_id: {"analysis_tier": "coree"}}
+    )))
     with pytest.raises(compile_mod.CompileError, match="not a valid Tier"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
 
@@ -411,7 +436,9 @@ def test_tier_override_diverging_tiers_without_a_reason_is_refused(tmp_path):
     arrays.close()
     node_id = nodes[0]["node_id"]
     path = tmp_path / "d.json"
-    path.write_text(json.dumps({"tiers": {node_id: {"analysis_tier": "expanded"}}}))
+    path.write_text(json.dumps(_adjudication_payload(
+        tiers={node_id: {"analysis_tier": "expanded"}}
+    )))
     with pytest.raises(compile_mod.CompileError, match="tier_reason"):
         compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
 
@@ -425,8 +452,9 @@ def test_tier_override_diverging_tiers_with_a_reason_is_applied(tmp_path):
     arrays.close()
     node_id = nodes[0]["node_id"]
     path = tmp_path / "d.json"
-    path.write_text(json.dumps({"tiers": {
-        node_id: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}}}))
+    path.write_text(json.dumps(_adjudication_payload(tiers={
+        node_id: {"analysis_tier": "expanded", "tier_reason": "demoted post hoc"}
+    })))
     manifests = compile_mod.compile_lexicons(registry, tmp_path / "lex", decisions_path=path)
     assert manifests["core"].n_motifs == 4          # node_id demoted out of core
     assert manifests["expanded"].n_motifs == 5
@@ -467,11 +495,12 @@ def test_the_content_hash_is_deterministic_and_tracks_membership(tmp_path):
     _, nodes, arrays = ingest.load_registry(registry)
     arrays.close()
     decisions = tmp_path / "d.json"
-    decisions.write_text(json.dumps({"decisions": [{
+    decision_rows = [{
         "cluster_id": "c1", "decision": "collapse",
         "members": [nodes[0]["node_id"], nodes[1]["node_id"]],
         "representative": nodes[0]["node_id"], "merge_confidence": "MODERATE",
-        "rationale": "moderate", "decided_by": "test"}]}))
+        "rationale": "moderate", "decided_by": "test"}]
+    decisions.write_text(json.dumps(_adjudication_payload(decisions=decision_rows)))
     c = compile_mod.compile_lexicons(registry, tmp_path / "lex3", decisions_path=decisions)
     assert c["core"].lexicon_content_hash != a["core"].lexicon_content_hash
     assert c["sensitivity"].lexicon_content_hash == a["core"].lexicon_content_hash
@@ -636,3 +665,79 @@ def test_variant_id_is_frozen_and_hashable():
 def test_identity_schema_version_is_declared():
     """T-07's default version is defined once and carried by each identity."""
     assert isinstance(IDENTITY_SCHEMA_VERSION, str) and IDENTITY_SCHEMA_VERSION
+
+
+# ---------------------------------------------------------------------------
+# Task 12: compile accepts only the validated adjudicate handoff.
+# ---------------------------------------------------------------------------
+
+def test_compile_refuses_a_legacy_or_handwritten_decision_payload(tmp_path):
+    """Replacing the strict handoff parser with permissive from_dict fails this."""
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"decisions": [{
+        "cluster_id": "legacy",
+        "decision": "collapse",
+        "members": [nodes[0]["node_id"], nodes[1]["node_id"]],
+        "representative": nodes[0]["node_id"],
+        "rationale": "handwritten legacy row",
+        "decided_by": "test",
+    }]}))
+
+    with pytest.raises(compile_mod.CompileError, match="artifact"):
+        compile_mod.compile_lexicons(
+            registry,
+            tmp_path / "lex",
+            decisions_path=legacy,
+            verify="skip",
+        )
+
+
+def test_compile_consumes_the_schema_validated_merge_decisions_emitted_by_adjudicate(tmp_path):
+    """Rejecting the producer's own identity-bearing bundle fails this companion."""
+    from motifmultiverse.adjudicate import (
+        OntologyDecision,
+        stable_decision_id,
+        write_adjudication_artifacts,
+    )
+
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    members = tuple(sorted((nodes[0]["node_id"], nodes[1]["node_id"])))
+    decision = OntologyDecision(
+        decision_id=stable_decision_id(
+            members, "TRUE_DUPLICATE", "TRUE_DUPLICATE", "test-1"
+        ),
+        node_ids=members,
+        relationship="TRUE_DUPLICATE",
+        decision=Decision.COLLAPSE,
+        family_id=None,
+        representative_node_id=members[0],
+        criterion_id="TRUE_DUPLICATE",
+        criterion_version="test-1",
+        evidence_ids=("alignment:test",),
+        evidence_for=("all gates passed",),
+        evidence_against=(),
+        rationale="all declared evidence gates passed",
+        decided_by="automated:test",
+        manual_override=False,
+        provenance={"criteria_sha256": "a" * 64},
+    )
+    adjudication = tmp_path / "adjudication"
+    write_adjudication_artifacts(
+        adjudication,
+        [decision],
+        provenance={"criteria_sha256": "a" * 64},
+    )
+
+    manifests = compile_mod.compile_lexicons(
+        registry,
+        tmp_path / "lex",
+        decisions_path=adjudication / "merge_decisions.json",
+        verify="skip",
+    )
+
+    assert manifests["core"].n_motifs == 4

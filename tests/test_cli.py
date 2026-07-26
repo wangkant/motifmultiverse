@@ -9,7 +9,7 @@ from motifmultiverse.cli import build_parser, main
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
-IMPLEMENTED = ["ingest", "compile", "interpret", "align"]
+IMPLEMENTED = ["ingest", "compile", "interpret", "align", "annotate", "adjudicate"]
 
 
 def test_version_flag():
@@ -42,7 +42,6 @@ def test_all_eight_subcommands_are_registered():
 
 
 @pytest.mark.parametrize("argv", [
-    ["adjudicate", "evidence/"],
     ["validate", "lexicons/"],
     ["infer", "instances/"],
     ["report", "project/"],
@@ -56,19 +55,20 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
 
 def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
     # "align" and "annotate" no longer belong here (Tasks 10 and 11 implement
-    # them for real); "adjudicate" remains a genuine skeleton. It has no --seed flag
+    # them for real); Task 12 implements adjudicate, so report is the remaining
+    # genuine skeleton exercised here. It has no --seed flag
     # (only ingest/compile/interpret/align ever exposed one), so the recorded
     # random_seed is the untouched default (None) rather than a value threaded
     # in from the CLI -- the property under test is that the record exists
     # at all before the body raises, not what value a particular field holds.
     out = tmp_path / "o"
-    assert main(["adjudicate", "evidence/", "--out", str(out)]) == 3
+    assert main(["report", "project/", "--out", str(out)]) == 3
     recs = json.loads((out / "provenance.json").read_text())
     assert len(recs) == 1
     r = recs[0]
     for field in ("command", "subcommand", "software", "timestamp_utc", "random_seed"):
         assert field in r, field
-    assert r["subcommand"] == "adjudicate"
+    assert r["subcommand"] == "report"
     assert r["random_seed"] is None
     assert r["software"]["motifmultiverse"]
 

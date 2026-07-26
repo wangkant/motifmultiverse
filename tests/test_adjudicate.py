@@ -8,7 +8,7 @@ below.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -451,3 +451,589 @@ def test_ambiguous_cross_family_defers_when_evidence_absent():
     result = evaluate_criterion(criterion, {})
     assert result.decision is Decision.DEFERRED
     assert result.matched is False
+
+
+# ---------------------------------------------------------------------------
+# Task 12: observed medoids with a complete, deterministic tie break.
+# ---------------------------------------------------------------------------
+
+def test_choose_medoid_returns_the_observed_member_with_highest_mean_similarity():
+    """Returning an average/consensus or ignoring the similarity objective fails."""
+    from motifmultiverse import adjudicate
+
+    similarities = {
+        ("node-a", "node-b"): 0.9,
+        ("node-a", "node-c"): 0.8,
+        ("node-b", "node-c"): 0.2,
+    }
+
+    chosen = adjudicate.choose_medoid(["node-a", "node-b", "node-c"], similarities)
+
+    assert chosen == "node-a"
+    assert chosen in {"node-a", "node-b", "node-c"}
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            {
+                "node-a": {"motif_completeness": 0.8, "seqlet_count": 500, "core_ic": 20.0,
+                           "cross_context_recurrence": 8},
+                "node-z": {"motif_completeness": 0.9, "seqlet_count": 1, "core_ic": 1.0,
+                           "cross_context_recurrence": 1},
+            },
+            "node-z",
+        ),
+        (
+            {
+                "node-a": {"motif_completeness": 0.9, "seqlet_count": 499, "core_ic": 20.0,
+                           "cross_context_recurrence": 8},
+                "node-z": {"motif_completeness": 0.9, "seqlet_count": 500, "core_ic": 1.0,
+                           "cross_context_recurrence": 1},
+            },
+            "node-z",
+        ),
+        (
+            {
+                "node-a": {"motif_completeness": 0.9, "seqlet_count": 500, "core_ic": 19.0,
+                           "cross_context_recurrence": 8},
+                "node-z": {"motif_completeness": 0.9, "seqlet_count": 500, "core_ic": 20.0,
+                           "cross_context_recurrence": 1},
+            },
+            "node-z",
+        ),
+        (
+            {
+                "node-a": {"motif_completeness": 0.9, "seqlet_count": 500, "core_ic": 20.0,
+                           "cross_context_recurrence": 7},
+                "node-z": {"motif_completeness": 0.9, "seqlet_count": 500, "core_ic": 20.0,
+                           "cross_context_recurrence": 8},
+            },
+            "node-z",
+        ),
+        ({}, "node-a"),
+    ],
+)
+def test_choose_medoid_breaks_similarity_ties_in_the_declared_order(metadata, expected):
+    """Deleting or reordering any declared tie dimension fails its own row."""
+    from motifmultiverse import adjudicate
+
+    assert adjudicate.choose_medoid(
+        ["node-z", "node-a"],
+        {("node-a", "node-z"): 0.9},
+        node_metadata=metadata,
+    ) == expected
+
+
+# ---------------------------------------------------------------------------
+# Task 12: adjudication schema, evidence protocol, and executable gates.
+# ---------------------------------------------------------------------------
+
+def _alignment(left="node-a", right="node-b", *, similarity=0.99,
+               overlap_source=1.0, overlap_target=1.0):
+    from motifmultiverse.align import AlignmentEvidence
+
+    return AlignmentEvidence(
+        source_node_id=left,
+        target_node_id=right,
+        orientation="forward",
+        offset=0,
+        overlap_bp=10,
+        overlap_frac_source=overlap_source,
+        overlap_frac_target=overlap_target,
+        ppm_similarity=similarity,
+        signed_cwm_similarity=similarity,
+        empirical_p_value=0.001,
+        null_shuffles=1000,
+        seed=7,
+    )
+
+
+def _annotation(node_id, family_id, *, source="tomtom", match=None):
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    return AnnotationCandidate.create(
+        node_id=node_id,
+        proposed_family_id=family_id,
+        source=source,
+        source_version="1",
+        matched_motif_id=match or f"database:{node_id}:{family_id}",
+        motif_length=10,
+        seqlet_count=150,
+    )
+
+
+def _collapse_criterion(*, require_stability=True):
+    required = ("ppm_similarity", "status") if require_stability else ("ppm_similarity",)
+    predicates = [Predicate(field="ppm_similarity", operator="ge", value=0.9)]
+    if require_stability:
+        predicates.append(Predicate(field="status", operator="eq", value="STABLE"))
+    return Criterion(
+        criterion_id="TRUE_DUPLICATE",
+        version="test-1",
+        status=CriterionStatus.FROZEN,
+        relationship="TRUE_DUPLICATE",
+        required_evidence=required,
+        predicates=tuple(predicates),
+        insufficient_evidence_action=Decision.DEFERRED,
+        decision_if_matched=Decision.COLLAPSE,
+    )
+
+
+@dataclass(frozen=True)
+class _StabilityStub:
+    decision_id: str
+    n_affected_peaks: int
+    status: str
+
+
+def test_stability_evidence_is_runtime_checkable_and_structural():
+    """Removing runtime_checkable or any of the three declared fields fails."""
+    from motifmultiverse.adjudicate import StabilityEvidence
+
+    assert isinstance(_StabilityStub("decision:x", 12, "STABLE"), StabilityEvidence)
+    assert not isinstance(object(), StabilityEvidence)
+
+
+def _ontology_decision(**changes):
+    from motifmultiverse.adjudicate import OntologyDecision, stable_decision_id
+
+    payload = {
+        "decision_id": stable_decision_id(
+            ("node-a", "node-b"), "TRUE_DUPLICATE", "TRUE_DUPLICATE", "test-1"
+        ),
+        "node_ids": ("node-a", "node-b"),
+        "relationship": "TRUE_DUPLICATE",
+        "decision": Decision.COLLAPSE,
+        "family_id": "FAM_ALPHA",
+        "representative_node_id": "node-a",
+        "criterion_id": "TRUE_DUPLICATE",
+        "criterion_version": "test-1",
+        "evidence_ids": ("alignment:one",),
+        "evidence_for": ("registered pair satisfies criterion",),
+        "evidence_against": (),
+        "rationale": "all declared evidence gates passed",
+        "decided_by": "automated:test",
+        "manual_override": False,
+        "provenance": {"criteria_sha256": "a" * 64},
+    }
+    payload.update(changes)
+    return OntologyDecision(**payload)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"schema_version": "999"}, "schema_version"),
+        ({"decision_id": "decision:corrupted"}, "decision_id"),
+        ({"rationale": " "}, "rationale"),
+        ({"decided_by": " "}, "decided_by"),
+        ({"representative_node_id": "constructed-average"}, "observed member"),
+    ],
+)
+def test_ontology_decision_refuses_each_corrupted_guarded_value(changes, message):
+    """Removing the named OntologyDecision validation branch fails its row."""
+    from motifmultiverse.schema import SchemaError
+
+    with pytest.raises(SchemaError, match=message):
+        _ontology_decision(**changes)
+
+
+def test_ontology_decision_is_exported_as_a_public_schema_object():
+    """Dropping the schema-level public contract while keeping an internal class fails."""
+    import motifmultiverse.schema as schema
+    from motifmultiverse.adjudicate import OntologyDecision
+
+    assert schema.OntologyDecision is OntologyDecision
+
+
+def test_family_conflict_refuses_merge_even_when_matrix_similarity_is_high():
+    """A similarity-first collapse in place of conflict-first adjudication fails."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment(similarity=0.999)],
+        [_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_BETA")],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+    )
+
+    assert result.relationship == "AMBIGUOUS_CROSS_FAMILY"
+    assert result.decision is Decision.REFUSE_MERGE
+    assert result.representative_node_id is None
+    assert set(result.node_ids) == {"node-a", "node-b"}
+    assert result.evidence_against
+
+
+def test_missing_required_downstream_evidence_is_deferred_not_guessed():
+    """Filling an absent status or treating high similarity as sufficient fails."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment()],
+        [_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_ALPHA")],
+        [],
+        {"TRUE_DUPLICATE": _collapse_criterion(require_stability=True)},
+        "automated:test",
+    )
+
+    assert result.decision is Decision.DEFERRED
+    assert result.representative_node_id is None
+    assert "status" in result.rationale
+
+
+def test_present_downstream_evidence_can_satisfy_a_frozen_test_criterion():
+    """Ignoring a supplied structural stability row fails this companion control."""
+    from motifmultiverse.adjudicate import adjudicate_component, stable_decision_id
+
+    decision_id = stable_decision_id(
+        ("node-a", "node-b"), "TRUE_DUPLICATE", "TRUE_DUPLICATE", "test-1"
+    )
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment()],
+        [_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_ALPHA")],
+        [_StabilityStub(decision_id, 12, "STABLE")],
+        {"TRUE_DUPLICATE": _collapse_criterion(require_stability=True)},
+        "automated:test",
+    )
+
+    assert result.decision is Decision.COLLAPSE
+    assert result.representative_node_id in result.node_ids
+
+
+def test_manual_override_preserves_automated_decision_and_names_operator_and_reason():
+    """Overwriting or relabelling the automated gate result fails this separation."""
+    from motifmultiverse.adjudicate import apply_manual_override
+
+    automated = _ontology_decision()
+    overridden = apply_manual_override(
+        automated,
+        operator="curator@example",
+        rationale="known paralog-specific binding modes must remain separate",
+    )
+
+    assert overridden.decision is Decision.KEEP_SEPARATE_CURATOR_OVERRIDE
+    assert overridden.automated_decision is Decision.COLLAPSE
+    assert overridden.manual_override is True
+    assert overridden.override_operator == "curator@example"
+    assert overridden.override_rationale == (
+        "known paralog-specific binding modes must remain separate"
+    )
+    assert "manual override" in overridden.rationale.lower()
+    assert "multi-evidence gate" not in overridden.rationale.lower()
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"manual_override": True, "decision": Decision.KEEP_SEPARATE_CURATOR_OVERRIDE,
+          "automated_decision": Decision.COLLAPSE, "override_operator": "",
+          "override_rationale": "reason", "representative_node_id": None}, "operator"),
+        ({"manual_override": True, "decision": Decision.KEEP_SEPARATE_CURATOR_OVERRIDE,
+          "automated_decision": Decision.COLLAPSE, "override_operator": "curator",
+          "override_rationale": "", "representative_node_id": None}, "rationale"),
+        ({"manual_override": True, "decision": Decision.KEEP_SEPARATE_CURATOR_OVERRIDE,
+          "automated_decision": None, "override_operator": "curator",
+          "override_rationale": "reason", "representative_node_id": None},
+         "automated decision"),
+    ],
+)
+def test_manual_override_schema_refuses_erased_separation(changes, message):
+    """Each missing separation field is a corrupted override, not a gate output."""
+    from motifmultiverse.schema import SchemaError
+
+    with pytest.raises(SchemaError, match=message):
+        _ontology_decision(**changes)
+
+
+def test_nontransitive_connected_component_is_deferred_not_single_linkage_collapsed():
+    """Deleting the all-pairs/medoid gate turns this A-B-C chain into a false merge."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b", "node-c"],
+        [_alignment("node-a", "node-b"), _alignment("node-b", "node-c")],
+        [],
+        [],
+        {"TRUE_DUPLICATE": _collapse_criterion(require_stability=False)},
+        "automated:test",
+    )
+
+    assert result.decision is Decision.DEFERRED
+    assert result.representative_node_id is None
+    assert "non-transitive" in result.rationale
+
+
+def test_same_family_distinct_variants_reach_the_structural_refusal_criterion():
+    """Routing explicit variant identity into TRUE_DUPLICATE makes this unreachable."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b"],
+        [_alignment()],
+        [_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_ALPHA")],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+        node_metadata={
+            "node-a": {"variant_id": "UA_ALPHA_01"},
+            "node-b": {"variant_id": "UA_ALPHA_02"},
+        },
+    )
+
+    assert result.relationship == "SAME_FAMILY_VARIANT"
+    assert result.decision is Decision.REFUSE_MERGE
+
+
+def test_component_medoid_uses_authoritative_metadata_without_relabelling_motif_length():
+    """Ignoring explicit completeness or substituting candidate length fails this."""
+    from motifmultiverse.adjudicate import adjudicate_component
+
+    result = adjudicate_component(
+        ["node-a", "node-b", "node-z"],
+        [
+            _alignment("node-a", "node-b"),
+            _alignment("node-a", "node-z"),
+            _alignment("node-b", "node-z"),
+        ],
+        [
+            _annotation("node-a", "FAM_ALPHA"),
+            _annotation("node-b", "FAM_ALPHA"),
+            _annotation("node-z", "FAM_ALPHA"),
+        ],
+        [],
+        {"TRUE_DUPLICATE": _collapse_criterion(require_stability=False)},
+        "automated:test",
+        node_metadata={
+            "node-a": {"motif_completeness": 0.8, "seqlet_count": 1000, "core_ic": 20.0,
+                       "cross_context_recurrence": 10},
+            "node-b": {"motif_completeness": 0.8, "seqlet_count": 900, "core_ic": 19.0,
+                       "cross_context_recurrence": 9},
+            "node-z": {"motif_completeness": 0.9, "seqlet_count": 1, "core_ic": 1.0,
+                       "cross_context_recurrence": 1},
+        },
+    )
+
+    assert result.decision is Decision.COLLAPSE
+    assert result.representative_node_id == "node-z"
+
+
+def test_malformed_stability_evidence_is_a_controlled_refusal():
+    """Indexing an unchecked object raises AttributeError instead of this domain error."""
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_component
+
+    with pytest.raises(AdjudicationError, match="stability evidence"):
+        adjudicate_component(
+            ["node-a", "node-b"],
+            [_alignment()],
+            [],
+            [object()],
+            {"TRUE_DUPLICATE": _collapse_criterion(require_stability=True)},
+            "automated:test",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task 12: component orchestration, artifacts, identity, and CLI.
+# ---------------------------------------------------------------------------
+
+def test_adjudicate_all_emits_every_connected_cluster_including_refusal_and_deferred():
+    """Dropping a negative/non-collapse component from the returned audit fails."""
+    from motifmultiverse.adjudicate import adjudicate_all
+
+    decisions = adjudicate_all(
+        [
+            _alignment("node-a", "node-b"),
+            _alignment("node-c", "node-d"),
+        ],
+        [
+            _annotation("node-a", "FAM_ALPHA"),
+            _annotation("node-b", "FAM_BETA"),
+            _annotation("node-c", "FAM_GAMMA"),
+            _annotation("node-d", "FAM_GAMMA"),
+        ],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+    )
+
+    assert [decision.node_ids for decision in decisions] == [
+        ("node-a", "node-b"),
+        ("node-c", "node-d"),
+    ]
+    assert [decision.decision for decision in decisions] == [
+        Decision.REFUSE_MERGE,
+        Decision.DEFERRED,
+    ]
+
+
+def test_adjudication_artifacts_include_all_states_identity_schema_and_provenance(tmp_path):
+    """Omitting a refusal row, an output, identity, schema, or provenance fails."""
+    import json
+
+    import pandas as pd
+    import yaml
+
+    from motifmultiverse.adjudicate import (
+        adjudicate_all,
+        write_adjudication_artifacts,
+    )
+    from motifmultiverse.schema import DecisionBundle
+
+    decisions = adjudicate_all(
+        [_alignment("node-a", "node-b"), _alignment("node-c", "node-d")],
+        [
+            _annotation("node-a", "FAM_ALPHA"),
+            _annotation("node-b", "FAM_BETA"),
+            _annotation("node-c", "FAM_GAMMA"),
+            _annotation("node-d", "FAM_GAMMA"),
+        ],
+        [],
+        load_criteria(CRITERIA_PATH),
+        "automated:test",
+    )
+    paths = write_adjudication_artifacts(
+        tmp_path,
+        decisions,
+        provenance={"criteria_sha256": "b" * 64, "inputs": {"alignment": "c" * 64}},
+        review_path="human-review.yaml",
+    )
+
+    assert {path.name for path in paths} == {
+        "ontology_decisions.parquet", "merge_decisions.json", "human-review.yaml",
+    }
+    table = pd.read_parquet(tmp_path / "ontology_decisions.parquet")
+    bundle_payload = json.loads((tmp_path / "merge_decisions.json").read_text())
+    review = yaml.safe_load((tmp_path / "human-review.yaml").read_text())
+    bundle = DecisionBundle.from_adjudication_artifact(bundle_payload)
+    assert set(table["decision"]) == {"refuse_merge", "deferred"}
+    assert set(table["decision_id"]) == {decision.decision_id for decision in decisions}
+    assert set(table["schema_version"]) == {"1"}
+    assert table["provenance"].str.len().gt(2).all()
+    assert table["artifact_id"].str.startswith("ontology-decisions:").all()
+    assert len(bundle.decisions) == len(review["decisions"]) == 2
+    assert bundle.artifact_id.startswith("merge-decisions:")
+    assert bundle.producer == "motifmultiverse.adjudicate"
+    assert bundle.provenance["criteria_sha256"] == "b" * 64
+    assert review["artifact_id"].startswith("review:")
+    assert review["artifact_id"] != bundle.artifact_id
+
+
+def test_full_ontology_and_review_identity_changes_when_a_scientific_field_changes(tmp_path):
+    """Reusing cluster/merge identity after a rationale change fails this tamper control."""
+    import json
+    from dataclasses import replace
+
+    import pandas as pd
+    import yaml
+
+    from motifmultiverse.adjudicate import write_adjudication_artifacts
+
+    original = _ontology_decision()
+    revised = replace(original, rationale="a materially revised scientific rationale")
+    write_adjudication_artifacts(
+        tmp_path / "original", [original], provenance={"input": "a" * 64}
+    )
+    write_adjudication_artifacts(
+        tmp_path / "revised", [revised], provenance={"input": "a" * 64}
+    )
+    original_table = pd.read_parquet(
+        tmp_path / "original" / "ontology_decisions.parquet"
+    )
+    revised_table = pd.read_parquet(
+        tmp_path / "revised" / "ontology_decisions.parquet"
+    )
+    original_review = yaml.safe_load((tmp_path / "original" / "review.yaml").read_text())
+    revised_review = yaml.safe_load((tmp_path / "revised" / "review.yaml").read_text())
+
+    assert original.decision_id == revised.decision_id  # stable cluster identity
+    assert original_table["artifact_id"].iat[0] != revised_table["artifact_id"].iat[0]
+    assert original_review["artifact_id"] != revised_review["artifact_id"]
+    assert json.loads(original_table["provenance"].iat[0])["input"] == "a" * 64
+
+
+def test_permissive_policy_is_refused_until_criterion_safe_semantics_are_frozen(tmp_path):
+    """Accepting a policy label that changes no behavior creates false provenance."""
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_evidence
+
+    with pytest.raises(AdjudicationError, match="only conservative"):
+        adjudicate_evidence(tmp_path, tmp_path / "out", policy="permissive")
+
+
+@pytest.mark.parametrize(
+    ("corrupt", "message"),
+    [
+        (lambda payload: payload.update(schema_version="999"), "schema_version"),
+        (lambda payload: payload.update(artifact_id="merge-decisions:corrupted"), "artifact_id"),
+        (lambda payload: payload.pop("provenance"), "provenance"),
+        (lambda payload: payload.update(producer="handwritten"), "producer"),
+    ],
+)
+def test_decision_bundle_strict_handoff_refuses_each_corrupted_artifact(
+    tmp_path, corrupt, message,
+):
+    """Removing any strict adjudication-artifact guard fails its corrupted row."""
+    import json
+
+    from motifmultiverse.adjudicate import write_adjudication_artifacts
+    from motifmultiverse.schema import DecisionBundle, SchemaError
+
+    write_adjudication_artifacts(
+        tmp_path,
+        [_ontology_decision()],
+        provenance={"criteria_sha256": "b" * 64},
+    )
+    payload = json.loads((tmp_path / "merge_decisions.json").read_text())
+    corrupt(payload)
+
+    with pytest.raises(SchemaError, match=message):
+        DecisionBundle.from_adjudication_artifact(payload)
+
+
+def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
+    """Routing to the skeleton or ignoring --review fails this end-to-end path."""
+    import json
+
+    import pandas as pd
+
+    from motifmultiverse.cli import main
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    pd.DataFrame([_alignment().to_dict()]).to_parquet(
+        evidence / "alignment_edges.parquet", index=False
+    )
+    candidate_rows = []
+    for candidate in (
+        _annotation("node-a", "FAM_ALPHA"),
+        _annotation("node-b", "FAM_ALPHA"),
+    ):
+        row = candidate.to_dict()
+        row["provenance"] = json.dumps(row["provenance"])
+        candidate_rows.append(row)
+    pd.DataFrame(candidate_rows).to_parquet(
+        evidence / "annotation_candidates.parquet", index=False
+    )
+    out = tmp_path / "adjudication"
+
+    assert main([
+        "adjudicate",
+        str(evidence),
+        "--review",
+        "human-review.yaml",
+        "--out",
+        str(out),
+    ]) == 0
+
+    assert (out / "ontology_decisions.parquet").exists()
+    assert (out / "merge_decisions.json").exists()
+    assert (out / "human-review.yaml").exists()
+    provenance = json.loads((out / "provenance.json").read_text())
+    assert len(provenance) == 1
+    assert provenance[0]["subcommand"] == "adjudicate"
+    assert "deferred" in capsys.readouterr().out.lower()

@@ -29,6 +29,7 @@ from motifmultiverse.interpret import DEFAULT_BLOCK_SIZE, DEFAULT_BOOTSTRAP, Int
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
+    Decision,
     HealthFloors,
     PeakSetQuery,
     SchemaError,
@@ -117,10 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("adjudicate", help="decide merges, emit a human review file")
     a.add_argument("evidence", help="evidence/ from annotate")
-    a.add_argument("--policy", choices=["conservative", "permissive"], default="conservative")
+    a.add_argument("--policy", choices=["conservative"], default="conservative",
+                   help="only the frozen conservative policy is currently defined")
+    a.add_argument("--registry", default=None,
+                   help="optional registry/ supplying explicit variant and medoid metadata")
+    a.add_argument("--criteria", default=None,
+                   help="versioned executable criterion registry "
+                        "(default: packaged config/criteria.v1.yaml)")
     a.add_argument("--review", default="review.yaml", help="human review file to emit")
     a.add_argument("--out", default="evidence/", help="output directory")
-    a.set_defaults(func=lambda ns: _run("adjudicate", ns))
+    a.set_defaults(func=_run_adjudicate)
 
     a = sub.add_parser(
         "compile", help="compile tiered lexicons from a registry and its decisions",
@@ -262,6 +269,31 @@ def _run_annotate(ns: argparse.Namespace) -> int:
               f"({backend.candidate_count} candidates){detail}")
     print(f"written: {Path(ns.out) / 'annotation_candidates.parquet'}")
     print(f"written: {Path(ns.out) / 'annotation_backend_logs.json'}")
+    return 0
+
+
+def _run_adjudicate(ns: argparse.Namespace) -> int:
+    from motifmultiverse import adjudicate as adjudicate_mod
+
+    decisions = adjudicate_mod.run(
+        ns.evidence,
+        ns.out,
+        criteria_path=ns.criteria,
+        review_path=ns.review,
+        policy=ns.policy,
+        registry_dir=ns.registry,
+    )
+    counts = {decision.value: 0 for decision in Decision}
+    for row in decisions:
+        counts[row.decision.value] += 1
+    print(
+        f"adjudicate: {len(decisions)} considered clusters "
+        f"({', '.join(f'{name}={count}' for name, count in counts.items() if count)})"
+    )
+    print(f"written: {Path(ns.out) / 'ontology_decisions.parquet'}")
+    print(f"written: {Path(ns.out) / 'merge_decisions.json'}")
+    review = Path(ns.review)
+    print(f"written: {review if review.is_absolute() else Path(ns.out) / review}")
     return 0
 
 

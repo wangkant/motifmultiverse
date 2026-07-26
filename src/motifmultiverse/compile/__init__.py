@@ -437,7 +437,11 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
         # a rejected compile still leaves a record of what was attempted (T-09).
         prov.write(out)
         try:
-            bundle = DecisionBundle.from_dict(payload)
+            bundle = (
+                DecisionBundle.from_adjudication_artifact(payload)
+                if decisions_path is not None
+                else DecisionBundle.from_dict(payload)
+            )
         except SchemaError as exc:
             raise CompileError(str(exc)) from exc
         known_ids = {n["node_id"] for n in nodes}
