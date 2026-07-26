@@ -8,10 +8,15 @@ as the interface template for the rest.
 
 Three things happen, in this order, and the order is the design:
 
-1. **Resolve the output mode from the declared selection provenance.** Before any
-   number is computed. A peak set chosen by the same signal that is about to be
-   measured can produce a statistically valid, semantically circular result
-   (``BA-16``), so what the query is *allowed* to emit is settled first.
+1. **Resolve two independent things from the declared selection provenance.**
+   Before any number is computed: ``statistical_license`` (may this query
+   support inference at all) and ``claim_scope`` (what the resulting number can
+   be a claim about). A peak set chosen by the same signal that is about to be
+   measured can produce a result that is statistically valid *and*
+   semantically circular (``BA-16``) -- the two questions do not covary, so
+   they are resolved separately (``schema.identity.resolve_query_permissions``)
+   rather than as one grade, and what the query is *allowed* to emit is settled
+   first.
 2. **Compute three health numbers.** Intersection coverage, blocks spanned, and
    the fraction the frozen lexicon explains. If any falls below its
    pre-registered floor, the reading is **suppressed** -- not annotated. A
@@ -39,14 +44,15 @@ from motifmultiverse.schema import (
     ESTIMATOR_CAPABILITY,
     IMPLEMENTED_ESTIMATORS,
     MISSING_SENTINEL,
+    ClaimScope,
     Estimator,
     HealthFloors,
     HitRecord,
     InferenceCapability,
     Missingness,
-    OutputMode,
     PeakSetQuery,
     SelectionProvenance,
+    StatisticalLicense,
 )
 
 __all__ = [
@@ -529,6 +535,17 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
 class Interpretation:
     query_id: str
     selection_provenance: str
+    #: T-07 (Task 7): may this query's numbers support inference at all, read
+    #: independently of what they may be a claim about. See `schema.identity`.
+    statistical_license: str
+    #: T-07 (Task 7): what the resulting number can be a claim about, read
+    #: independently of `statistical_license` -- a held-out attribution cluster
+    #: is `HELD_OUT_INFERENCE` *and* `SUBSTRATE_CIRCULAR` in the same record.
+    claim_scope: str
+    #: Deprecated compatibility view of the two fields above, retained for one
+    #: release. Derived, not a second source of truth: see
+    #: `schema._output_mode_from_permissions`. `SUBSTRATE_CIRCULAR` has no
+    #: representation here, which is exactly why it is not the field to read.
     output_mode: str
     emitted_order: list[str]
     query_health: dict[str, Any]
@@ -566,9 +583,6 @@ class Interpretation:
         return dest
 
 
-_UNVERIFIABLE = OutputMode.DESCRIPTIVE_ONLY_UNVERIFIABLE_CONDITIONING
-
-
 def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     floors: HealthFloors | None = None,
                     block_size: int = DEFAULT_BLOCK_SIZE,
@@ -576,14 +590,20 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     seed: int = 0) -> Interpretation:
     """Answer one peak-set query at the strength its selection provenance licenses."""
     floors = floors or HealthFloors()
-    mode = query.output_mode                       # (1) before any number is computed
+    # (1) before any number is computed. Two independent reads: `statistical_license`
+    # decides what the query is allowed to compute, `claim_scope` decides what the
+    # result may be evidence about. `mode` is kept only as the deprecated
+    # compatibility view emitted alongside them -- see PeakSetQuery.output_mode.
+    statistical_license = query.statistical_license
+    claim_scope = query.claim_scope
+    mode = query.output_mode
     notes: list[str] = []
     if query.selection_provenance is SelectionProvenance.DECLARATION_MISSING:
         notes.append(
             "selection_provenance was not declared; recorded as DECLARATION_MISSING and run in "
             "the most conservative mode. That is not the same as EXTERNAL."
         )
-    if mode is _UNVERIFIABLE:
+    if claim_scope is ClaimScope.CONDITIONING_UNVERIFIABLE:
         notes.append(
             "the conditioning set of this selection cannot be verified: it cannot be shown that "
             "downstream information was not already visible when the peak set was chosen"
@@ -592,7 +612,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     peaks = peak_universe(hits, block_size)
     region_ids = list(query.region_ids)
     comparator_ids = list(query.comparator_region_ids)
-    if mode is OutputMode.FULL_INFERENCE_HELD_OUT:
+    if statistical_license is StatisticalLicense.HELD_OUT_INFERENCE:
         held_out = set(query.held_out_region_ids)
         if not held_out:
             raise InterpretError(
@@ -636,7 +656,8 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         floor_failures = []
         composition = [asdict(c) for c in compose(peaks, region_ids)]
         emitted.append("composition")
-        if mode in (OutputMode.FULL_INFERENCE, OutputMode.FULL_INFERENCE_HELD_OUT):
+        if statistical_license in (StatisticalLicense.FULL_INFERENCE,
+                                   StatisticalLicense.HELD_OUT_INFERENCE):
             if query.comparator_id == MISSING_SENTINEL or not comparator_ids:
                 raise InterpretError(
                     "a cross-condition effect needs a named baseline peak set. One set of "
@@ -693,6 +714,8 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     result = Interpretation(
         query_id=query.query_id,
         selection_provenance=query.selection_provenance.value,
+        statistical_license=statistical_license.value,
+        claim_scope=claim_scope.value,
         output_mode=mode.value,
         emitted_order=emitted,
         query_health=query_health,

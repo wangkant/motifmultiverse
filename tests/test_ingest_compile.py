@@ -8,13 +8,21 @@ that must be read as "unverified here", not as "verified".
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
 
 from motifmultiverse import compile as compile_mod
 from motifmultiverse import guards, ingest
-from motifmultiverse.schema import MetaclusterState, RegistryMetadata, SchemaError
+from motifmultiverse.schema import (
+    IDENTITY_SCHEMA_VERSION,
+    MetaclusterState,
+    RegistryMetadata,
+    RepresentationId,
+    SchemaError,
+    VariantId,
+)
 
 h5py = pytest.importorskip("h5py")
 np = pytest.importorskip("numpy")
@@ -591,3 +599,40 @@ def test_auto_verification_still_writes_but_claims_nothing(tmp_path):
                                              verify="auto")
     assert (tmp_path / "lex" / "core.h5").exists()
     assert "verified" not in json.dumps(manifests["core"].pattern_order)
+
+
+# ------------------------------------------------------ representation identity
+# `RepresentationId` / `VariantId` (Task 7, `schema/identity.py`) give the same
+# five fields `MotifNode` already carries (model/readout/context/metacluster/
+# pattern id) a structured, hashable identity, so a later task can key a table on
+# a node's *representation* rather than parsing one out of `node_id`. Nothing in
+# `ingest`/`compile` constructs them yet -- that wiring belongs to a later task --
+# but their shape is load-bearing now, so it is exercised here.
+def test_representation_id_is_frozen_and_hashable():
+    rep = RepresentationId(model="modelA", readout="r1", context="promoter",
+                           metacluster="pos_patterns", local_pattern_id="pattern_0")
+    assert rep.schema_version == IDENTITY_SCHEMA_VERSION
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        rep.model = "modelB"                          # type: ignore[misc]
+    same = RepresentationId(model="modelA", readout="r1", context="promoter",
+                            metacluster="pos_patterns", local_pattern_id="pattern_0")
+    different = dataclasses.replace(same, local_pattern_id="pattern_1")
+    assert rep == same and hash(rep) == hash(same)
+    assert rep != different
+    assert {rep, same, different} == {rep, different}  # usable as a set/dict key
+
+
+def test_variant_id_is_frozen_and_hashable():
+    vid = VariantId(family_id="FAMA", namespace="union_id", value="MA_FAMA_01")
+    assert vid.schema_version == IDENTITY_SCHEMA_VERSION
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        vid.value = "MA_FAMA_02"                        # type: ignore[misc]
+    same = VariantId(family_id="FAMA", namespace="union_id", value="MA_FAMA_01")
+    different = VariantId(family_id="FAMA", namespace="union_id", value="MA_FAMA_02")
+    assert vid == same and hash(vid) == hash(same)
+    assert vid != different
+
+
+def test_identity_schema_version_is_declared():
+    """T-07's default version is defined once and carried by each identity."""
+    assert isinstance(IDENTITY_SCHEMA_VERSION, str) and IDENTITY_SCHEMA_VERSION

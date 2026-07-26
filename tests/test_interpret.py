@@ -12,8 +12,11 @@ import json
 import pytest
 
 from motifmultiverse import interpret
+from motifmultiverse import schema as schema_mod
 from motifmultiverse.schema import (
+    DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
     HIT_TABLE_COLUMNS,
+    ClaimScope,
     HealthFloors,
     HitRecord,
     Missingness,
@@ -21,6 +24,8 @@ from motifmultiverse.schema import (
     PeakSetQuery,
     SchemaError,
     SelectionProvenance,
+    StatisticalLicense,
+    resolve_query_permissions,
 )
 
 BLOCK = 1_000_000
@@ -324,6 +329,161 @@ def test_programmatic_rule_without_the_rule_is_refused():
                      selection_provenance=SelectionProvenance.PROGRAMMATIC_RULE)
 
 
+# ------------------------------------------------------- two independent axes
+def test_held_out_attribution_cluster_is_inferential_but_substrate_circular():
+    """The brief's own dispatch case: a held-out split earns full statistical
+    license, and an attribution-derived selection feature is substrate-circular,
+    *in the same query*. Collapsing these into one grade would either lose the
+    license or lose the circularity warning; this is the reason the two exist.
+    """
+    query = PeakSetQuery(
+        query_id="q", region_ids=_ids(0),
+        selection_provenance=SelectionProvenance.CLUSTERED_WITH_SPLIT,
+        selection_feature_names=["attribution_pc1"],
+        held_out_region_ids=_ids(0),
+    )
+    assert query.statistical_license is StatisticalLicense.HELD_OUT_INFERENCE
+    assert query.claim_scope is ClaimScope.SUBSTRATE_CIRCULAR
+
+
+@pytest.mark.parametrize("feature_names,expected_scope", [
+    ([], ClaimScope.INTERNAL_DECOMPOSITION),
+    (["tss_distance"], ClaimScope.INTERNAL_DECOMPOSITION),
+    (["attribution_pc1"], ClaimScope.SUBSTRATE_CIRCULAR),
+    (["tss_distance", "hit_coefficient"], ClaimScope.SUBSTRATE_CIRCULAR),
+])
+def test_claim_scope_tracks_selection_features_while_license_holds_fixed(
+        feature_names, expected_scope):
+    """Fixing the provenance (and so the license) and varying only the selection
+    features must move `claim_scope` alone. If `claim_scope` were derived from
+    `statistical_license` rather than independently from the feature names, this
+    would not vary -- it would be constant across all four rows.
+    """
+    query = PeakSetQuery(
+        query_id="q", region_ids=_ids(0),
+        selection_provenance=SelectionProvenance.CLUSTERED_WITH_SPLIT,
+        selection_feature_names=feature_names,
+        held_out_region_ids=_ids(0),
+    )
+    assert query.statistical_license is StatisticalLicense.HELD_OUT_INFERENCE
+    assert query.claim_scope is expected_scope
+
+
+@pytest.mark.parametrize("grade,expected_license", [
+    (SelectionProvenance.PROGRAMMATIC_RULE, StatisticalLicense.FULL_INFERENCE),
+    (SelectionProvenance.CLUSTERED_WITH_SPLIT, StatisticalLicense.HELD_OUT_INFERENCE),
+    (SelectionProvenance.CLUSTERED_NO_SPLIT, StatisticalLicense.DESCRIPTIVE_ONLY),
+    (SelectionProvenance.EYEBALLED, StatisticalLicense.DESCRIPTIVE_ONLY),
+])
+def test_statistical_license_varies_while_claim_scope_holds_fixed(grade, expected_license):
+    """The mirror of the previous test: fixing "no attribution feature, not
+    EXTERNAL, not conditioning-unverifiable" pins `claim_scope` at
+    INTERNAL_DECOMPOSITION across four different provenances whose licenses are
+    all different -- proving `statistical_license` is not read off `claim_scope`.
+    """
+    extra = {"selection_rule": "distance_to_tss < 2000"} if grade is SelectionProvenance.PROGRAMMATIC_RULE else {}
+    query = PeakSetQuery(
+        query_id="q", region_ids=_ids(0), selection_provenance=grade,
+        held_out_region_ids=_ids(0), **extra)
+    assert query.claim_scope is ClaimScope.INTERNAL_DECOMPOSITION
+    assert query.statistical_license is expected_license
+
+
+@pytest.mark.parametrize("grade", [
+    SelectionProvenance.MODEL_SELECTED_NO_TRANSCRIPT,
+    SelectionProvenance.DECLARATION_MISSING,
+])
+def test_conditioning_unverifiable_provenance_stays_unverifiable_even_with_a_clean_feature(grade):
+    """MODEL_SELECTED_NO_TRANSCRIPT / DECLARATION_MISSING cannot be rescued into
+    EXTERNAL_STRUCTURE or INTERNAL_DECOMPOSITION by declaring an innocuous
+    selection feature: what actually happened cannot be verified either way, so
+    the scope stays at its floor regardless of what the feature list claims.
+    """
+    query = PeakSetQuery(
+        query_id="q", region_ids=_ids(0), selection_provenance=grade,
+        selection_feature_names=["tss_distance"])
+    assert query.statistical_license is StatisticalLicense.DESCRIPTIVE_ONLY
+    assert query.claim_scope is ClaimScope.CONDITIONING_UNVERIFIABLE
+
+
+@pytest.mark.parametrize("bad_provenance", [None, "", "FROM_A_LATER_LEDGER", 42])
+def test_resolve_query_permissions_refuses_unknown_provenance_to_the_floor_of_both_axes(
+        bad_provenance):
+    """Direct call, bypassing `PeakSetQuery.__post_init__`'s own coercion, since a
+    future caller (Task 8/12/13/18) may call the resolver directly. Unknown or
+    missing provenance must land on the floor of *both* axes, never the
+    permissive value of either -- an undeclared selection is not a safe one.
+    """
+    license_, scope = resolve_query_permissions(
+        bad_provenance, ["attribution_pc1"], DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES)
+    assert license_ is StatisticalLicense.DESCRIPTIVE_ONLY
+    assert scope is ClaimScope.CONDITIONING_UNVERIFIABLE
+
+
+def test_permission_resolver_uses_the_caller_supplied_attribution_registry():
+    """The resolver's registry parameter is semantic input, not decoration.
+    A caller with a differently named attribution feature must be able to mark
+    it substrate-circular without modifying the package-wide default registry.
+    """
+    license_, scope = resolve_query_permissions(
+        SelectionProvenance.EXTERNAL, ["custom_attribution_signal"],
+        {"custom_attribution_signal"})
+    assert license_ is StatisticalLicense.FULL_INFERENCE
+    assert scope is ClaimScope.SUBSTRATE_CIRCULAR
+
+
+def test_declaration_missing_never_resolves_to_the_permissive_grade_of_either_axis():
+    """DECLARATION_MISSING is the recorded state of a query that declared
+    nothing. It must not land on FULL_INFERENCE / HELD_OUT_INFERENCE nor on
+    EXTERNAL_STRUCTURE / INTERNAL_DECOMPOSITION -- both would treat silence as
+    if it were a stated, safe selection.
+    """
+    q = PeakSetQuery(query_id="q", region_ids=_ids(0))
+    assert q.selection_provenance is SelectionProvenance.DECLARATION_MISSING
+    assert q.statistical_license is StatisticalLicense.DESCRIPTIVE_ONLY
+    assert q.claim_scope is ClaimScope.CONDITIONING_UNVERIFIABLE
+
+
+def test_missing_provenance_stays_conservative_through_interpretation_serialization():
+    """A missing provenance must become the recorded declaration-missing state,
+    rather than resolving safely at first and then crashing when the result is
+    serialized. This protects the end-to-end unknown-provenance contract.
+    """
+    query = PeakSetQuery(query_id="q", region_ids=_ids(0), selection_provenance=None)
+    result = interpret.interpret_query(_rows(), query, n_bootstrap=20)
+    assert result.selection_provenance == "DECLARATION_MISSING"
+    assert result.statistical_license == "DESCRIPTIVE_ONLY"
+    assert result.claim_scope == "CONDITIONING_UNVERIFIABLE"
+
+
+def test_selection_feature_names_defaults_to_empty_and_does_not_disturb_existing_callers():
+    q = PeakSetQuery(query_id="q", region_ids=_ids(0),
+                     selection_provenance=SelectionProvenance.EXTERNAL)
+    assert q.selection_feature_names == []
+    assert q.claim_scope is ClaimScope.EXTERNAL_STRUCTURE
+
+
+def test_legacy_output_mode_is_read_from_the_two_axes_not_a_second_independent_source(
+        monkeypatch):
+    """`output_mode` is documented as a compatibility field DERIVED from
+    `statistical_license` / `claim_scope`, not a second thing computed from
+    `selection_provenance` on its own. Patch the resolver to return a
+    combination that disagrees with what EXTERNAL would normally produce
+    (FULL_INFERENCE): if `output_mode` still tracked `selection_provenance`
+    directly (the pre-Task-7 shape), it would report FULL_INFERENCE here and
+    this assertion would fail.
+    """
+    def fake_resolve(provenance, selection_feature_names, attribution_derived_registry):
+        return StatisticalLicense.HELD_OUT_INFERENCE, ClaimScope.SUBSTRATE_CIRCULAR
+
+    monkeypatch.setattr(schema_mod, "resolve_query_permissions", fake_resolve)
+    q = PeakSetQuery(query_id="q", region_ids=_ids(0),
+                     selection_provenance=SelectionProvenance.EXTERNAL)
+    assert q.statistical_license is StatisticalLicense.HELD_OUT_INFERENCE
+    assert q.claim_scope is ClaimScope.SUBSTRATE_CIRCULAR
+    assert q.output_mode is OutputMode.FULL_INFERENCE_HELD_OUT
+
+
 @pytest.mark.parametrize("grade", [
     SelectionProvenance.CLUSTERED_NO_SPLIT,
     SelectionProvenance.EYEBALLED,
@@ -448,6 +608,26 @@ def test_clustered_with_split_infers_on_the_held_out_half_only():
     assert result.output_mode == "FULL_INFERENCE_HELD_OUT"
     assert result.health["n_blocks"] == N_BLOCKS // 2
     assert result.effects and all(e["n_query_peaks"] == len(_ids(0, half)) for e in result.effects)
+
+
+def test_interpretation_json_emits_the_two_independent_permission_axes(tmp_path):
+    """Task 7's serialized record must preserve both permissions, not only
+    legacy ``output_mode``. Removing either emitted field, or serializing scope
+    from the legacy mode (which cannot encode SUBSTRATE_CIRCULAR), must fail.
+    """
+    half = range(N_BLOCKS // 2, N_BLOCKS)
+    query = _query(
+        selection_provenance=SelectionProvenance.CLUSTERED_WITH_SPLIT,
+        selection_feature_names=["attribution_pc1"],
+        held_out_region_ids=_ids(0, half) + _ids(1, half),
+    )
+    result = interpret.interpret_query(
+        _rows(), query, n_bootstrap=20,
+        floors=HealthFloors(min_blocks=N_BLOCKS // 2))
+    payload = json.loads(result.write(tmp_path / "interpretation").read_text())
+    assert payload["statistical_license"] == "HELD_OUT_INFERENCE"
+    assert payload["claim_scope"] == "SUBSTRATE_CIRCULAR"
+    assert payload["output_mode"] == "FULL_INFERENCE_HELD_OUT"
 
 
 def test_an_empty_query_is_refused_rather_than_producing_a_ratio_without_a_denominator():

@@ -15,6 +15,16 @@ from dataclasses import asdict, dataclass, field, fields
 from enum import StrEnum
 from typing import Any
 
+from .identity import (
+    DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
+    IDENTITY_SCHEMA_VERSION,
+    ClaimScope,
+    RepresentationId,
+    StatisticalLicense,
+    VariantId,
+    resolve_query_permissions,
+)
+
 __all__ = [
     "Missingness", "Decision", "Tier", "IdentityError", "SchemaError",
     "MotifNode", "EvidenceEdge", "DecisionRecord", "DecisionBundle", "AnalysisConfig",
@@ -28,6 +38,9 @@ __all__ = [
     "MergeConfidence",
     "MERGE_CONFIDENCE_CRITERIA", "CRITERION_NOT_YET_DEFINED",
     "SensitivityTrigger", "sensitivity_triggers", "DECISION_BUNDLE_SCHEMA_VERSION",
+    "StatisticalLicense", "ClaimScope", "RepresentationId", "VariantId",
+    "resolve_query_permissions", "DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES",
+    "IDENTITY_SCHEMA_VERSION",
 ]
 
 # An explicit sentinel. Never 0, never NaN, never "".
@@ -713,6 +726,34 @@ def output_mode_for(grade: Any) -> OutputMode:
         return MOST_CONSERVATIVE_OUTPUT_MODE
 
 
+def _output_mode_from_permissions(
+    statistical_license: StatisticalLicense, claim_scope: ClaimScope,
+) -> OutputMode:
+    """The old four-state grade, as a *read* of the two independent axes.
+
+    Retained for one release so an existing reader keyed on ``output_mode``
+    (:class:`PeakSetQuery` and :class:`~motifmultiverse.interpret.Interpretation`
+    both still emit it) does not break. This function computes nothing of its
+    own: it only maps ``(statistical_license, claim_scope)`` onto the value
+    ``output_mode_for(selection_provenance)`` already produced, so it is a
+    compatibility view, not a second source of truth.
+
+    ``ClaimScope`` has no representation in the old four states beyond
+    ``CONDITIONING_UNVERIFIABLE`` (the old ``*_UNVERIFIABLE_CONDITIONING``
+    mode); a claim scope of ``SUBSTRATE_CIRCULAR`` has no legacy equivalent and
+    is intentionally invisible here -- that lost distinction is exactly why
+    ``claim_scope`` is emitted as its own field now instead of being folded back
+    into this one.
+    """
+    if claim_scope is ClaimScope.CONDITIONING_UNVERIFIABLE:
+        return MOST_CONSERVATIVE_OUTPUT_MODE
+    if statistical_license is StatisticalLicense.FULL_INFERENCE:
+        return OutputMode.FULL_INFERENCE
+    if statistical_license is StatisticalLicense.HELD_OUT_INFERENCE:
+        return OutputMode.FULL_INFERENCE_HELD_OUT
+    return OutputMode.DESCRIPTIVE_ONLY
+
+
 #: The hit-table contract. A row is either a called instance (``USED``) or the
 #: record of a peak that was searched and produced nothing. The second kind is not
 #: optional: without it the peak universe silently loses its zero-hit peaks and
@@ -783,14 +824,21 @@ class PeakSetQuery:
     comparator_id: str = MISSING_SENTINEL
     comparator_region_ids: list[str] = field(default_factory=list)
     held_out_region_ids: list[str] = field(default_factory=list)
+    #: Names of the feature(s) used to select this peak set, e.g.
+    #: ``["attribution_pc1"]``. Defaults to empty, which preserves the behaviour
+    #: of every caller that predates this field: with no declared feature,
+    #: :func:`resolve_query_permissions` can never find a match in an
+    #: attribution-derived registry, so ``claim_scope`` falls out of
+    #: ``selection_provenance`` exactly as ``output_mode`` used to.
+    selection_feature_names: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.query_id.strip():
             raise SchemaError("a query needs an id; it is what a comparator refers to")
-        if isinstance(self.selection_provenance, str):
+        if not isinstance(self.selection_provenance, SelectionProvenance):
             try:
                 self.selection_provenance = SelectionProvenance(self.selection_provenance)
-            except ValueError:
+            except (TypeError, ValueError):
                 self.selection_provenance = SelectionProvenance.DECLARATION_MISSING
         if (self.selection_provenance is SelectionProvenance.PROGRAMMATIC_RULE
                 and self.selection_rule == MISSING_SENTINEL):
@@ -800,8 +848,35 @@ class PeakSetQuery:
             )
 
     @property
+    def statistical_license(self) -> StatisticalLicense:
+        """May this query's numbers support inference at all (T-07, Task 7)."""
+        statistical_license, _ = resolve_query_permissions(
+            self.selection_provenance, self.selection_feature_names,
+            DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES)
+        return statistical_license
+
+    @property
+    def claim_scope(self) -> ClaimScope:
+        """What the resulting number can be a claim about (T-07, Task 7).
+
+        Independent of :attr:`statistical_license`: see
+        ``schema/identity.py`` for the held-out-yet-circular case that is the
+        entire reason the two are separate properties instead of one grade.
+        """
+        _, claim_scope = resolve_query_permissions(
+            self.selection_provenance, self.selection_feature_names,
+            DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES)
+        return claim_scope
+
+    @property
     def output_mode(self) -> OutputMode:
-        return output_mode_for(self.selection_provenance)
+        """Deprecated compatibility view, derived from the two properties above.
+
+        Not a second source of truth: it never inspects ``selection_provenance``
+        directly, only the already-resolved ``statistical_license`` /
+        ``claim_scope``. See :func:`_output_mode_from_permissions`.
+        """
+        return _output_mode_from_permissions(self.statistical_license, self.claim_scope)
 
 
 @dataclass(frozen=True)
