@@ -65,12 +65,27 @@ def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_pat
 
 
 def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_path):
+    import h5py
+    import numpy as np
+
+    from motifmultiverse.compile import _content_hash
+
     lexicons = tmp_path / "lexicons"
     lexicons.mkdir()
-    (lexicons / "core.h5").write_bytes(b"compiled-lexicon")
+    with h5py.File(lexicons / "core.h5", "w") as h5:
+        h5.create_group("pos").create_group("pattern_0").create_dataset(
+            "contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]])
+        )
+    content_hash = _content_hash(
+        [("pos", "pattern_0", {"node_id": "node-0"})],
+        {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
+        schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
+        loader_backend="finemo", loader_parameters={},
+    )
     (lexicons / "core.manifest.json").write_text(json.dumps({
-        "tier": "core", "lexicon_content_hash": "a" * 64, "n_motifs": 1,
+        "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
         "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
+        "index": [{"pattern_tag": "pos.pattern_0", "node_id": "node-0"}],
         "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
         "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
     }), encoding="utf-8")

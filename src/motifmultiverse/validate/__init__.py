@@ -104,8 +104,14 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
     manifest_paths = sorted(root.glob("*.manifest.json"))
     if not manifest_paths:
         raise ValidationError(f"compiled lexicons directory has no *.manifest.json: {root}")
+    import h5py
+    import numpy as np
+
+    from motifmultiverse.compile import _content_hash
+
     entry_rows: list[tuple[str, str, str, str]] = []
     manifest_fields = {item.name for item in fields(LexiconManifest)}
+    seen_tiers: set[str] = set()
     for manifest_path in manifest_paths:
         try:
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -120,12 +126,58 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
             or any(char not in "0123456789abcdef" for char in manifest.lexicon_content_hash)
         ):
             raise ValidationError(f"{manifest_path} has no valid lexicon_content_hash")
+        if manifest_path.name != f"{manifest.tier}.manifest.json":
+            raise ValidationError(f"{manifest_path} filename must exactly match declared tier {manifest.tier!r}")
+        if manifest.tier in seen_tiers:
+            raise ValidationError(f"compiled lexicons contain duplicate tier manifest {manifest.tier!r}")
+        seen_tiers.add(manifest.tier)
         h5_path = root / f"{manifest.tier}.h5"
         if not h5_path.is_file():
             raise ValidationError(f"compiled lexicon named by {manifest_path} is missing: {h5_path}")
+        try:
+            index = payload["index"]
+            if not isinstance(index, list) or len(index) != manifest.n_motifs:
+                raise TypeError("manifest index must describe every motif")
+            if [row.get("pattern_tag") for row in index] != manifest.pattern_order:
+                raise TypeError("manifest index pattern order is not authoritative")
+            if [row.get("node_id") for row in index] != manifest.node_ids:
+                raise TypeError("manifest index node order is not authoritative")
+            ordered = []
+            arrays: dict[str, dict[str, Any]] = {}
+            with h5py.File(h5_path, "r") as h5:
+                for row in index:
+                    group, pattern = str(row["pattern_tag"]).split(".", 1)
+                    if group not in h5 or pattern not in h5[group]:
+                        raise TypeError(f"missing compiled motif {group}.{pattern}")
+                    motif = h5[group][pattern]
+                    if "contrib_scores" not in motif:
+                        raise TypeError(f"compiled motif {group}.{pattern} lacks contrib_scores")
+                    arrays[str(row["node_id"])] = {
+                        "cwm": np.asarray(motif["contrib_scores"]),
+                        **({"hypothetical_cwm": np.asarray(motif["hypothetical_contribs"])}
+                           if "hypothetical_contribs" in motif else {}),
+                        **({"ppm": np.asarray(motif["sequence"])} if "sequence" in motif else {}),
+                    }
+                    ordered.append((group, pattern, {"node_id": str(row["node_id"])}))
+            recomputed = _content_hash(
+                ordered, arrays, schema_version=manifest.schema_version,
+                trim_threshold=manifest.trim_threshold, motif_type=manifest.motif_type,
+                include_rc=manifest.include_rc, loader_backend=manifest.loader_backend,
+                loader_parameters=manifest.loader_parameters,
+            )
+        except (OSError, TypeError, ValueError, KeyError, IndexError) as exc:
+            raise ValidationError(f"{h5_path} is not the verified compiled lexicon named by {manifest_path}: {exc}") from exc
+        if recomputed != manifest.lexicon_content_hash:
+            raise ValidationError(f"{manifest_path} lexicon_content_hash does not match HDF5 content and loader semantics")
         entry_rows.append((manifest.tier, manifest.lexicon_content_hash,
                            sha256_file(manifest_path), sha256_file(h5_path)))
     entries = tuple(sorted(entry_rows))
+    h5_tiers = {path.stem for path in root.glob("*.h5")}
+    if h5_tiers != seen_tiers:
+        raise ValidationError(
+            "compiled lexicon manifests and HDF5 companions are ambiguous: "
+            f"manifest tiers={sorted(seen_tiers)} h5 tiers={sorted(h5_tiers)}"
+        )
     digest = hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode("utf-8")).hexdigest()
     return LexiconBinding(lexicon_identity=f"lexicons:{digest}", entries=entries)
 
@@ -562,8 +614,11 @@ def write_stability_artifacts(
         rows.append(row)
     out = Path(out_dir)
     out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        raise ValidationError(
+            f"validation output already exists and will not be overwritten: {out}"
+        )
     stage = Path(tempfile.mkdtemp(prefix=f".{out.name}.stage-", dir=out.parent))
-    backup = out.with_name(f".{out.name}.previous")
     result_path = stage / "stability_results.parquet"
     arrow_schema = pa.schema([
         pa.field("decision_id", pa.string()), pa.field("n_affected_peaks", pa.int64()),
@@ -599,17 +654,9 @@ def write_stability_artifacts(
         (stage / "provenance.json").write_text(
             json.dumps([dict(provenance)], indent=2, sort_keys=True), encoding="utf-8"
         )
-        if backup.exists():
-            shutil.rmtree(backup)
-        if out.exists():
-            os.replace(out, backup)
         os.replace(stage, out)
-        if backup.exists():
-            shutil.rmtree(backup)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
-        if backup.exists() and not out.exists():
-            os.replace(backup, out)
         raise
     return out / "stability_results.parquet", out / "backend_verification.tsv"
 

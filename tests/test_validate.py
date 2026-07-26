@@ -720,7 +720,7 @@ def test_stability_artifacts_bind_split_identity_and_provenance(tmp_path):
         validation_peak_ids=provisional.validation_peak_ids,
     )
     results_path, verification_path = write_stability_artifacts(
-        tmp_path,
+        tmp_path / "out",
         results,
         verification,
         manifest=manifest,
@@ -769,12 +769,26 @@ def test_stability_artifact_writer_refuses_a_manifest_mismatch(tmp_path):
 
 
 def _lexicons(tmp_path, *, content_hash="a" * 64):
+    import h5py
+    import numpy as np
+
+    from motifmultiverse.compile import _content_hash
+
     lexicons = tmp_path / "lexicons"
     lexicons.mkdir()
-    (lexicons / "core.h5").write_bytes(b"frozen-core-content")
+    with h5py.File(lexicons / "core.h5", "w") as h5:
+        motif = h5.create_group("pos").create_group("pattern_0")
+        motif.create_dataset("contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]]))
+    content_hash = _content_hash(
+        [("pos", "pattern_0", {"node_id": "node-0"})],
+        {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
+        schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
+        loader_backend="finemo", loader_parameters={},
+    )
     (lexicons / "core.manifest.json").write_text(json.dumps({
         "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
         "pattern_order": ["pos.pattern_0"], "node_ids": ["node-0"],
+        "index": [{"pattern_tag": "pos.pattern_0", "node_id": "node-0"}],
         "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
         "include_rc": False, "loader_backend": "finemo", "loader_parameters": {},
     }), encoding="utf-8")
@@ -789,7 +803,8 @@ def test_lexicon_binding_requires_a_real_content_addressed_compiled_lexicon(tmp_
     assert isinstance(binding, LexiconBinding)
     assert binding.lexicon_identity.startswith("lexicons:")
     (lexicons / "core.h5").write_bytes(b"tampered")
-    assert load_lexicon_binding(lexicons).lexicon_identity != binding.lexicon_identity
+    with pytest.raises(SchemaError, match="verified compiled lexicon"):
+        load_lexicon_binding(lexicons)
 
 
 def test_backend_results_are_bound_to_the_backend_and_lexicon_identity(tmp_path):
