@@ -74,6 +74,24 @@ def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
     assert r["software"]["motifmultiverse"]
 
 
+def test_cli_threads_the_seed_into_the_provenance_record(tmp_path):
+    """align is implemented and exposes --seed; its provenance is written before
+    the registry is even opened (same T-09 pattern as the skeletons), so a
+    nonexistent registry path is enough to reach that write without needing
+    the run to succeed end to end. This is the concrete-seed counterpart to
+    test_provenance_is_written_even_though_body_is_unimplemented: together
+    they prove the CLI carries --seed into provenance on both the
+    implemented and the still-skeleton paths. A seed that silently fails to
+    be recorded would make a stochastic run unreproducible while looking fine.
+    """
+    out = tmp_path / "o"
+    main(["align", "registry/", "--out", str(out), "--seed", "7"])
+    recs = json.loads((out / "provenance.json").read_text())
+    assert len(recs) == 1
+    assert recs[0]["subcommand"] == "align"
+    assert recs[0]["random_seed"] == 7
+
+
 def test_provenance_appends_rather_than_overwrites(tmp_path):
     out = tmp_path / "o"
     main(["align", "registry/", "--out", str(out)])
