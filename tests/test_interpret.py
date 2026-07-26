@@ -139,6 +139,34 @@ def test_one_region_cannot_change_coordinates():
         interpret.peak_universe(rows, BLOCK)
 
 
+def test_a_region_may_legally_mix_three_measured_states_at_once():
+    """Task 1 covers NOT_SEARCHED mixed with measured rows (refused). This is the
+    companion case Task 1 does not reach: a region carrying three *measured*
+    states at once -- USED, NO_SEQUENCE_MATCH, HIT_BELOW_FLOOR, with no
+    NOT_SEARCHED row at all -- is legal (a region can be probed by more than one
+    variant/model and get different measured outcomes) and must aggregate
+    correctly: `searched=True`, and only the USED row contributes to
+    `family_hit_count` / `family_coefficient_sum`.
+    """
+    rows = [
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.USED, variant_id="UA_FAMA_01",
+                  family_id="FAM_A", hit_coefficient=1.5,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.NO_SEQUENCE_MATCH,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+        HitRecord(region_id="r", chrom="chr1", start=0, end=10,
+                  missingness=Missingness.HIT_BELOW_FLOOR,
+                  input_scale=SCALE, lexicon_id=LEXICON),
+    ]
+    peak = interpret.peak_universe(rows, BLOCK)["r"]
+    assert peak.searched is True
+    assert peak.family_hit_count == {"FAM_A": 1}
+    assert peak.family_coefficient_sum == {"FAM_A": 1.5}
+    assert peak.has_used_hit is True
+
+
 def test_opposite_hits_cancel_mass_but_not_occupancy():
     rows = [
         HitRecord(region_id="r", chrom="chr1", start=0, end=10,
