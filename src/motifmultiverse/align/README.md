@@ -14,4 +14,12 @@ An aligner maximising signed CWM cosine is structurally blind to a sign-flipped 
 
 ---
 
-Status: **skeleton**. The body raises `NotImplementedError`. See `docs/ROADMAP.md`.
+Status: **implemented**. `register_pair` searches offset x orientation on
+unsigned PPM cosine under a bilateral overlap floor (`overlap_bp` and each
+side's overlap fraction), then measures signed CWM similarity once, at that
+registration only. `calibrate_pair_null` re-runs the full search on every
+shuffle. `align_registry` (exported as `run`) registers every pair in a
+registry, calibrates each pair's null, and writes `alignment_edges.parquet` +
+`alignment_null_summary.tsv`, with `null_shuffles`/`seed`/`registered_on`/the
+registration rule version carried on every edge. See `docs/ROADMAP.md` and
+`tests/test_align.py`.
