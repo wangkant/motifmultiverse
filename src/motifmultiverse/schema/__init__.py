@@ -22,7 +22,8 @@ __all__ = [
     "SelectionProvenance", "OutputMode", "MOST_CONSERVATIVE_OUTPUT_MODE",
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
     "HIT_TABLE_COLUMNS", "PeakSetQuery", "HealthFloors",
-    "MetaclusterState", "RegistryMetadata", "LexiconManifest", "UNION_ID_RE",
+    "MetaclusterState", "RegistryMetadata", "LexiconManifest",
+    "LEXICON_MANIFEST_SCHEMA_VERSION", "UNION_ID_RE",
     "Estimator", "IMPLEMENTED_ESTIMATORS", "InferenceCapability", "ESTIMATOR_CAPABILITY",
     "MergeConfidence",
     "MERGE_CONFIDENCE_CRITERIA", "CRITERION_NOT_YET_DEFINED",
@@ -470,13 +471,25 @@ class RegistryMetadata:
                     )
 
 
+#: ``LexiconManifest`` schema revision. Bumped only if the manifest shape changes.
+#: Also the ``schema_version`` folded into ``lexicon_content_hash``'s metadata
+#: blob, so a future shape change changes identity too, not just the on-disk JSON.
+LEXICON_MANIFEST_SCHEMA_VERSION = "1.0"
+
+
 @dataclass
 class LexiconManifest:
     """What ``compile`` emits beside each lexicon H5.
 
     ``lexicon_content_hash`` exists so ``FP-11`` can eventually be enforced: every
     family-level number must state the lexicon version it was computed under, and
-    without a content hash there is nothing for it to state.
+    without a content hash there is nothing for it to state. The hash is
+    **semantic**, not just an array checksum: two lexicons built from identical
+    motif arrays but read back under different loader settings
+    (``trim_threshold``, ``motif_type``, ``include_rc``, ``loader_parameters``)
+    load differently and must not share an identity. Those settings are therefore
+    recorded on the manifest -- not only folded into the hash -- so *what* was
+    hashed is legible without recomputing it.
 
     ``comparisons`` exists because a tier contrast that changes nothing must say
     so. In the reference implementation ``core`` and ``expanded`` had **identical
@@ -489,6 +502,12 @@ class LexiconManifest:
     n_motifs: int
     pattern_order: list[str]
     node_ids: list[str]
+    schema_version: str
+    trim_threshold: float
+    motif_type: str
+    include_rc: bool
+    loader_backend: str
+    loader_parameters: dict[str, Any]
     comparisons: dict[str, dict[str, Any]] = field(default_factory=dict)
     source_registry: str = MISSING_SENTINEL
     #: cluster_id -> the named triggers that keep it split in the sensitivity

@@ -429,6 +429,42 @@ def test_the_content_hash_is_deterministic_and_tracks_membership(tmp_path):
     assert c["sensitivity"].lexicon_content_hash == a["core"].lexicon_content_hash
 
 
+def test_trim_threshold_changes_lexicon_identity(tmp_path):
+    registry = _registry(tmp_path)
+    a = compile_mod.compile_lexicons(registry, tmp_path / "a", trim_threshold=0.2)
+    b = compile_mod.compile_lexicons(registry, tmp_path / "b", trim_threshold=0.3)
+    assert a["core"].lexicon_content_hash != b["core"].lexicon_content_hash
+
+
+def test_loader_parameters_propagate_to_roundtrip_verification(tmp_path, monkeypatch):
+    """`verify_roundtrip` must read back with the manifest's own loader configuration.
+
+    A `load_back(h5_path)` call that ignores its arguments would silently verify
+    against `trim_threshold=0.3, motif_type="cwm", include_rc=False` no matter what
+    the lexicon was actually compiled with -- the same non-semantic-identity bug
+    this task fixes, just at read time instead of hash time.
+    """
+    registry = _registry(tmp_path)
+    manifests = compile_mod.compile_lexicons(
+        registry, tmp_path / "lex", trim_threshold=0.21, motif_type="ppm",
+        include_rc=True, verify="skip",
+    )
+    manifest = manifests["core"]
+
+    captured: dict[str, object] = {}
+
+    def fake_load_back(h5_path, **kwargs):
+        captured.update(kwargs)
+        return list(manifest.pattern_order)
+
+    monkeypatch.setattr(compile_mod, "load_back", fake_load_back)
+    result = compile_mod.verify_roundtrip(tmp_path / "lex" / "core.h5", manifest)
+    assert result.passed
+    assert captured["trim_threshold"] == 0.21
+    assert captured["motif_type"] == "ppm"
+    assert captured["include_rc"] is True
+
+
 def test_a_lexicon_of_mixed_motif_lengths_is_refused(tmp_path):
     """The loader stacks every motif into one array, so lengths must agree."""
     registry = _registry(tmp_path)

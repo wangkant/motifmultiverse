@@ -42,6 +42,7 @@ from motifmultiverse import guards
 from motifmultiverse.ingest import GROUP_METACLUSTER, MODISCO_GROUPS, load_registry
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
+    LEXICON_MANIFEST_SCHEMA_VERSION,
     Decision,
     DecisionBundle,
     DecisionRecord,
@@ -202,15 +203,42 @@ def loader_order(members: list[dict[str, Any]]) -> list[tuple[str, str, dict[str
     return ordered
 
 
-def _content_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any) -> str:
+def _content_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays: Any, *,
+                  schema_version: str, trim_threshold: float, motif_type: str,
+                  include_rc: bool, loader_backend: str,
+                  loader_parameters: dict[str, Any]) -> str:
+    """A lexicon's identity: canonical loader configuration, then ordered array bytes.
+
+    Two lexicons built from byte-identical motif arrays but compiled to be read
+    back under different loader settings (a different ``trim_threshold``,
+    ``motif_type``, ``include_rc``, or ``loader_parameters``) load differently and
+    must not collide on identity. The metadata blob is hashed first, as canonical
+    JSON (sorted keys, tight separators, no whitespace or key-order dependence),
+    so the hash is deterministic across runs and machines rather than resting on a
+    ``dict`` iteration order or a ``repr``. Array identity follows: loader order,
+    node id, and each array's dtype and shape ahead of its bytes, so two arrays
+    that happen to serialize to the same byte length at different shapes cannot
+    collide either.
+    """
     h = hashlib.sha256()
+    metadata = {
+        "schema_version": schema_version,
+        "trim_threshold": trim_threshold,
+        "motif_type": motif_type,
+        "include_rc": include_rc,
+        "loader_backend": loader_backend,
+        "loader_parameters": loader_parameters,
+    }
+    h.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode())
     for group, pattern_name, node in ordered:
         h.update(f"{group}.{pattern_name}\t{node['node_id']}\n".encode())
         grp = arrays[node["node_id"]]
         for key in ("cwm", "hypothetical_cwm", "ppm"):
             h.update(key.encode())
             if key in grp:
-                h.update(grp[key][:].astype("float64").tobytes())
+                arr = grp[key][:].astype("float64")
+                h.update(f"{arr.dtype}\t{arr.shape}\n".encode())
+                h.update(arr.tobytes())
     return h.hexdigest()
 
 
@@ -269,11 +297,17 @@ def _compare(tier: str, index: dict[str, list[dict[str, Any]]]) -> dict[str, dic
 # --------------------------------------------------------------------------- #
 # Reading back, with the real loader
 # --------------------------------------------------------------------------- #
-def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3) -> list[str]:
+def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3,
+             motif_type: str = "cwm", include_rc: bool = False,
+             loader_parameters: dict[str, Any] | None = None) -> list[str]:
     """Read a compiled lexicon with the **real** hit-caller loader; return its names.
 
     Verification is behavioural, not structural: asserting that the file has the
-    groups we just wrote proves only that we can read our own output.
+    groups we just wrote proves only that we can read our own output. The three
+    named arguments plus ``loader_parameters`` (forwarded as extra keyword
+    arguments to the real loader, e.g. ``motif_lambda_default``) are exactly the
+    settings a lexicon's manifest records; a caller that wants to verify *this*
+    lexicon must pass *its* settings, not whatever this function defaults to.
     """
     try:
         from finemo.data_io import load_modisco_motifs
@@ -282,18 +316,28 @@ def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3) -> l
             "round-trip verification needs the finemo backend (pip install finemo-gpu). "
             "Without it the H5 is written but never read back by anything but this package."
         ) from exc
+    extra = {"motif_lambda_default": 0.7, **(loader_parameters or {})}
     _motifs_df, _cwms, _trim_masks, names = load_modisco_motifs(
-        str(h5_path), trim_threshold=trim_threshold, motif_type="cwm",
+        str(h5_path), trim_threshold=trim_threshold, motif_type=motif_type,
         motifs_include=None, motif_name_map=None, motif_lambdas=None,
-        motif_lambda_default=0.7, include_rc=False,
+        include_rc=include_rc, **extra,
     )
     return [str(n) for n in names]
 
 
 def verify_roundtrip(h5_path: str | os.PathLike[str],
                      manifest: LexiconManifest) -> guards.GuardResult:
-    """Write-then-read: the loader's order must be the manifest's order, by name."""
-    return guards.index_order_matches_loader(manifest.pattern_order, load_back(h5_path))
+    """Write-then-read: the loader's order must be the manifest's order, by name.
+
+    Reads back under the manifest's *own* loader configuration -- not this
+    module's defaults -- because that configuration is exactly what
+    ``lexicon_content_hash`` asserts the lexicon's identity depends on.
+    """
+    names = load_back(
+        h5_path, trim_threshold=manifest.trim_threshold, motif_type=manifest.motif_type,
+        include_rc=manifest.include_rc, loader_parameters=manifest.loader_parameters,
+    )
+    return guards.index_order_matches_loader(manifest.pattern_order, names)
 
 
 # --------------------------------------------------------------------------- #
@@ -303,13 +347,32 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                      decisions_path: str | os.PathLike[str] | None = None,
                      tiers: tuple[str, ...] = TIERS,
                      verify: str = "auto",
-                     seed: int | None = None) -> dict[str, LexiconManifest]:
-    """Compile one lexicon per tier, each with its manifest, in loader order."""
+                     seed: int | None = None,
+                     trim_threshold: float = 0.3,
+                     motif_type: str = "cwm",
+                     include_rc: bool = False,
+                     loader_backend: str = "finemo",
+                     loader_parameters: dict[str, Any] | None = None,
+                     ) -> dict[str, LexiconManifest]:
+    """Compile one lexicon per tier, each with its manifest, in loader order.
+
+    ``trim_threshold``, ``motif_type``, ``include_rc``, ``loader_backend`` and
+    ``loader_parameters`` are the loader-affecting settings that used to be
+    hard-coded inside :func:`load_back` (``trim_threshold=0.3, motif_type="cwm",
+    motif_lambda_default=0.7, include_rc=False``). Two lexicons compiled with
+    different values here load differently under the real loader and must not
+    share a ``lexicon_content_hash`` -- so these are threaded into the manifest
+    and the hash, and into round-trip verification, instead of staying implicit.
+    Defaults reproduce exactly what was previously hard-coded, so existing callers
+    are unaffected.
+    """
     unknown = [t for t in tiers if t not in TIERS]
     if unknown:
         raise CompileError(f"unknown tiers {unknown}; expected a subset of {list(TIERS)}")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    loader_parameters = (dict(loader_parameters) if loader_parameters is not None
+                        else {"motif_lambda_default": 0.7})
 
     prov = record("compile", seed=seed)
     meta, nodes, arrays = load_registry(registry_dir)
@@ -354,12 +417,25 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             ordered = ordered_by_tier[tier]
             h5_path = out / f"{tier}.h5"
             _write_h5(h5_path, ordered, arrays)
+            content_hash = _content_hash(
+                ordered, arrays,
+                schema_version=LEXICON_MANIFEST_SCHEMA_VERSION,
+                trim_threshold=trim_threshold, motif_type=motif_type,
+                include_rc=include_rc, loader_backend=loader_backend,
+                loader_parameters=loader_parameters,
+            )
             manifest = LexiconManifest(
                 tier=tier,
-                lexicon_content_hash=_content_hash(ordered, arrays),
+                lexicon_content_hash=content_hash,
                 n_motifs=len(ordered),
                 pattern_order=[f"{g}.{p}" for g, p, _ in ordered],
                 node_ids=[n["node_id"] for _, _, n in ordered],
+                schema_version=LEXICON_MANIFEST_SCHEMA_VERSION,
+                trim_threshold=trim_threshold,
+                motif_type=motif_type,
+                include_rc=include_rc,
+                loader_backend=loader_backend,
+                loader_parameters=loader_parameters,
                 comparisons=_compare(tier, index),
                 source_registry=str(Path(registry_dir).name),
                 sensitivity_triggers={k: v for k, v in triggers_by_cluster(decisions).items() if v},
