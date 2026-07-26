@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from motifmultiverse import __version__
+from motifmultiverse.align import DEFAULT_NULL_SHUFFLES, AlignmentError
 from motifmultiverse.compile import TIERS as COMPILE_TIERS
 from motifmultiverse.compile import BackendMissing, CompileError
 from motifmultiverse.guards import GuardError
@@ -81,13 +82,25 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--out", default="registry/", help="output registry directory")
     a.set_defaults(func=_run_ingest)
 
-    a = sub.add_parser("align", help="build the alignment evidence graph")
+    a = sub.add_parser(
+        "align", help="build the alignment evidence graph",
+        description=(
+            "Register every pair of motifs on UNSIGNED PPM content (offset x "
+            "orientation search under a bilateral overlap floor); signed CWM "
+            "similarity is measured only at the winning registration, never "
+            "re-optimized. Each pair's null re-runs the full registration on "
+            "freshly shuffled data, not a rescore at the observed offset."
+        ),
+    )
     a.add_argument("registry", help="registry/ from ingest")
-    a.add_argument("--null-shuffles", type=int, default=1000,
-                   help="per-pair null shuffles (default: 1000)")
+    a.add_argument("--null-shuffles", type=int, default=DEFAULT_NULL_SHUFFLES,
+                   help=f"per-pair null shuffles, re-registered from scratch each time "
+                        f"(default: {DEFAULT_NULL_SHUFFLES})")
     a.add_argument("--out", default="evidence/", help="output evidence directory")
-    a.add_argument("--seed", type=int, default=None, help="random seed, recorded in provenance")
-    a.set_defaults(func=lambda ns: _run("align", ns))
+    a.add_argument("--seed", type=int, default=0,
+                   help="random seed for the null shuffles; required provenance on "
+                        "every emitted edge (default: 0)")
+    a.set_defaults(func=_run_align)
 
     a = sub.add_parser("annotate", help="attach database matches and family labels")
     a.add_argument("evidence", help="evidence/ from align")
@@ -186,6 +199,25 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=_run_interpret)
 
     return p
+
+
+def _run_align(ns: argparse.Namespace) -> int:
+    from motifmultiverse import align as align_mod
+
+    summary, edges = align_mod.run(
+        ns.registry, ns.out, null_shuffles=ns.null_shuffles, seed=ns.seed)
+    print(f"align: {summary.n_nodes} motif nodes, {summary.n_pairs_considered} candidate pairs, "
+          f"{summary.n_edges} alignment edges ({summary.n_pairs_excluded} excluded: no PPM or "
+          "no offset met the bilateral overlap floor)")
+    print(f"  null_shuffles={summary.null_shuffles} seed={summary.seed} "
+          f"registered_on=unsigned_ppm registration_rule_version={summary.registration_rule_version}")
+    for e in edges[:5]:
+        print(f"  {e.source_node_id} <-> {e.target_node_id}: orientation={e.orientation} "
+              f"offset={e.offset} overlap_bp={e.overlap_bp} ppm_similarity={e.ppm_similarity:.3f} "
+              f"p={e.empirical_p_value:.4f}")
+    print(f"written: {summary.edges_path}")
+    print(f"written: {summary.null_summary_path}")
+    return 0
 
 
 def _run_ingest(ns: argparse.Namespace) -> int:
@@ -304,7 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"motifmultiverse: {exc.filename}: no such file", file=sys.stderr)
         return 2
     except (GuardError, InterpretError, IngestError, CompileError,
-            BackendMissing, SchemaError) as exc:
+            BackendMissing, SchemaError, AlignmentError) as exc:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.
         print(f"motifmultiverse: refused: {exc}", file=sys.stderr)
