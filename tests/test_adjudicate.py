@@ -942,14 +942,46 @@ def test_component_defers_when_similarity_tie_lacks_authoritative_medoid_metadat
         {"TRUE_DUPLICATE": _collapse_criterion(require_stability=False)},
         "automated:test",
         node_metadata={
-            "node-a": {"motif_completeness": 1.0},
-            "node-b": {"motif_completeness": 1.0},
+            "node-a": {
+                "motif_completeness": 1.0,
+                "seqlet_count": 150,
+                "core_ic": 10.0,
+            },
+            "node-b": {
+                "motif_completeness": 1.0,
+                "seqlet_count": 150,
+                "core_ic": 10.0,
+            },
         },
     )
 
     assert result.decision is Decision.DEFERRED
     assert result.representative_node_id is None
     assert "authoritative medoid tie metadata" in result.rationale
+    assert "cross_context_recurrence" in result.rationale
+
+
+def test_direct_component_refuses_complete_ghost_component_outside_registry():
+    """A complete high-scoring graph cannot invent an unregistered representative."""
+    from motifmultiverse.adjudicate import AdjudicationError, adjudicate_component
+
+    with pytest.raises(
+        AdjudicationError,
+        match=r"unknown registry node_id\(s\).*ghost-a.*ghost-b.*ghost-c",
+    ):
+        adjudicate_component(
+            ["ghost-a", "ghost-b", "ghost-c"],
+            [
+                _alignment("ghost-a", "ghost-b", similarity=0.99),
+                _alignment("ghost-a", "ghost-c", similarity=0.98),
+                _alignment("ghost-b", "ghost-c", similarity=0.1),
+            ],
+            [],
+            [],
+            {"TRUE_DUPLICATE": _collapse_criterion(require_stability=False)},
+            "automated:test",
+            node_metadata=_complete_medoid_metadata("node-a", "node-b"),
+        )
 
 
 def test_malformed_stability_evidence_is_a_controlled_refusal():
@@ -1335,6 +1367,138 @@ def test_adjudicate_refuses_forged_alignment_registration_provenance(tmp_path):
 
     with pytest.raises(AdjudicationError, match="registered_on"):
         adjudicate_evidence(evidence, tmp_path / "out", registry_dir=registry)
+
+
+def test_cli_adjudicate_refuses_all_unknown_evidence_node_ids(tmp_path, capsys):
+    import json
+
+    import pandas as pd
+
+    from motifmultiverse.cli import main
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    pd.DataFrame([
+        _alignment("ghost-a", "ghost-b", similarity=0.99).to_dict(),
+        _alignment("ghost-a", "ghost-c", similarity=0.98).to_dict(),
+        _alignment("ghost-b", "ghost-c", similarity=0.1).to_dict(),
+    ]).to_parquet(evidence / "alignment_edges.parquet", index=False)
+    candidate = _annotation("annotation-ghost", "FAM_ALPHA").to_dict()
+    candidate["provenance"] = json.dumps(candidate["provenance"])
+    pd.DataFrame([candidate]).to_parquet(
+        evidence / "annotation_candidates.parquet", index=False
+    )
+    criteria = _write_registry(
+        tmp_path,
+        [{
+            "criterion_id": "TRUE_DUPLICATE",
+            "version": "ghost-test",
+            "status": "FROZEN",
+            "relationship": "TRUE_DUPLICATE",
+            "required_evidence": ["ppm_similarity"],
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.0}],
+            "insufficient_evidence_action": "deferred",
+            "decision_if_matched": "collapse",
+        }],
+    )
+    registry = _write_adjudication_registry(tmp_path)
+
+    assert main([
+        "adjudicate",
+        str(evidence),
+        "--registry",
+        str(registry),
+        "--criteria",
+        str(criteria),
+        "--out",
+        str(tmp_path / "out"),
+    ]) == 4
+    error = capsys.readouterr().err
+    assert "unknown registry node_id(s)" in error
+    for node_id in ("annotation-ghost", "ghost-a", "ghost-b", "ghost-c"):
+        assert node_id in error
+
+
+def test_real_ingest_registry_completeness_resolves_before_missing_recurrence(
+    tmp_path,
+):
+    import json
+
+    import h5py
+    import numpy as np
+    import pandas as pd
+
+    from motifmultiverse import ingest
+    from motifmultiverse.cli import main
+
+    modisco = tmp_path / "modisco.h5"
+    with h5py.File(modisco, "w") as h5:
+        patterns = h5.create_group("pos_patterns")
+        for index in range(2):
+            pattern = patterns.create_group(f"pattern_{index}")
+            cwm = np.ones((10, 4))
+            if index == 1:
+                cwm[:] = 0.0
+                cwm[4:6] = 1.0
+            pattern.create_dataset("contrib_scores", data=cwm)
+            pattern.create_dataset("sequence", data=np.full((10, 4), 0.25))
+            pattern.create_group("seqlets").create_dataset("n_seqlets", data=150)
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "project": "tie-resolution",
+        "peak_universe_id": "peaks",
+        "analyses": [{
+            "id": "analysis",
+            "model": "model",
+            "readout": "readout",
+            "union_id": "UA",
+            "context": "promoter",
+            "modisco_h5": str(modisco),
+        }],
+    }))
+    registry = tmp_path / "registry"
+    _, nodes = ingest.ingest_project(project, registry)
+    assert [node.motif_completeness for node in nodes] == [1.0, 0.2]
+    assert all(node.cross_context_recurrence is None for node in nodes)
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    pd.DataFrame([
+        _alignment(nodes[0].node_id, nodes[1].node_id).to_dict()
+    ]).to_parquet(evidence / "alignment_edges.parquet", index=False)
+    pd.DataFrame(columns=[
+        "candidate_id", "node_id", "proposed_family_id", "source", "source_version",
+        "matched_motif_id", "match_score", "occurrence_null_value", "motif_length",
+        "seqlet_count", "low_confidence_annotation", "provenance",
+    ]).to_parquet(evidence / "annotation_candidates.parquet", index=False)
+    criteria = _write_registry(
+        tmp_path,
+        [{
+            "criterion_id": "TRUE_DUPLICATE",
+            "version": "real-ingest-tie",
+            "status": "FROZEN",
+            "relationship": "TRUE_DUPLICATE",
+            "required_evidence": ["ppm_similarity"],
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.9}],
+            "insufficient_evidence_action": "deferred",
+            "decision_if_matched": "collapse",
+        }],
+    )
+    out = tmp_path / "out"
+
+    assert main([
+        "adjudicate",
+        str(evidence),
+        "--registry",
+        str(registry),
+        "--criteria",
+        str(criteria),
+        "--out",
+        str(out),
+    ]) == 0
+    decision = pd.read_parquet(out / "ontology_decisions.parquet").iloc[0]
+    assert decision["decision"] == "collapse"
+    assert decision["representative_node_id"] == nodes[0].node_id
 
 
 def test_cli_adjudicate_registry_metadata_changes_the_representative(tmp_path):

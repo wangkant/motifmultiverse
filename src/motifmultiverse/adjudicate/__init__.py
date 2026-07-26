@@ -278,7 +278,7 @@ def _missing_authoritative_tie_metadata(
     pairwise_similarity: Mapping[tuple[str, str], float],
     metadata: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, tuple[str, ...]]:
-    """Return missing persisted fields only when mean-similarity leaders tie."""
+    """Return missing evidence only for the first unresolved rank dimension."""
     if len(members) < 2:
         return {}
     means = {
@@ -290,21 +290,39 @@ def _missing_authoritative_tie_metadata(
         for member in members
     }
     best = max(means.values())
-    leaders = tuple(member for member in members if means[member] == best)
-    if len(leaders) < 2:
-        return {}
-    return {
-        member: tuple(
-            field_name
-            for field_name in _MEDOID_TIE_FIELDS
+    contenders = tuple(member for member in members if means[member] == best)
+    for field_name in _MEDOID_TIE_FIELDS:
+        if len(contenders) < 2:
+            return {}
+        missing = {
+            member: (field_name,)
+            for member in contenders
             if metadata.get(member, {}).get(field_name) is None
+        }
+        if missing:
+            return missing
+        field_best = max(
+            float(metadata[member][field_name])
+            for member in contenders
         )
-        for member in leaders
-        if any(
-            metadata.get(member, {}).get(field_name) is None
-            for field_name in _MEDOID_TIE_FIELDS
+        contenders = tuple(
+            member
+            for member in contenders
+            if float(metadata[member][field_name]) == field_best
         )
-    }
+    return {}
+
+
+def _require_registered_node_ids(
+    node_metadata: Mapping[str, Mapping[str, Any]] | None,
+    node_ids: Sequence[str],
+) -> None:
+    """Refuse evidence references outside an explicitly supplied registry."""
+    if node_metadata is None:
+        return
+    unknown = sorted(set(node_ids) - set(node_metadata))
+    if unknown:
+        raise AdjudicationError(f"unknown registry node_id(s): {unknown}")
 
 
 def _criterion_for(
@@ -386,6 +404,18 @@ def adjudicate_component(
         )
     if not decided_by.strip():
         raise AdjudicationError("adjudication requires a non-empty decided_by")
+    _require_registered_node_ids(
+        node_metadata,
+        (
+            *members,
+            *(
+                node_id
+                for edge in alignment_edges
+                for node_id in (edge.source_node_id, edge.target_node_id)
+            ),
+            *(candidate.node_id for candidate in annotation_candidates),
+        ),
+    )
     member_set = set(members)
     node_metadata = node_metadata or {}
 
@@ -552,8 +582,9 @@ def adjudicate_component(
             ),
             rationale=(
                 "mean-similarity medoid leaders tie, but authoritative medoid tie metadata "
-                "is unavailable; adjudication defers rather than substituting identifier "
-                "parsing, zeros, or lexical order as scientific evidence"
+                f"is unavailable ({missing_tie_metadata}); adjudication defers rather "
+                "than substituting identifier parsing, zeros, or lexical order as "
+                "scientific evidence"
             ),
             decided_by=decided_by,
             manual_override=False,
@@ -651,6 +682,17 @@ def adjudicate_all(
     node_metadata: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[OntologyDecision, ...]:
     """Propose components by connectivity, then adjudicate every proposal."""
+    _require_registered_node_ids(
+        node_metadata,
+        (
+            *(
+                node_id
+                for edge in alignment_edges
+                for node_id in (edge.source_node_id, edge.target_node_id)
+            ),
+            *(candidate.node_id for candidate in annotation_candidates),
+        ),
+    )
     adjacency: dict[str, set[str]] = {}
     for edge in alignment_edges:
         if edge.source_node_id == edge.target_node_id:
