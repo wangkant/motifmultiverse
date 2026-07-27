@@ -12,6 +12,7 @@ from dataclasses import replace
 
 import pytest
 
+from motifmultiverse import infer as infer_mod
 from motifmultiverse import interpret
 from motifmultiverse import schema as schema_mod
 from motifmultiverse.schema import (
@@ -693,11 +694,30 @@ def test_every_result_enumerates_the_estimators_it_recognises():
     assert result.estimator in result.estimators_implemented
     assert set(result.estimators_defined) == {e.value for e in Estimator}
     assert set(result.estimators_implemented) == {e.value for e in IMPLEMENTED_ESTIMATORS}
-    # The specified estimators are recognised but absent, and say so by their absence.
+    # Task 16 closed the gap this test was written around: FP-15's specified pair
+    # now exists, so every recognised estimator is implemented. The invariant that
+    # outlives the gap is the one asserted above and re-asserted below -- a result
+    # may never name an estimator its own enumeration calls unavailable, which is
+    # what a stale IMPLEMENTED_ESTIMATORS would have produced.
     assert Estimator.BCA_PAIRED_BLOCK_BOOTSTRAP.value in result.estimators_defined
-    assert Estimator.BCA_PAIRED_BLOCK_BOOTSTRAP.value not in result.estimators_implemented
+    assert set(result.estimators_implemented) == set(result.estimators_defined)
     # Label permutation is abandoned, not pending: it is not even recognised.
     assert not any("permutation" in e for e in result.estimators_defined)
+
+
+def test_a_result_never_names_an_estimator_its_own_enumeration_calls_unavailable():
+    """The self-consistency `estimators_implemented` exists to provide.
+
+    Checked on the path that actually changed: a `bca-wild-cluster` run records
+    `wild_cluster_bootstrap_t`, and a reader who trusts the enumeration beside it
+    must not conclude that estimator does not exist in this release.
+    """
+    result = interpret.interpret_query(
+        _rows(), _query(), n_bootstrap=100, seed=3, estimator=interpret.ESTIMATOR_BCA_WILD)
+    assert result.estimator == interpret.ESTIMATOR_BCA_WILD
+    assert result.estimator in result.estimators_implemented
+    for effect in result.effects:
+        assert effect["estimator"] in result.estimators_implemented
 
 
 def test_interpretation_writes_json(tmp_path):
@@ -707,3 +727,253 @@ def test_interpretation_writes_json(tmp_path):
     assert blob["output_mode"] == "FULL_INFERENCE"
     assert blob["health"]["n_blocks"] == N_BLOCKS
     assert blob["estimator"] == interpret.ESTIMATOR
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 carried obligation: direct `_bh` coverage BEFORE it is reactivated    #
+# (Task 16 wires it behind INTERVAL_AND_TEST). All expected values below are   #
+# hand-computed from the BH rule q_(i) = min_(j>=i) p_(j)*m/j, not from the    #
+# implementation under test.                                                   #
+# --------------------------------------------------------------------------- #
+def test_bh_matches_a_hand_computed_known_vector():
+    # m=5. Raw: .005*5/1=.025, .01*5/2=.025, .02*5/3=1/30, .04*5/4=.05, .5*5/5=.5;
+    # running min from the largest is already monotone here.
+    q = interpret._bh([0.005, 0.01, 0.02, 0.04, 0.5])
+    assert q == pytest.approx([0.025, 0.025, 1 / 30, 0.05, 0.5])
+
+
+def test_bh_returns_q_values_in_input_positions_not_sorted_order():
+    # Same multiset as the known vector, permuted: each q must follow its p.
+    q = interpret._bh([0.5, 0.02, 0.005, 0.04, 0.01])
+    assert q == pytest.approx([0.5, 1 / 30, 0.025, 0.05, 0.025])
+
+
+def test_bh_applies_the_running_min_from_the_largest_p():
+    # Without the running-min step the second entry would be 0.01*3/2 = 0.015 and
+    # the first 0.005*3/1 = 0.015; the raw middle value 0.04*3/2 = 0.06 must be
+    # pulled down by nothing (it is the max) -- use a vector where an interior
+    # raw value exceeds a later one: raw .04*3/2=.06 > .05*3/3=.05.
+    q = interpret._bh([0.005, 0.04, 0.05])
+    assert q == pytest.approx([0.015, 0.05, 0.05])
+
+
+def test_bh_ties_share_one_q_value():
+    # m=3, two tied p: q for both is min(.01*3/1, .01*3/2) carried across the tie.
+    q = interpret._bh([0.01, 0.01, 0.05])
+    assert q[0] == q[1] == pytest.approx(0.015)
+    assert q[2] == pytest.approx(0.05)
+
+
+def test_bh_is_monotone_in_the_p_values():
+    p = [0.6, 0.01, 0.04, 0.04, 0.9, 0.001]
+    q = interpret._bh(p)
+    for i in range(len(p)):
+        for j in range(len(p)):
+            if p[i] < p[j]:
+                assert q[i] <= q[j]
+
+
+def test_bh_never_exceeds_one_and_never_undercuts_p():
+    # Raw BH values here are 0.9*3/1 = 2.7 and 0.95*3/2 = 1.425 -- both ABOVE 1 --
+    # with 1.0*3/3 = 1.0 at the top; the running min plus the cap at 1 pulls all
+    # three to exactly 1.0 (matches R p.adjust(c(.9,.95,1), "BH")).
+    p = [0.9, 0.95, 1.0]
+    q = interpret._bh(p)
+    assert all(qi <= 1.0 for qi in q)
+    assert all(qi >= pi for pi, qi in zip(p, q, strict=True))
+    assert q == [1.0, 1.0, 1.0]
+
+
+def test_bh_single_p_value_is_its_own_q():
+    assert interpret._bh([0.03]) == [pytest.approx(0.03)]
+
+
+def test_bh_empty_input_gives_empty_output():
+    assert interpret._bh([]) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 16: the bca-wild-cluster estimator path (`FP-15`, INTERVAL_AND_TEST)    #
+# --------------------------------------------------------------------------- #
+def test_bca_wild_cluster_recovers_the_planted_effect_and_the_planted_null():
+    """The Task 15 fixture's planted truth, now with the licensed test attached.
+
+    FAM_A's per-block effects cycle 0.6/0.9/1.2 (mean exactly 0.9, t_obs ~= 19):
+    no null-world replicate reaches that, so p sits at the resolution floor and
+    the BCa interval excludes zero. FAM_B's per-block effects cycle
+    -0.2/-0.2/+0.4 (mean exactly 0 up to float dust): the planted null yields a
+    large p and an interval straddling zero. With m=2 families, BH gives
+    q_A = 2*p_A and q_B = p_B by hand-computation.
+    """
+    n_bootstrap = 200
+    result = interpret.interpret_query(
+        _rows(), _query(), n_bootstrap=n_bootstrap, seed=7,
+        estimator=interpret.ESTIMATOR_BCA_WILD)
+    by_family = {e["family_id"]: e for e in result.effects}
+    a, b = by_family["FAM_A"], by_family["FAM_B"]
+
+    assert a["estimator"] == "wild_cluster_bootstrap_t"
+    assert a["inference_capability"] == "INTERVAL_AND_TEST"
+    assert a["effect"] == pytest.approx(0.9, abs=1e-9)
+    lo, hi = a["ci"]
+    assert lo > 0.0 and hi > lo
+    floor = 1.0 / (n_bootstrap + 1)
+    assert a["p_value"] == floor
+    assert a["n_bootstrap_valid"] == n_bootstrap
+
+    assert b["effect"] == pytest.approx(0.0, abs=1e-9)
+    lo_b, hi_b = b["ci"]
+    assert lo_b < 0.0 < hi_b
+    assert b["p_value"] > 0.5
+
+    assert a["q_value"] == pytest.approx(min(1.0, 2 * a["p_value"]))
+    assert b["q_value"] == pytest.approx(b["p_value"])
+
+
+def _unbalanced_rows() -> list[HitRecord]:
+    """Two query peaks and ONE comparator peak per block, so per-block *sums* and
+    per-block *contributions to the mean difference* are not the same quantity.
+
+    ``FAM_D``'s query coefficient cycles 0.8/1.0/1.2 and its comparator
+    coefficient cycles the reverse, 1.2/1.0/0.8, both with mean exactly 1.0: the
+    reported effect (mean per-peak query minus mean per-peak comparator) is
+    exactly 0, while the per-block query sum is twice the query mean because the
+    query side has twice the peaks.
+    """
+    rows: list[HitRecord] = []
+    cycle = (0.8, 1.0, 1.2)
+    for b in range(N_BLOCKS):
+        start = b * BLOCK
+        for i in (0, 1):     # two query peaks, same coefficient
+            rows.append(HitRecord(
+                region_id=f"u{b:03d}_q{i}", chrom="chr1", start=start + i * 1000,
+                end=start + i * 1000 + 500, missingness=Missingness.USED,
+                variant_id=f"UA_FAMD_q{i}", family_id="FAM_D",
+                hit_coefficient=cycle[b % 3],
+                input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
+        rows.append(HitRecord(
+            region_id=f"u{b:03d}_c0", chrom="chr1", start=start + 5000, end=start + 5500,
+            missingness=Missingness.USED, variant_id="UA_FAMD_c0", family_id="FAM_D",
+            hit_coefficient=cycle[2 - (b % 3)],
+            input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
+    return rows
+
+
+def test_the_p_value_tests_a_hypothesis_about_the_effect_reported_beside_it():
+    """The per-block effects must be scaled to the reported point estimate.
+
+    This is what `(G/N_q) * sum_q(g) - (G/N_c) * sum_c(g)` buys, and the fixture
+    is built so the two candidate quantities disagree in *sign of conclusion*
+    rather than in a digit:
+
+    * scaled (correct): per-block effects cycle -0.4 / 0.0 / +0.4, mean exactly
+      0 -- the planted truth -- so the test finds no evidence against the null
+      and p is large;
+    * unscaled per-block sums: 0.4 / 1.0 / 1.6, mean 1.0 with t ~= 13, so p
+      collapses to the resolution floor.
+
+    An unscaled implementation would therefore report `effect == 0.0` beside
+    `p == 1/(B+1)`: a p value that is a true statement about a quantity nobody
+    is shown, printed next to the quantity everybody reads. Every other
+    bca-wild-cluster test in this file passes under both implementations, which
+    is why this one exists.
+    """
+    n_bootstrap = 200
+    query = _query(query_id="unbalanced",
+                   region_ids=[f"u{b:03d}_q{i}" for b in range(N_BLOCKS) for i in (0, 1)],
+                   comparator_region_ids=[f"u{b:03d}_c0" for b in range(N_BLOCKS)])
+    result = interpret.interpret_query(
+        _unbalanced_rows(), query, n_bootstrap=n_bootstrap, seed=13,
+        estimator=interpret.ESTIMATOR_BCA_WILD)
+    effect = result.effects[0]
+    assert effect["family_id"] == "FAM_D"
+    assert effect["n_query_peaks"] == 2 * N_BLOCKS
+    assert effect["n_comparator_peaks"] == N_BLOCKS
+    assert effect["effect"] == pytest.approx(0.0, abs=1e-12)
+    assert effect["p_value"] > 0.5
+    assert effect["p_value"] > 10.0 / (n_bootstrap + 1)   # nowhere near the floor
+    lo, hi = effect["ci"]
+    assert lo < 0.0 < hi
+
+
+def test_bca_wild_cluster_is_deterministic_given_the_seed():
+    kw = dict(n_bootstrap=100, seed=5, estimator=interpret.ESTIMATOR_BCA_WILD)
+    a = interpret.interpret_query(_rows(), _query(), **kw)
+    b = interpret.interpret_query(_rows(), _query(), **kw)
+    assert [e["ci"] for e in a.effects] == [e["ci"] for e in b.effects]
+    assert [e["p_value"] for e in a.effects] == [e["p_value"] for e in b.effects]
+    assert [e["q_value"] for e in a.effects] == [e["q_value"] for e in b.effects]
+
+
+def test_bca_wild_cluster_names_both_estimator_halves_once_and_withholds_nothing():
+    result = interpret.interpret_query(
+        _rows(), _query(), n_bootstrap=100, seed=1,
+        estimator=interpret.ESTIMATOR_BCA_WILD)
+    # The withheld-p/q note belongs to the estimation-only path; it must not
+    # appear where p/q are actually emitted.
+    assert not any("withheld" in n for n in result.notes)
+    # The effect-level `estimator` field names the capability-licensing member
+    # (the test); the BCa interval half is named once per interpretation.
+    naming = [n for n in result.notes if "BCa" in n and "wild cluster bootstrap-t" in n]
+    assert len(naming) == 1
+    assert result.estimator == "wild_cluster_bootstrap_t"
+    for e in result.effects:
+        assert e["p_value"] is not None and e["q_value"] is not None
+
+
+def test_percentile_estimator_explicit_still_withholds_p_and_q():
+    result = interpret.interpret_query(
+        _rows(), _query(), n_bootstrap=50, seed=1,
+        estimator=interpret.ESTIMATOR_PERCENTILE)
+    for effect in result.effects:
+        assert effect["estimator"] == "percentile_block_bootstrap"
+        assert effect["inference_capability"] == "ESTIMATION_ONLY"
+        assert effect["p_value"] is None
+        assert effect["q_value"] is None
+    assert any("withheld" in n for n in result.notes)
+
+
+def test_an_unknown_estimator_is_refused_not_silently_mapped():
+    with pytest.raises(interpret.InterpretError, match="estimator"):
+        interpret.interpret_query(_rows(), _query(), n_bootstrap=20, estimator="bootstrap")
+
+
+def test_bca_wild_cluster_refuses_when_the_block_frame_is_below_the_infer_floor():
+    """Health floors are caller-adjustable; infer's own estimability floor is
+    not. A 12-block frame clears a lowered --floor-blocks 10 health gate but is
+    far below MIN_ESTIMABLE_BLOCKS, so the estimator itself must refuse.
+    """
+    blocks = range(12)
+    q = _query(region_ids=_ids(0, blocks), comparator_region_ids=_ids(1, blocks))
+    with pytest.raises(infer_mod.InferError, match="below the preregistered floor"):
+        interpret.interpret_query(
+            _rows(), q, floors=HealthFloors(min_blocks=10), n_bootstrap=100,
+            estimator=interpret.ESTIMATOR_BCA_WILD)
+
+
+def _constant_family_rows() -> list[HitRecord]:
+    """Same shape as `_rows` but every FAM_C coefficient is constant per side:
+    per-block effects are then identical in every block, the wild bootstrap-t's
+    observed SE is exactly 0, and no replicate is estimable.
+    """
+    rows: list[HitRecord] = []
+    for b in range(N_BLOCKS):
+        for i in range(PER_BLOCK):
+            start = b * BLOCK + i * 1000
+            rows.append(HitRecord(
+                region_id=f"r{b:03d}_{i}", chrom="chr1", start=start, end=start + 500,
+                missingness=Missingness.USED, variant_id=f"UA_FAMC_{i:02d}",
+                family_id="FAM_C", hit_coefficient=1.0 if i % 2 == 0 else 0.4,
+                input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
+    return rows
+
+
+def test_bca_wild_cluster_refuses_a_family_with_a_degenerate_bootstrap_reference():
+    """Constant block effects leave zero estimable replicates. The doctrine is
+    refusal, not annotation: a p value computed from nothing must not travel
+    beside the other families' valid ones.
+    """
+    with pytest.raises(interpret.InterpretError, match="degenerate"):
+        interpret.interpret_query(
+            _constant_family_rows(), _query(), n_bootstrap=100, seed=1,
+            estimator=interpret.ESTIMATOR_BCA_WILD)

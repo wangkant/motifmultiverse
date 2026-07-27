@@ -888,16 +888,28 @@ class Estimator(StrEnum):
     """
 
     PERCENTILE_BLOCK_BOOTSTRAP = "percentile_block_bootstrap"
-    #: FP-15's specified interval. Not implemented; see docs/ROADMAP.md.
+    #: FP-15's specified interval: `infer.bca_paired_block_interval`.
     BCA_PAIRED_BLOCK_BOOTSTRAP = "bca_paired_block_bootstrap"
-    #: FP-15's specified p value. Not implemented; see docs/ROADMAP.md.
+    #: FP-15's specified p value: `infer.wild_cluster_bootstrap_t`. `interpret`
+    #: records this member for a run that used FP-15's pair, because the test is
+    #: the half that decides the result's `InferenceCapability`.
     WILD_CLUSTER_BOOTSTRAP_T = "wild_cluster_bootstrap_t"
 
 
 #: Label permutation is absent on purpose: it is not unimplemented, it is
 #: **abandoned**. Under block-correlated structure it understates the variance,
 #: so adding it back would be a regression rather than a feature.
-IMPLEMENTED_ESTIMATORS = frozenset({Estimator.PERCENTILE_BLOCK_BOOTSTRAP})
+#:
+#: All three recognised values now exist (`docs/ROADMAP.md` M4a): the percentile
+#: block bootstrap in `interpret`, and `FP-15`'s specified pair in `infer`. This
+#: set is what `Interpretation.estimators_implemented` publishes, so it must
+#: continue to contain every estimator a result can name -- a result whose
+#: `estimator` is outside this set describes itself as impossible.
+IMPLEMENTED_ESTIMATORS = frozenset({
+    Estimator.PERCENTILE_BLOCK_BOOTSTRAP,
+    Estimator.BCA_PAIRED_BLOCK_BOOTSTRAP,
+    Estimator.WILD_CLUSTER_BOOTSTRAP_T,
+})
 
 
 class InferenceCapability(StrEnum):

@@ -62,27 +62,34 @@ and the single-scale substrate constraint is enforced end to end.
 curve reports dropped cells with reasons, and every claim states its baseline
 population and lexicon version.
 
-### M4a — the estimators `FP-15` actually specifies
+### M4a — the estimators `FP-15` actually specifies — **DONE**
 
-A named item, because the gap is currently carried in prose on every result.
-`interpret` ships a **percentile** block bootstrap. `FP-15` specifies:
+A named item, because the gap used to be carried in prose on every result.
+`FP-15` specifies:
 
 - **BCa paired block bootstrap** for intervals — bias-corrected and accelerated, so
-  a skewed sampling distribution is not reported as a symmetric interval;
-- **block-level wild cluster bootstrap-*t*** for *p* values;
+  a skewed sampling distribution is not reported as a symmetric interval.
+  `infer.bca_paired_block_interval`;
+- **block-level wild cluster bootstrap-*t*** for *p* values.
+  `infer.wild_cluster_bootstrap_t`;
 - **label permutation stays abandoned.** It is not a fallback: under
   block-correlated structure it understates the variance.
 
-Until the wild cluster bootstrap-*t* exists, `interpret` withholds `p_value` and
-`q_value` outright rather than reporting the percentile bootstrap's replicate tail
-as one: every result carries `inference_capability` (`schema.InferenceCapability`),
-today always `ESTIMATION_ONLY`, and only a result licensed `INTERVAL_AND_TEST` may
-carry a hypothesis test. A number that looks like a *p* value but is not one is
-worse than no number.
+Both now exist and `interpret --estimator bca-wild-cluster` runs them as one path,
+licensed `INTERVAL_AND_TEST`. The **default is still `percentile`**, which is
+`ESTIMATION_ONLY` and withholds `p_value` and `q_value` outright rather than
+reporting the percentile bootstrap's replicate tail as one: a number that looks
+like a *p* value but is not one is worse than no number. Every result carries
+`inference_capability` (`schema.InferenceCapability`), and only a result licensed
+`INTERVAL_AND_TEST` may carry a hypothesis test or a BH `q_value`.
 
-*Done when:* both are implemented, `schema.IMPLEMENTED_ESTIMATORS` contains all
-three recognised values, and a caller that branched on `estimator` needs no change —
-which is why the enumeration ships now rather than with the implementation.
+*Done when:* both are implemented ✓, `schema.IMPLEMENTED_ESTIMATORS` contains all
+three recognised values ✓, and a caller that branched on `estimator` needs no
+change ✓ — which is why the enumeration shipped before the implementation.
+
+*Still open:* the default estimator remains the conservative one. Switching it is a
+separate decision with its own changelog entry, not a side effect of the
+implementation landing.
 
 ## M5 — cross-project generalisation and public release
 

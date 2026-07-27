@@ -25,8 +25,14 @@ from motifmultiverse.annotate import AnnotationError
 from motifmultiverse.compile import TIERS as COMPILE_TIERS
 from motifmultiverse.compile import BackendMissing, CompileError
 from motifmultiverse.guards import GuardError
+from motifmultiverse.infer import InferError
 from motifmultiverse.ingest import DEFAULT_TRIM_THRESHOLD, IngestError
-from motifmultiverse.interpret import DEFAULT_BLOCK_SIZE, DEFAULT_BOOTSTRAP, InterpretError
+from motifmultiverse.interpret import (
+    DEFAULT_BLOCK_SIZE,
+    DEFAULT_BOOTSTRAP,
+    ESTIMATOR_CHOICES,
+    InterpretError,
+)
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
@@ -219,6 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"genomic block size for the bootstrap (default: {DEFAULT_BLOCK_SIZE})")
     a.add_argument("--bootstrap", type=int, default=DEFAULT_BOOTSTRAP,
                    help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP})")
+    a.add_argument("--estimator", default="percentile", choices=sorted(ESTIMATOR_CHOICES),
+                   help="percentile: block bootstrap interval, no p or q value "
+                        "(ESTIMATION_ONLY, the conservative default). bca-wild-cluster: "
+                        "FP-15's specified pair -- BCa paired genomic-block interval plus "
+                        "block-level wild cluster bootstrap-t p value (INTERVAL_AND_TEST), "
+                        "with BH q values over the families in the run")
     a.add_argument("--floor-coverage", type=float, default=HealthFloors().min_intersection_coverage,
                    help="pre-registered floor on intersection coverage")
     a.add_argument("--floor-blocks", type=int, default=HealthFloors().min_blocks,
@@ -433,6 +445,7 @@ def _run_interpret(ns: argparse.Namespace) -> int:
                             min_blocks=ns.floor_blocks,
                             min_explained_fraction=ns.floor_explained),
         block_size=ns.block_size, n_bootstrap=ns.bootstrap, seed=ns.seed,
+        estimator=ns.estimator,
     )
     dest = result.write(ns.out)
 
@@ -479,7 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"motifmultiverse: {exc.filename}: no such file", file=sys.stderr)
         return 2
-    except (GuardError, InterpretError, IngestError, CompileError,
+    except (GuardError, InterpretError, InferError, IngestError, CompileError,
             BackendMissing, SchemaError, AlignmentError, AnnotationError) as exc:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.

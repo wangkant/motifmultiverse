@@ -65,6 +65,20 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   states the labelling rule itself, so a new row can be labelled without asking.
 - `interpret` results enumerate every recognised estimator and the subset implemented,
   so a caller does not change when `FP-15`'s estimators arrive.
+- **`FP-15`'s two specified estimators are implemented** (`docs/ROADMAP.md` M4a):
+  `infer.bca_paired_block_interval` (BCa paired genomic-block bootstrap interval) and
+  `infer.wild_cluster_bootstrap_t` (block-level wild cluster bootstrap-*t* *p* value,
+  null-imposed Rademacher weights, finite-sample `p = (extreme + 1) / (B + 1)`). The
+  block, never the peak, is the resampling and jackknife unit in both.
+  `interpret --estimator bca-wild-cluster` runs them as one path licensed
+  `INTERVAL_AND_TEST`: an effect then carries a BCa interval, a *p* value, and a
+  Benjamini-Hochberg *q* value over the families in that interpretation and no others.
+  `schema.IMPLEMENTED_ESTIMATORS` now contains all three recognised values, so a
+  result can no longer name an estimator its own enumeration calls unavailable.
+  **The default is unchanged** — `--estimator percentile`, `ESTIMATION_ONLY`, *p* and
+  *q* withheld. Switching the default is a separate decision and will get its own
+  entry here; an unrecognised `--estimator` is refused rather than mapped onto the
+  default.
 - **Contract change:** `compile` takes `compile registry/ --decisions decisions.json`
   instead of the skeleton's `compile review.yaml`, since `adjudicate` — which would
   have produced that review file — does not exist. No migration path is offered at
@@ -111,6 +125,8 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
 - `align` is prose-only by inheritance; `annotate` was **never specified** at all, which
   is a different position on the roadmap — it is waiting for a design, not an
   implementation.
-- `interpret`'s intervals are percentile block bootstrap; `FP-15` specifies BCa and a
-  wild cluster bootstrap-*t*.
+- `interpret`'s **default** intervals are percentile block bootstrap and carry no *p*
+  or *q* value. `FP-15`'s BCa interval and wild cluster bootstrap-*t* now exist behind
+  `--estimator bca-wild-cluster`; the cross-model effect-then-meta-analysis half of
+  `FP-15` does not.
 - Between-model heterogeneity is refused at runtime for N < 3 models.

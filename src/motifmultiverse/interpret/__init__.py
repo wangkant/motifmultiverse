@@ -39,7 +39,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from motifmultiverse import guards
+from motifmultiverse import guards, infer
 from motifmultiverse.schema import (
     ESTIMATOR_CAPABILITY,
     IMPLEMENTED_ESTIMATORS,
@@ -60,26 +60,51 @@ __all__ = [
     "FamilyEffect", "Interpretation", "read_hit_table", "read_peak_set",
     "peak_universe", "health_report", "contrast_health_report", "compose",
     "estimate_effects", "interpret_query",
-    "ESTIMATOR", "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP",
+    "ESTIMATOR", "ESTIMATOR_PERCENTILE", "ESTIMATOR_BCA_WILD", "ESTIMATOR_CHOICES",
+    "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP",
 ]
 
-#: Estimator actually implemented here. ``FP-15`` specifies a BCa paired block
-#: bootstrap for intervals and a block-level wild cluster bootstrap-t for p
-#: values; this is the percentile block bootstrap, which is weaker. It is named in
-#: every result rather than described as "block bootstrap", because the gap
-#: between what was specified and what ran is exactly the thing that goes missing.
-#: The full set of recognised values travels with every result
-#: (:class:`schema.Estimator`), so a caller can branch on it now and keep working
-#: when the specified estimators arrive.
-ESTIMATOR = Estimator.PERCENTILE_BLOCK_BOOTSTRAP.value
+#: The weaker of the two estimator paths: a percentile block bootstrap. It is
+#: named in every result rather than described as "block bootstrap", because the
+#: gap between what was specified and what ran is exactly the thing that goes
+#: missing. The full set of recognised values travels with every result
+#: (:class:`schema.Estimator`), so a caller branches on it rather than on a
+#: literal.
+ESTIMATOR_PERCENTILE = Estimator.PERCENTILE_BLOCK_BOOTSTRAP.value
 
-#: What ``ESTIMATOR`` is licensed to emit (``schema.ESTIMATOR_CAPABILITY``). The
-#: percentile block bootstrap's replicate tail is not a calibrated hypothesis
-#: test, so this is ``ESTIMATION_ONLY``: every effect below carries a point
-#: estimate and a percentile interval, and never a p or q value. A caller
-#: branches on this rather than on the estimator name so that Task 16's wild
-#: cluster bootstrap-t -- the one estimator licensed ``INTERVAL_AND_TEST`` --
-#: changes what is emitted without changing how a reader decides what to trust.
+#: ``FP-15``'s specified pair, in one selectable path: a BCa paired
+#: genomic-block bootstrap interval (:func:`infer.bca_paired_block_interval`)
+#: and a block-level wild cluster bootstrap-*t* p value
+#: (:func:`infer.wild_cluster_bootstrap_t`). The recorded value names the half
+#: that decides the result's capability -- the *test* -- because that is what a
+#: reader must not be wrong about; the interval half is named in the run's
+#: notes. This is the only value in :class:`schema.Estimator` licensed
+#: ``INTERVAL_AND_TEST``.
+ESTIMATOR_BCA_WILD = Estimator.WILD_CLUSTER_BOOTSTRAP_T.value
+
+#: Estimator used when a caller asks for none. Deliberately the conservative
+#: one: a default that emits p values is a default that emits them to callers
+#: who never decided they wanted a hypothesis test.
+ESTIMATOR = ESTIMATOR_PERCENTILE
+
+#: What ``--estimator`` accepts, mapped to the ``schema.Estimator`` value the
+#: result records. The command-line spelling names both halves of the pair
+#: (``bca-wild-cluster``) so that what runs is legible from the command line;
+#: the recorded value names the capability-licensing half. The table is public
+#: so the CLI does not restate the choices as literals and drift from them.
+ESTIMATOR_CHOICES: dict[str, str] = {
+    "percentile": ESTIMATOR_PERCENTILE,
+    "bca-wild-cluster": ESTIMATOR_BCA_WILD,
+}
+
+#: What ``ESTIMATOR`` -- the *default* -- is licensed to emit
+#: (``schema.ESTIMATOR_CAPABILITY``). The percentile block bootstrap's replicate
+#: tail is not a calibrated hypothesis test, so this is ``ESTIMATION_ONLY``:
+#: effects on that path carry a point estimate and a percentile interval, and
+#: never a p or q value. A run that selects ``ESTIMATOR_BCA_WILD`` resolves its
+#: own capability from the same table rather than reading this constant, so a
+#: caller branches on the capability *in the result* -- never on this module
+#: attribute, which describes only the default.
 CAPABILITY = ESTIMATOR_CAPABILITY[Estimator(ESTIMATOR)]
 
 DEFAULT_BLOCK_SIZE = 1_000_000
@@ -88,6 +113,26 @@ DEFAULT_BOOTSTRAP = 2000
 
 class InterpretError(ValueError):
     """A query cannot be answered at the strength it asked for."""
+
+
+def _resolve_estimator(name: str) -> str:
+    """Map a caller's estimator spelling onto the ``schema.Estimator`` recorded.
+
+    An unrecognised name is refused, never mapped onto the default: silently
+    running the weaker estimator for a caller who asked for the stronger one
+    produces a result whose ``estimator`` field is true and whose *provenance in
+    the caller's head* is false, which is the failure this project exists to
+    prevent.
+    """
+    if name in ESTIMATOR_CHOICES:
+        return ESTIMATOR_CHOICES[name]
+    if name in set(ESTIMATOR_CHOICES.values()):
+        return name
+    accepted = sorted(set(ESTIMATOR_CHOICES) | set(ESTIMATOR_CHOICES.values()))
+    raise InterpretError(
+        f"unknown estimator {name!r}; this release implements {accepted}. "
+        "Refusing to fall back to another estimator than the one requested."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -455,14 +500,27 @@ def _bh(p_values: Sequence[float]) -> list[float]:
     return q
 
 
-def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
-                     comparator_ids: Sequence[str], comparator_id: str,
-                     n_bootstrap: int, seed: int, block_size: int) -> list[FamilyEffect]:
-    """Per-family difference in mean per-peak coefficient, query minus comparator.
+def _mean_difference(query: Sequence[float], comparator: Sequence[float]) -> float:
+    """The statistic both estimator paths estimate: mean(query) - mean(comparator)."""
+    return _mean(query) - _mean(comparator)
 
-    Whole genomic blocks are the resampling unit, not peaks: peaks within a block
-    are not independent, and a peak-level bootstrap would report an interval far
-    narrower than the data support (``BA-07``, ``FP-15``).
+
+#: One family's per-peak coefficient sums, arranged by genomic block: the shared
+#: input both estimator paths read. `(query values, comparator values)` per block.
+_FamilyFrame = dict[tuple[str, int], tuple[list[float], list[float]]]
+
+
+def _effect_frame(peaks: dict[str, Peak], query_ids: Sequence[str],
+                  comparator_ids: Sequence[str]) -> tuple[
+                      list[Peak], list[Peak], list[str],
+                      dict[tuple[str, int], tuple[list[Peak], list[Peak]]],
+                      list[tuple[str, int]]]:
+    """The resampling frame shared by every estimator: peaks, families, blocks.
+
+    Built once and handed to whichever estimator runs, so that changing the
+    estimator cannot change *what is being estimated over* -- the block frame is
+    the union of blocks either side touches, and it is the same union no matter
+    which bootstrap consumes it.
     """
     q_peaks = [peaks[r] for r in dict.fromkeys(query_ids) if r in peaks and peaks[r].searched]
     c_peaks = [peaks[r] for r in dict.fromkeys(comparator_ids) if r in peaks and peaks[r].searched]
@@ -472,16 +530,56 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
             f"comparator={len(c_peaks)}"
         )
     families = sorted({fam for p in (*q_peaks, *c_peaks) for fam in p.family_coefficient_sum})
-    if not families:
-        return []
 
     by_block: dict[tuple[str, int], tuple[list[Peak], list[Peak]]] = {}
     for p in q_peaks:
         by_block.setdefault(p.block, ([], []))[0].append(p)
     for p in c_peaks:
         by_block.setdefault(p.block, ([], []))[1].append(p)
-    blocks = sorted(by_block)
+    return q_peaks, c_peaks, families, by_block, sorted(by_block)
 
+
+def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
+                     comparator_ids: Sequence[str], comparator_id: str,
+                     n_bootstrap: int, seed: int, block_size: int,
+                     estimator: str = ESTIMATOR) -> list[FamilyEffect]:
+    """Per-family difference in mean per-peak coefficient, query minus comparator.
+
+    Whole genomic blocks are the resampling unit, not peaks: peaks within a block
+    are not independent, and a peak-level bootstrap would report an interval far
+    narrower than the data support (``BA-07``, ``FP-15``). That holds on both
+    estimator paths -- what ``estimator`` selects is how the uncertainty around
+    the same point estimate is computed, never what the point estimate is:
+
+    * ``ESTIMATOR_PERCENTILE`` -- percentile block bootstrap, interval only. No
+      p or q value: the proportion of replicates crossing zero looks like a
+      two-sided p value and is not a calibrated one.
+    * ``ESTIMATOR_BCA_WILD`` -- ``FP-15``'s specified pair, licensed
+      ``INTERVAL_AND_TEST``: a BCa paired genomic-block interval and a
+      block-level wild cluster bootstrap-*t* p value, with q values by
+      Benjamini-Hochberg over the families in *this call* and no others.
+
+    An unknown ``estimator`` is refused rather than mapped onto the default.
+    """
+    estimator = _resolve_estimator(estimator)
+    q_peaks, c_peaks, families, by_block, blocks = _effect_frame(peaks, query_ids, comparator_ids)
+    if not families:
+        return []
+    if estimator == ESTIMATOR_BCA_WILD:
+        return _effects_bca_wild(
+            q_peaks, c_peaks, families, by_block, blocks, comparator_id,
+            n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)
+    return _effects_percentile(
+        q_peaks, c_peaks, families, by_block, blocks, comparator_id,
+        n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)
+
+
+def _effects_percentile(q_peaks: list[Peak], c_peaks: list[Peak], families: list[str],
+                        by_block: dict[tuple[str, int], tuple[list[Peak], list[Peak]]],
+                        blocks: list[tuple[str, int]], comparator_id: str,
+                        *, n_bootstrap: int, seed: int,
+                        block_size: int) -> list[FamilyEffect]:
+    """Percentile block bootstrap: a point estimate and an interval, and nothing else."""
     rng = random.Random(seed)
     replicates: list[list[float]] = [[] for _ in families]
     for _ in range(n_bootstrap):
@@ -496,14 +594,14 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
                 - _mean([p.family_coefficient_sum.get(fam, 0.0) for p in c_draw])
             )
 
-    # No p or q value is computed here. The proportion of bootstrap replicates
-    # crossing zero looks like a two-sided p value but is not a calibrated one
-    # (CAPABILITY is ESTIMATION_ONLY for this estimator; see schema
-    # .ESTIMATOR_CAPABILITY) -- a number that looks like a p value but is not
-    # one is worse than no number. `_bh()` is correspondingly never called: a
-    # q value derived from an invalid p value is also invalid. Both return once
-    # Task 16's wild cluster bootstrap-t -- the estimator FP-15 actually
-    # licenses for a test -- is wired in as `ESTIMATOR`.
+    # No p or q value is computed on THIS path. The proportion of bootstrap
+    # replicates crossing zero looks like a two-sided p value but is not a
+    # calibrated one (this estimator is ESTIMATION_ONLY; see
+    # schema.ESTIMATOR_CAPABILITY) -- a number that looks like a p value but is
+    # not one is worse than no number. `_bh()` is correspondingly never called
+    # here: a q value derived from an invalid p value is also invalid. Both are
+    # emitted by `_effects_bca_wild`, whose p value comes from FP-15's specified
+    # test rather than from this replicate tail.
     effects: list[FamilyEffect] = []
     for k, fam in enumerate(families):
         point = (_mean([p.family_coefficient_sum.get(fam, 0.0) for p in q_peaks])
@@ -532,8 +630,127 @@ def estimate_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
             n_bootstrap_valid=n_valid,
             block_size=block_size,
             random_seed=seed,
+            estimator=ESTIMATOR_PERCENTILE,
+            inference_capability=ESTIMATOR_CAPABILITY[
+                Estimator(ESTIMATOR_PERCENTILE)].value,
         ))
     return effects
+
+
+def _effects_bca_wild(q_peaks: list[Peak], c_peaks: list[Peak], families: list[str],
+                      by_block: dict[tuple[str, int], tuple[list[Peak], list[Peak]]],
+                      blocks: list[tuple[str, int]], comparator_id: str,
+                      *, n_bootstrap: int, seed: int,
+                      block_size: int) -> list[FamilyEffect]:
+    """``FP-15``'s specified pair: BCa block intervals and wild cluster bootstrap-*t* p.
+
+    The two halves read the *same* per-family, per-block data, in two shapes the
+    two estimators need:
+
+    * the interval half (:func:`infer.bca_paired_block_interval`) resamples whole
+      blocks and needs each block's per-peak values on each side, so it receives
+      them unreduced;
+    * the test half (:func:`infer.wild_cluster_bootstrap_t`) needs ONE scalar per
+      block, so each block is reduced to its contribution to the peak-level mean
+      difference:
+
+      ``e_g = (G / N_q) * sum_q(g) - (G / N_c) * sum_c(g)``
+
+      with ``G`` blocks and ``N_q`` / ``N_c`` searched peaks per side. That
+      scaling is not cosmetic: it makes ``mean(e_g)`` **equal to the reported
+      point estimate**, so the hypothesis the p value tests
+      (``mean(e_g) == 0``) is a hypothesis about the number beside it, rather
+      than about a differently-weighted quantity that merely resembles it. A
+      block a side never touches contributes 0 from that side and stays in the
+      frame -- dropping it would change ``G`` and silently reweight every other
+      block.
+
+    The block is the resampling unit in both halves by construction: whole
+    blocks in the BCa draw, one Rademacher weight per block in the wild
+    bootstrap. Every family in the call is given the same ``seed``, so all
+    families see the same block resampling -- the families are contrasts over
+    one substrate, not independent experiments.
+
+    Refusals, both of which are "computed from too little data" rather than
+    best-effort numbers:
+
+    * ``infer.InferError`` propagates when the block frame or the estimable
+      replicate count is below ``infer.MIN_ESTIMABLE_BLOCKS``. It is deliberately
+      not caught and re-labelled: the health floors are caller-adjustable
+      (``--floor-blocks``) and this one is not, so a caller that lowered a floor
+      must still be told the estimator refused on its own terms.
+    * ``InterpretError`` when a family's wild bootstrap leaves too few estimable
+      replicates -- constant per-block effects give a degenerate reference
+      distribution. The whole interpretation is refused rather than that one
+      family being annotated: a p value computed from nothing must not travel
+      beside the valid ones, where a reader would compare them.
+    """
+    n_q, n_c = len(q_peaks), len(c_peaks)
+    g = len(blocks)
+
+    rows: list[tuple[str, float, tuple[float, float], float, int]] = []
+    for fam in families:
+        query_values: dict[tuple[str, int], list[float]] = {}
+        comparator_values: dict[tuple[str, int], list[float]] = {}
+        block_effects: dict[tuple[str, int], float] = {}
+        for b in blocks:
+            qs, cs = by_block[b]
+            q_vals = [p.family_coefficient_sum.get(fam, 0.0) for p in qs]
+            c_vals = [p.family_coefficient_sum.get(fam, 0.0) for p in cs]
+            if q_vals:
+                query_values[b] = q_vals
+            if c_vals:
+                comparator_values[b] = c_vals
+            block_effects[b] = (g / n_q) * sum(q_vals) - (g / n_c) * sum(c_vals)
+
+        ci = infer.bca_paired_block_interval(
+            query_values, comparator_values, statistic=_mean_difference,
+            n_bootstrap=n_bootstrap, seed=seed)
+        p_value, n_valid = infer.wild_cluster_bootstrap_t(
+            block_effects, n_bootstrap=n_bootstrap, seed=seed)
+        if n_valid < infer.MIN_ESTIMABLE_BLOCKS:
+            raise InterpretError(
+                f"{fam}: the wild cluster bootstrap-t reference distribution is degenerate "
+                f"({n_valid} of {n_bootstrap} replicates estimable, below the preregistered "
+                f"floor of {infer.MIN_ESTIMABLE_BLOCKS}). The per-block effects carry no "
+                "variance to resample, so no p value is reported for any family in this "
+                "interpretation."
+            )
+        point = (_mean([p.family_coefficient_sum.get(fam, 0.0) for p in q_peaks])
+                 - _mean([p.family_coefficient_sum.get(fam, 0.0) for p in c_peaks]))
+        rows.append((fam, point, ci, p_value, n_valid))
+
+    # BH over the families tested in THIS call and no others. Reached only here:
+    # a q value is a statement about a family of hypotheses, and there is no
+    # family of hypotheses on the estimation-only path.
+    q_values = _bh([p for _, _, _, p, _ in rows])
+    capability = ESTIMATOR_CAPABILITY[Estimator(ESTIMATOR_BCA_WILD)].value
+    return [
+        FamilyEffect(
+            id=f"{fam}_vs_{comparator_id}",
+            family_id=fam,
+            comparator_id=comparator_id,
+            is_cross_condition=True,
+            effect=point,
+            ci=ci,
+            p_value=p_value,
+            q_value=q_value,
+            n_query_peaks=n_q,
+            n_comparator_peaks=n_c,
+            n_blocks=g,
+            n_bootstrap=n_bootstrap,
+            #: The wild bootstrap-t's estimable replicate count -- the one that
+            #: licenses the p value. The BCa half refuses outright below the same
+            #: floor rather than reporting a reduced count, so one number here is
+            #: not hiding a second, smaller one.
+            n_bootstrap_valid=n_valid,
+            block_size=block_size,
+            random_seed=seed,
+            estimator=ESTIMATOR_BCA_WILD,
+            inference_capability=capability,
+        )
+        for (fam, point, ci, p_value, n_valid), q_value in zip(rows, q_values, strict=True)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -596,9 +813,22 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     floors: HealthFloors | None = None,
                     block_size: int = DEFAULT_BLOCK_SIZE,
                     n_bootstrap: int = DEFAULT_BOOTSTRAP,
-                    seed: int = 0) -> Interpretation:
-    """Answer one peak-set query at the strength its selection provenance licenses."""
+                    seed: int = 0,
+                    estimator: str = ESTIMATOR) -> Interpretation:
+    """Answer one peak-set query at the strength its selection provenance licenses.
+
+    ``estimator`` selects how uncertainty is computed (``ESTIMATOR_CHOICES``) and
+    therefore what the result is licensed to carry: the default percentile block
+    bootstrap is ``ESTIMATION_ONLY`` and withholds p and q values, while
+    ``ESTIMATOR_BCA_WILD`` is ``INTERVAL_AND_TEST`` and emits them. It is
+    resolved before anything is computed, so an unrecognised name costs nothing
+    and never silently runs a different estimator.
+    """
     floors = floors or HealthFloors()
+    # Resolved first: a refusal that depends on no data should not wait behind a
+    # bootstrap, and every downstream capability decision reads this one value.
+    estimator = _resolve_estimator(estimator)
+    capability = ESTIMATOR_CAPABILITY[Estimator(estimator)]
     substrate_ids = {h.substrate_id for h in hits}
     if MISSING_SENTINEL in substrate_ids:
         raise InterpretError("interpretation has records without a substrate_id")
@@ -705,20 +935,32 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
             else:
                 effects = [asdict(e) for e in estimate_effects(
                     peaks, region_ids, comparator_ids, query.comparator_id,
-                    n_bootstrap=n_bootstrap, seed=seed, block_size=block_size)]
+                    n_bootstrap=n_bootstrap, seed=seed, block_size=block_size,
+                    estimator=estimator)]
                 emitted.append("effects")
                 guards.comparator_declared(effects).raise_if_failed()
-                if effects and CAPABILITY is InferenceCapability.ESTIMATION_ONLY:
-                    # Once per interpretation, not once per family: the withheld
-                    # p/q values are a property of the estimator this run used,
-                    # not of any one effect. `effects` can legally be `[]` (query
-                    # and comparator share no family at all), and the note is
-                    # about a limitation of effects that exist -- with none, it
-                    # has nothing to describe and must not fire.
+                # Once per interpretation, not once per family: which estimator
+                # ran, and what it therefore may emit, is a property of the run.
+                # `effects` can legally be `[]` (query and comparator share no
+                # family at all), and both notes describe effects that exist --
+                # with none, they have nothing to describe and must not fire.
+                if effects and capability is InferenceCapability.ESTIMATION_ONLY:
                     notes.append(
                         "The implemented percentile block bootstrap supports estimation only. "
                         "Hypothesis-test p and q values are withheld until the preregistered "
                         "wild cluster bootstrap-t estimator is used."
+                    )
+                elif effects:
+                    # Names BOTH halves: the result's `estimator` field records
+                    # the test, because that is the half whose absence a reader
+                    # must not assume away, and the interval half would otherwise
+                    # be invisible in the record.
+                    notes.append(
+                        "Intervals are BCa paired genomic-block bootstrap intervals and p "
+                        "values are block-level wild cluster bootstrap-t values (FP-15's "
+                        "specified pair, licensed INTERVAL_AND_TEST). q values are "
+                        "Benjamini-Hochberg over the families in this interpretation and no "
+                        "others."
                     )
         else:
             notes.append(
@@ -749,6 +991,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         input_scale=hits[0].input_scale,
         lexicon_id=hits[0].lexicon_id,
         substrate_id=substrate_id,
+        estimator=estimator,
         health=query_health,   # deprecated alias of query_health; see docs/DATA_MODEL.md
     )
 

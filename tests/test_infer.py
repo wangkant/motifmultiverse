@@ -1,10 +1,11 @@
-"""Tests for the BCa paired block bootstrap interval (`FP-15`, Task 15/Increment D).
+"""Tests for the BCa paired block bootstrap interval (`FP-15`, Task 15/Increment D)
+and the block-level wild cluster bootstrap-*t* p-value (`FP-15`, Task 16).
 
 Task 3 removed the percentile block bootstrap's p/q values because a percentile
-bootstrap cannot license a hypothesis test. This module builds the interval that
+bootstrap cannot license a hypothesis test. Task 15 built the interval that
 legitimately can: the BCa (bias-corrected and accelerated) paired block bootstrap.
-Task 16 later adds the wild cluster bootstrap-*t* p-value; only once both exist may
-a result carry `InferenceCapability.INTERVAL_AND_TEST`.
+Task 16 adds the wild cluster bootstrap-*t* p-value; only a result produced by both
+may carry `InferenceCapability.INTERVAL_AND_TEST`.
 
 The single most important correctness property under test: **the resampling AND
 jackknife unit is the genomic block, never the peak.** Peaks within a block are
@@ -17,9 +18,16 @@ from __future__ import annotations
 import math
 import random
 
+import numpy as np
 import pytest
 
-from motifmultiverse.infer import MIN_ESTIMABLE_BLOCKS, InferError, bca_paired_block_interval
+from motifmultiverse import infer
+from motifmultiverse.infer import (
+    MIN_ESTIMABLE_BLOCKS,
+    InferError,
+    bca_paired_block_interval,
+    wild_cluster_bootstrap_t,
+)
 
 
 def _mean_diff(q, c):
@@ -346,3 +354,284 @@ def test_bca_zero_variance_returns_a_finite_degenerate_interval_never_nan():
     assert math.isfinite(lo)
     assert math.isfinite(hi)
     assert lo == hi == pytest.approx(2.0)
+
+
+# --------------------------------------------------------------------------- #
+# Task 16: block-level wild cluster bootstrap-t (`FP-15`'s specified p value)  #
+# --------------------------------------------------------------------------- #
+def _effects_dict(values, offset=0):
+    """A block_effects mapping keyed (chrom, block_index) from a flat value list."""
+    return {("chr1", offset + i): float(v) for i, v in enumerate(values)}
+
+
+def _loop_reference_wct(values, null_value, n_bootstrap, seed):
+    """An INDEPENDENT re-implementation of the specified estimator, written as
+    plain-Python per-replicate loops (no numpy vectorisation, no chunking) so that
+    a defect in the shipped vectorised path cannot be mirrored here by
+    construction. It shares only the RNG protocol (numpy default_rng consuming
+    `integers(0, 2, size=G, dtype=int8)` per replicate, which the implementation's
+    chunked matrix draws reproduce exactly by sequential bit-stream consumption --
+    dtype matters: int8 and the int64 default consume the stream differently) and
+    the preregistered formula `p = (extreme + 1) / (B + 1)`.
+    """
+    g = len(values)
+    mean = sum(values) / g
+    var = sum((v - mean) ** 2 for v in values) / (g - 1)
+    se = math.sqrt(var / g)
+    t_obs = (mean - null_value) / se
+    centered = [v - mean for v in values]
+    rng = np.random.default_rng(seed)
+    extreme = 0
+    n_valid = 0
+    for _ in range(n_bootstrap):
+        w = rng.integers(0, 2, size=g, dtype=np.int8) * 2 - 1
+        y = [int(wi) * ei for wi, ei in zip(w, centered, strict=True)]
+        if all(v == y[0] for v in y):
+            continue  # degenerate: structurally zero-variance replicate
+        n_valid += 1
+        m = sum(y) / g
+        s2 = sum((v - m) ** 2 for v in y) / (g - 1)
+        t = m / math.sqrt(s2 / g)
+        if abs(t) >= abs(t_obs):
+            extreme += 1
+    return (extreme + 1) / (n_bootstrap + 1), n_valid
+
+
+def test_wct_same_input_and_seed_gives_byte_identical_p_value():
+    values = [0.13 * (i % 7) - 0.02 * i for i in range(40)]
+    effects = _effects_dict(values)
+    p1, n1 = wild_cluster_bootstrap_t(effects, n_bootstrap=999, seed=11)
+    p2, n2 = wild_cluster_bootstrap_t(effects, n_bootstrap=999, seed=11)
+    assert p1 == p2  # byte-identical, not merely close
+    assert n1 == n2
+
+
+def test_wct_seed_actually_drives_the_resampling():
+    """Sanity twin of the identity test, made non-vacuous: a single seed pair
+    could coincide legitimately (the p-value's resolution is 1/(B+1)), but ten
+    seeds all returning the same p-value means the seed is not driving anything.
+    """
+    values = [0.13 * (i % 7) - 0.02 * i for i in range(40)]
+    effects = _effects_dict(values)
+    ps = {wild_cluster_bootstrap_t(effects, n_bootstrap=999, seed=s)[0] for s in range(10)}
+    assert len(ps) >= 2
+
+
+def test_wct_block_key_insertion_order_never_changes_the_result():
+    """ROW-ORDER INVARIANCE (the Task 15 lesson): dict insertion order must not be
+    observable. IEEE-754 summation is non-associative, so the implementation must
+    sort by block key before any summation or weight assignment.
+    """
+    n = 40
+    values = [0.13 * (i % 7) - 0.02 * i for i in range(n)]
+    forward = {("chr1", i): values[i] for i in range(n)}
+    reversed_order = {("chr1", i): values[i] for i in reversed(range(n))}
+    shuffled = dict(random.Random(5).sample(list(forward.items()), n))
+    assert list(forward) != list(reversed_order) != list(shuffled)  # really permuted
+
+    p_fwd = wild_cluster_bootstrap_t(forward, n_bootstrap=999, seed=3)
+    assert wild_cluster_bootstrap_t(reversed_order, n_bootstrap=999, seed=3) == p_fwd
+    assert wild_cluster_bootstrap_t(shuffled, n_bootstrap=999, seed=3) == p_fwd
+
+
+def test_wct_null_p_values_do_not_collapse_to_the_resolution_floor():
+    """Step 1 calibration: across five FIXED null datasets (mean exactly 0 by
+    symmetric construction), the bootstrap-t p-value must not sit at the
+    resolution floor 1/(B+1) systematically -- a collapse there is the signature
+    of a test that rejects everything (or of a degenerate reference
+    distribution), not of a calibrated one.
+    """
+    n_bootstrap, seed = 999, 777
+    floor = 1.0 / (n_bootstrap + 1)
+    ps = []
+    for data_seed in (11, 22, 33, 44, 55):
+        half = np.random.default_rng(data_seed).normal(0.0, 1.0, size=30)
+        # symmetric pairs -> the dataset mean is exactly 0.0, a true null
+        values = np.concatenate([half, -half])
+        p, n_valid = wild_cluster_bootstrap_t(
+            _effects_dict(values), n_bootstrap=n_bootstrap, seed=seed)
+        assert n_valid == n_bootstrap  # non-degenerate data: nothing skipped
+        ps.append(p)
+    assert sum(p > floor for p in ps) >= 4, ps
+    assert sum(p > 0.05 for p in ps) >= 4, ps
+
+
+def test_wct_planted_effect_yields_the_resolution_floor():
+    """A planted effect this large (t_obs ~= 38) is structurally incapable of
+    producing a non-floor p-value under a correct implementation: no null-world
+    replicate can reach it. Equally, under the null this p == floor event has
+    probability ~1/(B+1), so the assertion discriminates the two worlds.
+    """
+    rng = np.random.default_rng(4)
+    values = 3.0 + 0.5 * rng.normal(0.0, 1.0, size=40)
+    n_bootstrap = 999
+    p, n_valid = wild_cluster_bootstrap_t(
+        _effects_dict(values), n_bootstrap=n_bootstrap, seed=9)
+    assert p == 1.0 / (n_bootstrap + 1)
+    assert n_valid == n_bootstrap
+
+
+def test_wct_planted_null_yields_a_non_small_p():
+    """The mirror fixture: a symmetric null dataset whose mean is exactly 0, so
+    t_obs = 0 and every valid replicate counts as extreme -> p == 1.0 exactly.
+    """
+    half = np.random.default_rng(8).normal(0.0, 1.0, size=25)
+    values = np.concatenate([half, -half])
+    p, n_valid = wild_cluster_bootstrap_t(_effects_dict(values), n_bootstrap=999, seed=13)
+    assert p == 1.0
+    assert n_valid == 999
+
+
+def test_wct_null_imposition_makes_p_reflection_invariant_about_the_null():
+    """THE executable claim of null-imposition. With the null correctly imposed
+    (bootstrap world centred at the null), reflecting the data about
+    `null_value` negates every centred effect; Rademacher weights are
+    sign-symmetric, so the |t*| reference set is bit-identical and the two-sided
+    p-value is byte-identical. An implementation that forgets to centre the
+    block effects (uses raw x in the replicates) breaks this reflection
+    invariance: `2*null - x` is not `-(x)` unless null == 0. The fixture is
+    placed at t_obs ~= 1.5 so the p-value is mid-range and the equality cannot
+    be satisfied trivially by both sides landing on the floor or on 1.0.
+    """
+    null_value = 0.7
+    rng = np.random.default_rng(21)
+    values = rng.normal(0.0, 1.0, size=40)
+    values = values - values.mean()
+    se = values.std(ddof=1) / math.sqrt(len(values))
+    values = values + null_value + 1.5 * se  # t_obs ~= 1.5, mid-range p
+
+    p_fwd, _ = wild_cluster_bootstrap_t(
+        _effects_dict(values), null_value=null_value, n_bootstrap=1999, seed=17)
+    p_ref, _ = wild_cluster_bootstrap_t(
+        _effects_dict(2 * null_value - values), null_value=null_value,
+        n_bootstrap=1999, seed=17)
+    assert 0.01 < p_fwd < 0.9  # mid-range: the equality below is not vacuous
+    assert p_fwd == p_ref
+
+
+def test_wct_studentised_statistic_matches_independent_loop_reference():
+    """The implementation divides by a standard error computed WITHIN each
+    replicate. On this heterogeneous fixture (39 small blocks plus one dominant
+    outlier block) replicate SEs vary enormously, so a non-studentised wild
+    bootstrap (extreme count over the raw replicate means) lands far away --
+    the in-test gap assertion proves the fixture actually separates the two
+    estimators, and the reference-agreement assertion proves the implementation
+    is the studentised one.
+    """
+    rng = np.random.default_rng(6)
+    values = rng.normal(0.0, 0.02, size=40)
+    values[17] = 8.0
+    n_bootstrap, seed = 999, 23
+
+    p_impl, n_valid_impl = wild_cluster_bootstrap_t(
+        _effects_dict(values), n_bootstrap=n_bootstrap, seed=seed)
+    p_ref, n_valid_ref = _loop_reference_wct(
+        [float(v) for v in values], 0.0, n_bootstrap, seed)
+    assert n_valid_impl == n_valid_ref
+    # ULP-level slack only: the two implementations sum in different orders.
+    assert abs(p_impl - p_ref) <= 2.0 / (n_bootstrap + 1)
+
+    # Foil: the NON-studentised variant (same null-imposed replicates, but the
+    # extreme count compares raw replicate means, never divided by a replicate
+    # SE). On this fixture it must sit far from the studentised answer -- this
+    # is what makes the agreement assertion above a test of studentisation
+    # rather than of "some bootstrap".
+    g = len(values)
+    mean = sum(values) / g
+    centered = [float(v) - mean for v in values]
+    rng_foil = np.random.default_rng(seed)
+    extreme_raw = 0
+    for _ in range(n_bootstrap):
+        w = rng_foil.integers(0, 2, size=g, dtype=np.int8) * 2 - 1
+        y = [int(wi) * ei for wi, ei in zip(w, centered, strict=True)]
+        if abs(sum(y) / g) >= abs(mean):
+            extreme_raw += 1
+    p_raw = (extreme_raw + 1) / (n_bootstrap + 1)
+    assert abs(p_impl - p_raw) > 10.0 / (n_bootstrap + 1), (p_impl, p_raw)
+
+
+def test_wct_agrees_with_scipy_t_test_on_a_gaussian_null_within_a_wide_band():
+    """Independent-machinery calibration anchor: for iid Gaussian block effects
+    at G=200, the bootstrap-t p-value must agree with the exact Student-t test
+    (scipy's t CDF -- machinery this implementation does not share) well inside
+    a wide band. The observed statistic is pinned at t_obs = 1.0 by shifting the
+    data (which leaves the SE untouched), so the comparison sits mid-range where
+    a disagreement is visible, not at the floor.
+    """
+    from scipy import stats
+
+    g = 200
+    rng = np.random.default_rng(31)
+    values = rng.normal(0.0, 1.0, size=g)
+    values = values - values.mean()
+    se = values.std(ddof=1) / math.sqrt(g)
+    values = values + 1.0 * se  # t_obs == 1.0 up to float dust
+
+    p, n_valid = wild_cluster_bootstrap_t(
+        _effects_dict(values), n_bootstrap=9999, seed=29)
+    assert n_valid == 9999
+    p_t = 2.0 * stats.t.sf(1.0, df=g - 1)
+    assert abs(p - p_t) <= 0.05
+
+
+def test_wct_chunk_size_cannot_change_the_result(monkeypatch):
+    """The weight matrix is drawn in chunks for memory reasons; chunk boundaries
+    must be invisible because the bit stream is consumed sequentially. A future
+    'optimisation' that reseeds per chunk breaks this immediately.
+    """
+    values = list(np.random.default_rng(2).normal(0.0, 1.0, size=60))
+    effects = _effects_dict(values)
+    p_big = wild_cluster_bootstrap_t(effects, n_bootstrap=500, seed=41)
+    monkeypatch.setattr(infer, "_MAX_WEIGHTS_PER_CHUNK", 7)
+    p_small = wild_cluster_bootstrap_t(effects, n_bootstrap=500, seed=41)
+    assert p_big == p_small
+
+
+def test_wct_rejects_fewer_than_the_preregistered_minimum_blocks():
+    n = MIN_ESTIMABLE_BLOCKS - 1
+    with pytest.raises(InferError, match="below the preregistered floor"):
+        wild_cluster_bootstrap_t(_effects_dict(range(n)), n_bootstrap=200, seed=0)
+
+
+def test_wct_accepts_exactly_the_preregistered_minimum_blocks():
+    values = [0.05 * (i % 4) for i in range(MIN_ESTIMABLE_BLOCKS)]
+    p, n_valid = wild_cluster_bootstrap_t(_effects_dict(values), n_bootstrap=200, seed=0)
+    assert 0.0 < p <= 1.0
+
+
+def test_wct_refuses_non_finite_inputs():
+    base = _effects_dict([0.1 * i for i in range(MIN_ESTIMABLE_BLOCKS)])
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        corrupted = dict(base)
+        corrupted[("chr1", 3)] = bad
+        with pytest.raises(InferError, match="non-finite"):
+            wild_cluster_bootstrap_t(corrupted, n_bootstrap=200, seed=0)
+    for bad_null in (float("nan"), float("inf")):
+        with pytest.raises(InferError, match="non-finite"):
+            wild_cluster_bootstrap_t(base, null_value=bad_null, n_bootstrap=200, seed=0)
+
+
+def test_wct_refuses_a_nonpositive_bootstrap_count():
+    with pytest.raises(InferError, match="n_bootstrap"):
+        wild_cluster_bootstrap_t(
+            _effects_dict(range(MIN_ESTIMABLE_BLOCKS)), n_bootstrap=0, seed=0)
+
+
+def test_wct_zero_variance_data_is_defined_explicitly_never_nan():
+    """Constant block effects make every replicate degenerate. On the null (the
+    constant equals null_value) the data carry no evidence against it BY
+    CONSTRUCTION, so p == 1.0; off the null the constant contradicts it in every
+    block and the smallest reportable value is the resolution floor. Both return
+    n_valid_replicates == 0 so a caller can floor the estimable-replicate count.
+    """
+    on_null = _effects_dict([0.7] * MIN_ESTIMABLE_BLOCKS)
+    p, n_valid = wild_cluster_bootstrap_t(
+        on_null, null_value=0.7, n_bootstrap=500, seed=0)
+    assert p == 1.0
+    assert n_valid == 0
+
+    off_null = _effects_dict([0.7] * MIN_ESTIMABLE_BLOCKS)
+    p, n_valid = wild_cluster_bootstrap_t(
+        off_null, null_value=0.0, n_bootstrap=500, seed=0)
+    assert p == 1.0 / 501
+    assert n_valid == 0

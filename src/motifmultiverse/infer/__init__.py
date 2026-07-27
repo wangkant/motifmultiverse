@@ -3,16 +3,16 @@
 `bca_paired_block_interval` is `FP-15`'s specified interval estimator
 (`docs/ROADMAP.md` M4a, `docs/CONSTRAINTS.md` FP-15): a bias-corrected and
 accelerated (BCa) bootstrap over whole genomic blocks, paired across a query and
-a comparator peak set. It replaces the percentile block bootstrap that
-`interpret` currently ships (`interpret.estimate_effects`) wherever a caller is
-ready to license the stronger estimator; wiring it into that pipeline, and the
-block-level wild cluster bootstrap-*t* p-value that would then let a result
-carry `schema.InferenceCapability.INTERVAL_AND_TEST`, are later tasks (`FP-15`'s
-"done when" in `docs/ROADMAP.md` needs both estimators before
-`schema.IMPLEMENTED_ESTIMATORS` changes; see that file's M4a section).
+a comparator peak set. `wild_cluster_bootstrap_t` is `FP-15`'s specified p value:
+a block-level wild cluster bootstrap-t over per-block scalar effects, with the
+null imposed by centering. Together they are the two halves a result needs to
+carry `schema.InferenceCapability.INTERVAL_AND_TEST`; `interpret` wires them in
+behind its `bca-wild-cluster` estimator selection. (`FP-15`'s "done when" in
+`docs/ROADMAP.md` additionally needs `schema.IMPLEMENTED_ESTIMATORS` updated;
+schema is outside this change's scope.)
 
 The rest of this module -- `run` -- is still the pre-alpha skeleton described
-below and in the README; it is unrelated to `bca_paired_block_interval` and is
+below and in the README; it is unrelated to the two estimators above and is
 untouched by this change.
 """
 from __future__ import annotations
@@ -22,9 +22,14 @@ import random
 from collections.abc import Callable, Mapping, Sequence
 from statistics import NormalDist
 
+import numpy as np
+
 from motifmultiverse.schema import HealthFloors
 
-__all__ = ["run", "InferError", "bca_paired_block_interval", "MIN_ESTIMABLE_BLOCKS"]
+__all__ = [
+    "run", "InferError", "bca_paired_block_interval", "wild_cluster_bootstrap_t",
+    "MIN_ESTIMABLE_BLOCKS",
+]
 
 #: The block is the estimability unit everywhere else in this project
 #: (`schema.HealthFloors.min_blocks`, `interpret.health_report`): for a clustered
@@ -255,6 +260,166 @@ def bca_paired_block_interval(
     lo = _quantile_linear(replicates, p_lo)
     hi = _quantile_linear(replicates, p_hi)
     return (lo, hi)
+
+
+#: Upper bound on Rademacher weights drawn per chunk inside
+#: `wild_cluster_bootstrap_t` (a chunk is a `(n, G)` int8 matrix; the bound keeps
+#: the float64 working set beside it modest for genome-scale block counts).
+#: Chunk boundaries are unobservable in the result: the bit stream is consumed
+#: sequentially, so chunking changes nothing but peak memory
+#: (`test_wct_chunk_size_cannot_change_the_result` makes that an executable
+#: claim by monkeypatching this constant).
+_MAX_WEIGHTS_PER_CHUNK = 8_000_000
+
+
+def wild_cluster_bootstrap_t(
+    block_effects: Mapping[Block, float],
+    *,
+    null_value: float = 0.0,
+    n_bootstrap: int,
+    seed: int,
+) -> tuple[float, int]:
+    """A block-level wild cluster bootstrap-*t* p-value (`FP-15`'s specified test).
+
+    `block_effects` maps a genomic block (`chrom`, `start // block_size`, e.g.
+    `schema.HitRecord.block`) to ONE scalar effect observed in that block, and
+    tests H0: the across-block mean effect equals `null_value` (two-sided).
+    Because the input is already block-level, the block is the resampling unit
+    *by construction*: each replicate draws one Rademacher `-1`/`+1` weight per
+    BLOCK, never per observation -- there are no observations below block level
+    for this function to mistakenly treat as independent.
+
+    The estimator, pinned down so a reader does not have to reverse-engineer it:
+
+    * **Observed statistic.** `t_obs = (mean(x) - null_value) / se(x)` with
+      `se(x) = sqrt(s^2(x) / G)`, `s^2` the Bessel-corrected (`ddof=1`) sample
+      variance across the `G` blocks. The associated degrees of freedom are
+      `G - 1`; they enter ONLY through that `ddof=1` -- the Student-t CDF is
+      never consulted, because the bootstrap replicates ARE the reference
+      distribution (a Gaussian-data cross-check against `scipy.stats.t` lives in
+      `test_wct_agrees_with_scipy_t_test_on_a_gaussian_null_within_a_wide_band`).
+    * **Null-imposed.** The replicate world is centred under the null:
+      `e_g = x_g - mean(x)`, so the bootstrap data-generating process has mean
+      0 -- the null, in null-centred coordinates -- no matter how far the
+      observed mean sits from `null_value`. Reflecting the data about
+      `null_value` therefore negates every replicate statistic and leaves the
+      two-sided p-value byte-identical
+      (`test_wct_null_imposition_makes_p_reflection_invariant_about_the_null`).
+    * **Studentized replicates.** Each replicate recomputes its own standard
+      error: `t* = mean(w * e) / se(w * e)`, with `se` defined exactly as for
+      the observed statistic. Dividing by a within-replicate SE (rather than
+      comparing raw replicate means) is what makes this a bootstrap-*t*; on
+      heterogeneous block effects the two procedures disagree materially
+      (`test_wct_studentised_statistic_matches_independent_loop_reference`).
+    * **Two-sided finite-sample p.** `p = (extreme + 1) / (B + 1)` with
+      `B = n_bootstrap` and `extreme = #{|t*| >= |t_obs|}`; a tie counts as
+      extreme, the conservative convention. A skipped (degenerate) replicate
+      leaves the denominator at `B + 1` exactly as preregistered.
+    * **Degenerate replicates.** A replicate whose weighted effects are all
+      identical (zero variance -- tested structurally, since a computed variance
+      of identical values is not guaranteed to be exactly 0.0 in floating point)
+      has an undefined `t*`. Such replicates are SKIPPED: never counted as
+      extreme, and excluded from the returned `n_valid_replicates`, so a caller
+      can floor the estimable-replicate count (`interpret` refuses below
+      `MIN_ESTIMABLE_BLOCKS`). Mid-stream degeneracy requires astronomically
+      unlikely weight patterns at `G >= MIN_ESTIMABLE_BLOCKS`; the reachable
+      case is constant INPUT, defined explicitly above: if the constant equals
+      `null_value` the data sit exactly on the null and there is no evidence
+      against it by construction -- return `(1.0, 0)`; otherwise the constant
+      effect contradicts the null in every block and the smallest reportable
+      value is returned, `(1 / (B + 1), 0)` (conservative relative to the
+      sign-test-style exact value `2^(1-G)`).
+
+    Determinism and row-order invariance: block keys are sorted before any
+    summation and weights are drawn in that sorted order from
+    `numpy.random.default_rng(seed)` (never global RNG), so the result depends
+    only on the mapping's content -- IEEE-754 summation is non-associative and
+    dict insertion order must not leak in (the Task 15 lesson; the permutation
+    test is `test_wct_block_key_insertion_order_never_changes_the_result`).
+
+    Returns `(p_value, n_valid_replicates)`. Raises `InferError` if fewer than
+    `MIN_ESTIMABLE_BLOCKS` blocks are supplied, if any block effect or
+    `null_value` is NaN/Inf (a non-finite input must become a refusal, never a
+    silently contaminated p-value), or if `n_bootstrap < 1`.
+    """
+    if n_bootstrap < 1:
+        raise InferError(f"n_bootstrap must be >= 1, got {n_bootstrap}")
+    if not math.isfinite(null_value):
+        raise InferError(f"null_value must be finite, got non-finite {null_value!r}")
+
+    # Sort by block key BEFORE anything sums or assigns a weight: iteration
+    # order of the Mapping must never be observable.
+    items = sorted(block_effects.items())
+    if len(items) < MIN_ESTIMABLE_BLOCKS:
+        raise InferError(
+            f"{len(items)} genomic block(s) is below the preregistered floor of "
+            f"{MIN_ESTIMABLE_BLOCKS} (schema.HealthFloors.min_blocks); refusing to "
+            "report a p value computed from too little data."
+        )
+    x = np.array([v for _, v in items], dtype=np.float64)
+    if not np.all(np.isfinite(x)):
+        raise InferError(
+            "block_effects contains a non-finite value (NaN or Inf); refusing to "
+            "report a p value computed from non-finite data."
+        )
+
+    g = len(items)
+
+    if bool(np.all(x == x[0])):
+        # Bitwise-constant input. This is checked STRUCTURALLY, before any SE is
+        # computed: the variance of identical values is not guaranteed to be 0.0
+        # in floating point (the computed mean can differ from every value by 1
+        # ULP, leaving dust-level deviations), and comparing that computed mean
+        # against `null_value` misfires the same way -- so the constant itself
+        # is what is compared. Every centered effect is then 0 and every
+        # replicate degenerate, so n_valid_replicates is honestly 0, and the
+        # p-value is defined by which side of the null the constant sits on (see
+        # the docstring).
+        if float(x[0]) == null_value:
+            return (1.0, 0)
+        return (1.0 / (n_bootstrap + 1), 0)
+
+    mean = float(x.mean())
+    var = float(x.var(ddof=1))
+    se_obs = math.sqrt(var / g)
+    if se_obs == 0.0:
+        # Variance underflowed to zero although the values are not bitwise
+        # identical: at float64 resolution the data are constant. The replicate
+        # world is degenerate at that resolution (n_valid honestly 0); a zero
+        # numerator over a zero SE sits exactly on the null, a nonzero one is an
+        # unboundedly large |t_obs| no replicate can match.
+        if mean == null_value:
+            return (1.0, 0)
+        return (1.0 / (n_bootstrap + 1), 0)
+
+    t_obs = (mean - null_value) / se_obs
+    abs_t_obs = abs(t_obs)
+    centered = x - mean  # the null-imposed replicate world
+
+    rng = np.random.default_rng(seed)
+    sqrt_g = math.sqrt(g)
+    chunk = max(1, min(n_bootstrap, _MAX_WEIGHTS_PER_CHUNK // g))
+    extreme = 0
+    n_valid = 0
+    remaining = n_bootstrap
+    while remaining > 0:
+        n = min(chunk, remaining)
+        remaining -= n
+        # int8 keeps the draw small; the float64 product below is the working set.
+        weights = rng.integers(0, 2, size=(n, g), dtype=np.int8) * 2 - 1
+        boot = weights.astype(np.float64) * centered
+        # Degenerate == every weighted effect bitwise identical (the structural
+        # zero-variance condition; see the docstring).
+        valid = ~(boot == boot[:, :1]).all(axis=1)
+        n_valid += int(valid.sum())
+        if valid.any():
+            bmean = boot[valid].mean(axis=1)
+            bsd = boot[valid].std(axis=1, ddof=1)
+            t_boot = bmean / (bsd / sqrt_g)
+            extreme += int((np.abs(t_boot) >= abs_t_obs).sum())
+
+    p_value = (extreme + 1) / (n_bootstrap + 1)
+    return (p_value, n_valid)
 
 
 def run(*args, **kwargs):

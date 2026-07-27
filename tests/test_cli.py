@@ -576,3 +576,93 @@ def test_provenance_records_no_username_or_hostname(tmp_path):
     blob = (out / "provenance.json").read_text()
     assert getpass.getuser() not in blob
     assert socket.gethostname() not in blob
+
+
+# --------------------------------------------------------------------------- #
+# Task 16: the --estimator flag (`percentile` default; `bca-wild-cluster`)     #
+# --------------------------------------------------------------------------- #
+def _wild_substrate(tmp_path, n_blocks=32):
+    """A varying-coefficient substrate >= the estimability floor.
+
+    `_tiny_substrate` cannot exercise the bca-wild-cluster path: its 6 blocks
+    are below MIN_ESTIMABLE_BLOCKS and its constant per-side coefficients would
+    make the wild bootstrap-t's observed SE exactly 0 (a refusal, correctly).
+    Here query coefficients vary with the block (1.0/1.3/1.6 cycling) so the
+    per-block effects have real variance; the planted effect is 0.9.
+    """
+    from motifmultiverse.schema import HIT_TABLE_COLUMNS
+    lines = ["\t".join(HIT_TABLE_COLUMNS)]
+    query, comparator = [], []
+    for b in range(n_blocks):
+        for i in (0, 1):
+            rid = f"r{b}_{i}"
+            (query if i == 0 else comparator).append(rid)
+            start = b * 1_000_000 + i * 1000
+            coeff = 1.0 + (b % 3) * 0.3 if i == 0 else 0.4
+            lines.append("\t".join([rid, "chr1", str(start), str(start + 500),
+                                    f"UA_FAMA_{i}", "FAM_A", str(coeff), "used",
+                                    "9999", "lex_v1", "e" * 64]))
+    hits = tmp_path / "hits.tsv"
+    hits.write_text("\n".join(lines) + "\n")
+    (tmp_path / "q.txt").write_text("\n".join(query) + "\n")
+    (tmp_path / "c.txt").write_text("\n".join(comparator) + "\n")
+    return hits, tmp_path / "q.txt", tmp_path / "c.txt"
+
+
+def test_interpret_estimator_defaults_to_percentile_and_withholds_p_q(tmp_path):
+    hits, q, c = _wild_substrate(tmp_path)
+    out = tmp_path / "o"
+    rc = main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+               "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+               "--bootstrap", "50", "--seed", "1", "--out", str(out), *_floors(32)])
+    assert rc == 0
+    blob = json.loads((out / "interpretation.json").read_text())
+    assert blob["estimator"] == "percentile_block_bootstrap"
+    effect = blob["effects"][0]
+    assert effect["estimator"] == "percentile_block_bootstrap"
+    assert effect["inference_capability"] == "ESTIMATION_ONLY"
+    assert effect["p_value"] is None and effect["q_value"] is None
+
+
+def test_interpret_estimator_bca_wild_cluster_emits_p_and_q(tmp_path):
+    hits, q, c = _wild_substrate(tmp_path)
+    out = tmp_path / "o"
+    rc = main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+               "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+               "--estimator", "bca-wild-cluster",
+               "--bootstrap", "100", "--seed", "1", "--out", str(out), *_floors(32)])
+    assert rc == 0
+    blob = json.loads((out / "interpretation.json").read_text())
+    assert blob["estimator"] == "wild_cluster_bootstrap_t"
+    effect = blob["effects"][0]
+    assert effect["estimator"] == "wild_cluster_bootstrap_t"
+    assert effect["inference_capability"] == "INTERVAL_AND_TEST"
+    # Planted effect 0.9 with t_obs ~= 17: the p-value sits at the resolution
+    # floor, and with a single family BH is the identity (q == p).
+    assert effect["p_value"] == 1.0 / 101
+    assert effect["q_value"] == effect["p_value"]
+    assert effect["n_bootstrap_valid"] == 100
+    lo, hi = effect["ci"]
+    assert lo > 0.0 and hi > lo
+
+
+def test_interpret_estimator_bca_wild_cluster_refuses_below_the_estimability_floor(tmp_path, capsys):
+    """A lowered --floor-blocks passes health but cannot lower infer's floor."""
+    hits, q, c = _wild_substrate(tmp_path, n_blocks=12)
+    out = tmp_path / "o"
+    rc = main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+               "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+               "--estimator", "bca-wild-cluster", "--bootstrap", "50",
+               "--out", str(out), *_floors(10)])
+    assert rc == 4
+    assert "below the preregistered floor" in capsys.readouterr().err
+    assert not (out / "interpretation.json").exists()
+
+
+def test_interpret_estimator_rejects_an_unknown_choice(tmp_path):
+    hits, q, c = _wild_substrate(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+              "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+              "--estimator", "bogus", "--out", str(tmp_path / "o"), *_floors(32)])
+    assert exc.value.code == 2

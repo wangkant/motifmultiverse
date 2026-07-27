@@ -14,4 +14,13 @@ The hit caller is not input-scale invariant: the same regions produced different
 
 ---
 
-Status: **skeleton**. The body raises `NotImplementedError`. See `docs/ROADMAP.md`.
+Status: **partial**. `FP-15`'s two specified estimators are implemented and tested —
+`bca_paired_block_interval` (BCa paired genomic-block interval) and
+`wild_cluster_bootstrap_t` (block-level wild cluster bootstrap-*t* *p* value); the
+block, never the peak, is the resampling and jackknife unit in both. `interpret
+--estimator bca-wild-cluster` runs them as one `INTERVAL_AND_TEST` path, while the
+default estimator stays the conservative `ESTIMATION_ONLY` percentile bootstrap.
+
+`run` — the module's own pipeline entry point — is still a skeleton and raises
+`NotImplementedError`. See `docs/ROADMAP.md` (M4a done; the `infer` subcommand is
+wired in Task 18).
