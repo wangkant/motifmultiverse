@@ -187,6 +187,39 @@ set.
 (`blob["health"]`) — so existing readers keyed on the old, single ambiguous `health` field do
 not break. It will be removed in a later release; new readers should use `query_health`.
 
+### `effects` and `two_part_effects` answer different questions about the same peaks
+
+`effects` carries one number per family: the difference in mean per-peak coefficient, with
+whatever uncertainty the selected `estimator` licenses. That number is a *product* of two
+things which can move in opposite directions — how **often** a family is used, and how
+**intensely** it is used where it is used — so a family used twice as often and half as
+strongly as its comparator has an effect of approximately zero, and reports it as though
+nothing were happening.
+
+`two_part_effects` (`infer.TwoPartEffect`) splits that product, over measured peaks only:
+
+| field | what it reports |
+|---|---|
+| `probability_effect` | occupancy: `P(used \| query) − P(used \| comparator)`, read from `Peak.family_hit_count` |
+| `conditional_intensity_effect` | intensity **given use**: `E[mass \| used, query] − E[mass \| used, comparator]`, read from `Peak.family_coefficient_sum`. `null` — never `0.0` — when a side never uses the family, because a mean over an empty set has no value |
+| `total_effect` | the one number the two multiply to, reported *beside* them so the cancellation is visible rather than implied |
+| `n_used_*` / `n_measured_*` | the numerator and denominator behind each probability |
+| `usage_definition`, `usage_threshold`, `usage_threshold_source` | what "used" meant, and where the cut-off came from |
+
+`usage_definition` (`infer.UsageDefinition`: `ANY_HIT`, `CONTRIBUTION_FLOOR`,
+`BUDGET_FRACTION`) has **no default anywhere**. `two_part_effects` is `null` when no
+definition was configured, and that null means *nobody chose a definition of "used"* — not
+that a default one ran and found nothing. `CONTRIBUTION_FLOOR` and `BUDGET_FRACTION`
+additionally require an `infer.UsageThreshold`, which carries the null calibration it came
+from; a cut-off without a named null is refused rather than assumed, for the same reason
+`schema.criteria` defers on `CRITERION_NOT_YET_DEFINED` instead of guessing a threshold.
+
+Missingness domain, identical to every other denominator in this module: `NOT_SEARCHED`
+peaks are excluded entirely (not evidence of non-use), while `NO_SEQUENCE_MATCH` and
+`HIT_BELOW_FLOOR` are *measurements* of non-use and stay in the denominator. Under
+`CONTRIBUTION_FLOOR` a sub-threshold hit is likewise a measured non-use, not a dropped
+observation.
+
 ## Two tiers, not one (T-13)
 
 `discovery_tier` answers *how strongly was this pattern discovered?*

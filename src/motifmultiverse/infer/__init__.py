@@ -7,19 +7,25 @@ a comparator peak set. `wild_cluster_bootstrap_t` is `FP-15`'s specified p value
 a block-level wild cluster bootstrap-t over per-block scalar effects, with the
 null imposed by centering. Together they are the two halves a result needs to
 carry `schema.InferenceCapability.INTERVAL_AND_TEST`; `interpret` wires them in
-behind its `bca-wild-cluster` estimator selection. (`FP-15`'s "done when" in
-`docs/ROADMAP.md` additionally needs `schema.IMPLEMENTED_ESTIMATORS` updated;
-schema is outside this change's scope.)
+behind its `bca-wild-cluster` estimator selection.
+
+`two_part_summary` answers a different question about the same peaks: not how
+uncertain one number is, but whether ONE number should have been reported at
+all. A family can be used in more query peaks and used less intensely where it
+is used; multiplied together those cancel, and a single mean difference reports
+"no effect" for two effects that are individually large and opposite. The
+summary reports the two margins separately and never collapses them.
 
 The rest of this module -- `run` -- is still the pre-alpha skeleton described
-below and in the README; it is unrelated to the two estimators above and is
-untouched by this change.
+below and in the README; it is unrelated to the estimators above.
 """
 from __future__ import annotations
 
 import math
 import random
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from statistics import NormalDist
 
 import numpy as np
@@ -29,6 +35,8 @@ from motifmultiverse.schema import HealthFloors
 __all__ = [
     "run", "InferError", "bca_paired_block_interval", "wild_cluster_bootstrap_t",
     "MIN_ESTIMABLE_BLOCKS",
+    "UsageDefinition", "UsageThreshold", "PeakUsage", "TwoPartEffect",
+    "two_part_summary",
 ]
 
 #: The block is the estimability unit everywhere else in this project
@@ -420,6 +428,240 @@ def wild_cluster_bootstrap_t(
 
     p_value = (extreme + 1) / (n_bootstrap + 1)
     return (p_value, n_valid)
+
+
+# --------------------------------------------------------------------------- #
+# Two-part usage summaries: occupancy and intensity, never one number
+# --------------------------------------------------------------------------- #
+class UsageDefinition(StrEnum):
+    """What "this family is used in this peak" means. There is no default.
+
+    The three are genuinely different questions, and a result computed under one
+    does not answer either of the others:
+
+    * ``ANY_HIT`` -- the family has at least one called hit in the peak. The
+      caller's own floor is the only threshold; nothing further is imposed here.
+    * ``CONTRIBUTION_FLOOR`` -- the family's absolute coefficient mass in the
+      peak reaches a frozen, null-derived cut-off. A hit below it is a *measured
+      non-use*, not a missing observation: it stays in the denominator.
+    * ``BUDGET_FRACTION`` -- the family holds at least a given share of the
+      peak's total absolute coefficient mass. Relative rather than absolute, so
+      it does not track overall attribution magnitude.
+
+    Not defaulted anywhere in this module, and not defaultable: "used" is a
+    scientific definition, and silently choosing one for a caller who never
+    chose it produces a number whose meaning only the code knows.
+    """
+
+    ANY_HIT = "ANY_HIT"
+    CONTRIBUTION_FLOOR = "CONTRIBUTION_FLOOR"
+    BUDGET_FRACTION = "BUDGET_FRACTION"
+
+
+@dataclass(frozen=True)
+class UsageThreshold:
+    """A cut-off with the null that produced it attached.
+
+    ``CONTRIBUTION_FLOOR`` and ``BUDGET_FRACTION`` both need a number that
+    separates use from non-use, and this project's standing rule is that such a
+    number is either derived from a stated null or is not supplied at all
+    (``schema.criteria`` says the same thing as ``CRITERION_NOT_YET_DEFINED``:
+    an undefined criterion defers, it does not guess). ``null_source`` is
+    therefore required and must be non-empty -- it names the calibration the
+    value came from, so a reader can check the threshold rather than trust it.
+    """
+
+    value: float
+    null_source: str
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.value):
+            raise InferError(f"usage threshold must be finite, got {self.value!r}")
+        if not isinstance(self.null_source, str) or not self.null_source.strip():
+            raise InferError(
+                "a usage threshold needs a non-empty null_source naming the calibration "
+                "it came from; a bare number is an invented threshold"
+            )
+
+
+@dataclass(frozen=True)
+class PeakUsage:
+    """One peak's contribution for ONE family, in the shape a usage rule needs.
+
+    ``searched`` is the four-state missingness collapsed to the only distinction
+    a denominator cares about: ``NOT_SEARCHED`` is ``False`` and leaves every
+    denominator; ``NO_SEQUENCE_MATCH`` and ``HIT_BELOW_FLOOR`` are ``True`` with
+    ``hit_count == 0`` -- they are measurements of non-use and stay in.
+
+    ``coefficient_sum`` is signed and ``abs_coefficient_sum`` is not: opposite
+    hits cancel the first and not the second, which is why both travel.
+    ``peak_abs_coefficient_sum`` is the peak's total over *all* families, the
+    denominator ``BUDGET_FRACTION`` needs.
+    """
+
+    searched: bool
+    hit_count: int
+    coefficient_sum: float
+    abs_coefficient_sum: float
+    peak_abs_coefficient_sum: float
+
+
+@dataclass(frozen=True)
+class TwoPartEffect:
+    """Occupancy and intensity as two numbers, plus the total they multiply to.
+
+    ``total_effect`` is reported so that the cancellation is *visible* -- it is
+    exactly the single number a one-part summary would have produced, sitting
+    beside the two components that explain it. It is never reported alone.
+
+    ``conditional_intensity_effect`` is ``None``, never ``0.0``, when a side
+    never uses the family: "the mean among peaks that use it" has no value when
+    no peak uses it, and a zero there would be read as "used, at zero
+    intensity".
+    """
+
+    family_id: str
+    usage_definition: UsageDefinition
+    probability_effect: float
+    conditional_intensity_effect: float | None
+    total_effect: float
+    n_used_query: int
+    n_used_comparator: int
+    #: The denominators. A probability difference without them is uncheckable,
+    #: and this project reports no ratio without the count under it.
+    n_measured_query: int
+    n_measured_comparator: int
+    #: Provenance of the cut-off, when the definition took one. Carried on the
+    #: result rather than left in the caller's config, so the record states what
+    #: "used" meant when it was computed.
+    usage_threshold: float | None
+    usage_threshold_source: str | None
+
+
+def _mean_of(values: Sequence[float]) -> float:
+    return sum(values) / len(values)
+
+
+def _usage_predicate(definition: UsageDefinition, threshold: UsageThreshold | None):
+    """Resolve the definition to a per-peak predicate, refusing on a missing cut-off."""
+    if definition is UsageDefinition.ANY_HIT:
+        if threshold is not None:
+            raise InferError(
+                "ANY_HIT takes no usage threshold; supplying one would record a cut-off "
+                "that did not affect the result"
+            )
+        return lambda u: u.hit_count > 0
+
+    if threshold is None:
+        raise InferError(
+            f"{definition.value} needs a frozen null-derived usage threshold "
+            "(infer.UsageThreshold); refusing to invent a cut-off. Use ANY_HIT if no "
+            "calibrated threshold exists yet."
+        )
+
+    if definition is UsageDefinition.CONTRIBUTION_FLOOR:
+        return lambda u: u.hit_count > 0 and u.abs_coefficient_sum >= threshold.value
+
+    def _budget(u: PeakUsage) -> bool:
+        if u.hit_count <= 0:
+            return False
+        if u.peak_abs_coefficient_sum <= 0.0:
+            # A share of a zero budget is undefined, and undefined is not False
+            # any more than it is 0.0 -- refusing is the only honest option.
+            raise InferError(
+                "BUDGET_FRACTION is undefined for a peak that has hits but zero total "
+                "absolute coefficient mass; the share has no denominator"
+            )
+        return u.abs_coefficient_sum / u.peak_abs_coefficient_sum >= threshold.value
+
+    return _budget
+
+
+def two_part_summary(
+    query: Sequence[PeakUsage],
+    comparator: Sequence[PeakUsage],
+    *,
+    family_id: str,
+    usage_definition: UsageDefinition,
+    usage_threshold: UsageThreshold | None = None,
+) -> TwoPartEffect:
+    """Split one family's query-minus-comparator difference into its two margins.
+
+    The decomposition, over *measured* peaks only:
+
+    * ``probability_effect``  = P(used | query) - P(used | comparator)
+    * ``conditional_intensity_effect`` = E[mass | used, query] - E[mass | used,
+      comparator], or ``None`` if either side has no used peak
+    * ``total_effect`` = E[mass | query] - E[mass | comparator], with a
+      non-using peak contributing 0
+
+    and on each side ``E[mass] == P(used) * E[mass | used]`` exactly, which is
+    what makes the total the *product* of the two margins rather than a third
+    independent quantity. A family used more often but less intensely therefore
+    shows a positive probability effect, a negative intensity effect, and a
+    total near zero -- the case a single mean difference reports as "nothing
+    here".
+
+    ``usage_definition`` is required and has no default (see
+    :class:`UsageDefinition`). ``NOT_SEARCHED`` peaks (``searched=False``) are
+    excluded from every denominator rather than counted as non-use.
+
+    Raises `InferError` when a side has no measured peak, when a thresholded
+    definition is given no frozen threshold, or when a budget share is
+    undefined.
+    """
+    if not isinstance(usage_definition, UsageDefinition):
+        raise InferError(
+            f"usage_definition must be one of {[d.value for d in UsageDefinition]}, got "
+            f"{usage_definition!r}. There is no default: 'used' is a scientific "
+            "definition, not a formatting choice."
+        )
+    is_used = _usage_predicate(usage_definition, usage_threshold)
+
+    q_measured = [u for u in query if u.searched]
+    c_measured = [u for u in comparator if u.searched]
+    if not q_measured or not c_measured:
+        raise InferError(
+            f"{family_id}: a two-part summary needs measured peaks on both sides, got "
+            f"query={len(q_measured)}, comparator={len(c_measured)}. NOT_SEARCHED peaks "
+            "are not measurements of non-use and do not count here."
+        )
+
+    q_used = [u for u in q_measured if is_used(u)]
+    c_used = [u for u in c_measured if is_used(u)]
+
+    p_query = len(q_used) / len(q_measured)
+    p_comparator = len(c_used) / len(c_measured)
+
+    intensity_query = _mean_of([u.coefficient_sum for u in q_used]) if q_used else None
+    intensity_comparator = _mean_of([u.coefficient_sum for u in c_used]) if c_used else None
+    conditional = (
+        intensity_query - intensity_comparator
+        if intensity_query is not None and intensity_comparator is not None
+        else None
+    )
+
+    # The total is built from the same used/not-used split, so it is the product
+    # of the two margins by construction rather than a separately-computed number
+    # that merely ought to agree with them.
+    total_query = p_query * intensity_query if intensity_query is not None else 0.0
+    total_comparator = (
+        p_comparator * intensity_comparator if intensity_comparator is not None else 0.0
+    )
+
+    return TwoPartEffect(
+        family_id=family_id,
+        usage_definition=usage_definition,
+        probability_effect=p_query - p_comparator,
+        conditional_intensity_effect=conditional,
+        total_effect=total_query - total_comparator,
+        n_used_query=len(q_used),
+        n_used_comparator=len(c_used),
+        n_measured_query=len(q_measured),
+        n_measured_comparator=len(c_measured),
+        usage_threshold=None if usage_threshold is None else usage_threshold.value,
+        usage_threshold_source=None if usage_threshold is None else usage_threshold.null_source,
+    )
 
 
 def run(*args, **kwargs):

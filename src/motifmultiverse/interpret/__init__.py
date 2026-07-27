@@ -59,7 +59,7 @@ __all__ = [
     "InterpretError", "HealthReport", "ContrastHealth", "FamilyComposition",
     "FamilyEffect", "Interpretation", "read_hit_table", "read_peak_set",
     "peak_universe", "health_report", "contrast_health_report", "compose",
-    "estimate_effects", "interpret_query",
+    "estimate_effects", "two_part_effects", "interpret_query",
     "ESTIMATOR", "ESTIMATOR_PERCENTILE", "ESTIMATOR_BCA_WILD", "ESTIMATOR_CHOICES",
     "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP",
 ]
@@ -754,6 +754,71 @@ def _effects_bca_wild(q_peaks: list[Peak], c_peaks: list[Peak], families: list[s
 
 
 # --------------------------------------------------------------------------- #
+# Step 3c: two-part usage summaries (occupancy and intensity, never one number)
+# --------------------------------------------------------------------------- #
+def _peak_usage(peak: Peak, family_id: str) -> infer.PeakUsage:
+    """One peak, in the shape :func:`infer.two_part_summary` reads.
+
+    Occupancy comes from ``family_hit_count`` and signed mass from
+    ``family_coefficient_sum`` -- the two Task 1 separated, kept separate all the
+    way through. ``searched`` carries the only missingness distinction a
+    denominator needs; `infer` applies the domain rule, so it lives in exactly
+    one place rather than being re-derived here.
+    """
+    return infer.PeakUsage(
+        searched=peak.searched,
+        hit_count=peak.family_hit_count.get(family_id, 0),
+        coefficient_sum=peak.family_coefficient_sum.get(family_id, 0.0),
+        abs_coefficient_sum=peak.family_abs_coefficient_sum.get(family_id, 0.0),
+        peak_abs_coefficient_sum=sum(peak.family_abs_coefficient_sum.values()),
+    )
+
+
+def two_part_effects(peaks: dict[str, Peak], query_ids: Sequence[str],
+                     comparator_ids: Sequence[str], *,
+                     usage_definition: infer.UsageDefinition,
+                     usage_threshold: infer.UsageThreshold | None = None,
+                     ) -> list[infer.TwoPartEffect]:
+    """Per-family two-part summary of the same contrast :func:`estimate_effects` estimates.
+
+    A family used in more query peaks but less intensely where it is used has a
+    total effect near zero; reported as one number that reads as "no
+    difference", reported as two it reads as what it is. This produces the two.
+
+    Descriptive by construction: no interval and no p value, because the split
+    is about *what was measured*, not about how uncertain it is.
+    ``usage_definition`` has no default here either -- it is passed straight
+    through to `infer`, which refuses anything but an explicit member.
+    """
+    q_peaks = [peaks[r] for r in dict.fromkeys(query_ids) if r in peaks]
+    c_peaks = [peaks[r] for r in dict.fromkeys(comparator_ids) if r in peaks]
+    families = sorted({
+        fam
+        for p in (*q_peaks, *c_peaks)
+        if p.searched
+        for fam in p.family_hit_count
+    })
+    return [
+        infer.two_part_summary(
+            [_peak_usage(p, fam) for p in q_peaks],
+            [_peak_usage(p, fam) for p in c_peaks],
+            family_id=fam,
+            usage_definition=usage_definition,
+            usage_threshold=usage_threshold,
+        )
+        for fam in families
+    ]
+
+
+def _serialize_two_part(effect: infer.TwoPartEffect) -> dict[str, Any]:
+    """`asdict` plus the enum flattened, so the JSON carries "ANY_HIT" rather
+    than depending on `StrEnum` happening to serialise as its value."""
+    payload = asdict(effect)
+    payload["usage_definition"] = effect.usage_definition.value
+    return payload
+
+
+# --------------------------------------------------------------------------- #
 # The whole query
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -781,6 +846,12 @@ class Interpretation:
     suppression_reason: str | None
     composition: list[dict[str, Any]] | None
     effects: list[dict[str, Any]] | None
+    #: Occupancy and conditional intensity, reported separately (`FP-15`, Task
+    #: 17). `None` means no `usage_definition` was configured, NOT that a
+    #: default one was applied and found nothing: "used" is a scientific
+    #: definition and this record never invents one. When present, every entry
+    #: names the definition it was computed under.
+    two_part_effects: list[dict[str, Any]] | None
     notes: list[str]
     input_scale: int
     lexicon_id: str
@@ -814,7 +885,10 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     block_size: int = DEFAULT_BLOCK_SIZE,
                     n_bootstrap: int = DEFAULT_BOOTSTRAP,
                     seed: int = 0,
-                    estimator: str = ESTIMATOR) -> Interpretation:
+                    estimator: str = ESTIMATOR,
+                    usage_definition: infer.UsageDefinition | None = None,
+                    usage_threshold: infer.UsageThreshold | None = None,
+                    ) -> Interpretation:
     """Answer one peak-set query at the strength its selection provenance licenses.
 
     ``estimator`` selects how uncertainty is computed (``ESTIMATOR_CHOICES``) and
@@ -823,6 +897,11 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     ``ESTIMATOR_BCA_WILD`` is ``INTERVAL_AND_TEST`` and emits them. It is
     resolved before anything is computed, so an unrecognised name costs nothing
     and never silently runs a different estimator.
+
+    ``usage_definition`` adds the two-part usage summary (:func:`two_part_effects`)
+    beside the effects. It has **no default**: omitting it leaves
+    ``two_part_effects`` at ``None``, which records that no definition of "used"
+    was chosen -- not that one was chosen for the caller and produced nothing.
     """
     floors = floors or HealthFloors()
     # Resolved first: a refusal that depends on no data should not wait behind a
@@ -885,6 +964,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
 
     composition: list[dict[str, Any]] | None = None
     effects: list[dict[str, Any]] | None = None
+    two_part: list[dict[str, Any]] | None = None
     suppression: str | None = None
 
     # The operative failures: what actually caused *this* interpretation to be
@@ -938,6 +1018,26 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     n_bootstrap=n_bootstrap, seed=seed, block_size=block_size,
                     estimator=estimator)]
                 emitted.append("effects")
+                if usage_definition is not None:
+                    # Same gate as the effects it sits beside, and for the same
+                    # reason: this is a query-minus-comparator contrast, so a
+                    # comparator that would have been refused as a query must
+                    # not license it either. Descriptive within that gate --
+                    # occupancy and intensity, no interval and no p value.
+                    two_part = [
+                        _serialize_two_part(e) for e in two_part_effects(
+                            peaks, region_ids, comparator_ids,
+                            usage_definition=usage_definition,
+                            usage_threshold=usage_threshold)
+                    ]
+                    emitted.append("two_part_effects")
+                    notes.append(
+                        f"usage is defined as {usage_definition.value}; occupancy "
+                        "(probability of use) and conditional intensity are reported "
+                        "separately, because a family used more often and less intensely "
+                        "than its comparator has a total effect near zero that describes "
+                        "neither margin."
+                    )
                 guards.comparator_declared(effects).raise_if_failed()
                 # Once per interpretation, not once per family: which estimator
                 # ran, and what it therefore may emit, is a property of the run.
@@ -987,6 +1087,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         suppression_reason=suppression,
         composition=composition,
         effects=effects,
+        two_part_effects=two_part,
         notes=notes,
         input_scale=hits[0].input_scale,
         lexicon_id=hits[0].lexicon_id,

@@ -977,3 +977,123 @@ def test_bca_wild_cluster_refuses_a_family_with_a_degenerate_bootstrap_reference
         interpret.interpret_query(
             _constant_family_rows(), _query(), n_bootstrap=100, seed=1,
             estimator=interpret.ESTIMATOR_BCA_WILD)
+
+
+# --------------------------------------------------------------------------- #
+# Task 17: two-part usage summaries wired into an interpretation               #
+# --------------------------------------------------------------------------- #
+def _cancelling_rows() -> list[HitRecord]:
+    """A family whose one-part effect is ~0 for two opposite reasons.
+
+    ``FAM_E`` is used in every query peak at 0.5, and in half the comparator
+    peaks at 1.0: occupancy is twice as high on the query side, intensity is
+    half. The mean per-peak coefficient is 0.5 on both sides, so a single
+    difference reports 0.0 -- and reports it for a family whose two margins are
+    each large.
+    """
+    rows: list[HitRecord] = []
+    for b in range(N_BLOCKS):
+        for i in range(PER_BLOCK):
+            start = b * BLOCK + i * 1000
+            is_query = i % 2 == 0
+            used = is_query or (i == 1)          # every query peak, half the comparator
+            if not used:
+                rows.append(HitRecord(
+                    region_id=f"e{b:03d}_{i}", chrom="chr1", start=start, end=start + 500,
+                    missingness=Missingness.NO_SEQUENCE_MATCH,
+                    input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
+                continue
+            rows.append(HitRecord(
+                region_id=f"e{b:03d}_{i}", chrom="chr1", start=start, end=start + 500,
+                missingness=Missingness.USED, variant_id=f"UA_FAME_{i:02d}",
+                family_id="FAM_E", hit_coefficient=0.5 if is_query else 1.0,
+                input_scale=SCALE, lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID))
+    return rows
+
+
+def _cancelling_query(**over) -> PeakSetQuery:
+    kw = dict(query_id="cancel",
+              region_ids=[f"e{b:03d}_{i}" for b in range(N_BLOCKS)
+                          for i in range(PER_BLOCK) if i % 2 == 0],
+              selection_provenance=SelectionProvenance.EXTERNAL,
+              comparator_id="odd_peaks",
+              comparator_region_ids=[f"e{b:03d}_{i}" for b in range(N_BLOCKS)
+                                     for i in range(PER_BLOCK) if i % 2 == 1])
+    kw.update(over)
+    return PeakSetQuery(**kw)
+
+
+def test_two_part_summary_reveals_what_the_one_part_effect_hides():
+    """The one-part effect and the two-part summary, in one interpretation."""
+    result = interpret.interpret_query(
+        _cancelling_rows(), _cancelling_query(), n_bootstrap=50, seed=1,
+        usage_definition=infer_mod.UsageDefinition.ANY_HIT)
+
+    effect = next(e for e in result.effects if e["family_id"] == "FAM_E")
+    assert effect["effect"] == pytest.approx(0.0, abs=1e-12)   # "nothing here"
+
+    part = next(t for t in result.two_part_effects if t["family_id"] == "FAM_E")
+    assert part["usage_definition"] == "ANY_HIT"
+    assert part["probability_effect"] == pytest.approx(0.5)    # ...but this,
+    assert part["conditional_intensity_effect"] == pytest.approx(-0.5)   # ...and this
+    assert part["total_effect"] == pytest.approx(0.0, abs=1e-12)
+    assert part["n_used_query"] == 2 * N_BLOCKS
+    assert part["n_used_comparator"] == N_BLOCKS
+    assert part["n_measured_query"] == part["n_measured_comparator"] == 2 * N_BLOCKS
+    assert "two_part_effects" in result.emitted_order
+
+
+def test_no_usage_definition_means_no_two_part_section_not_a_default_one():
+    """Absence records that nobody chose a definition of "used"."""
+    result = interpret.interpret_query(_cancelling_rows(), _cancelling_query(), n_bootstrap=50)
+    assert result.two_part_effects is None
+    assert "two_part_effects" not in result.emitted_order
+    assert not any("usage is defined" in n for n in result.notes)
+    # and the one-part effect is still there, still reading 0.0 -- which is the
+    # state this whole task exists to make visible rather than to forbid.
+    assert next(e for e in result.effects
+                if e["family_id"] == "FAM_E")["effect"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_two_part_names_its_usage_definition_in_the_notes_and_on_every_row():
+    result = interpret.interpret_query(
+        _cancelling_rows(), _cancelling_query(), n_bootstrap=50,
+        usage_definition=infer_mod.UsageDefinition.ANY_HIT)
+    assert sum("usage is defined as ANY_HIT" in n for n in result.notes) == 1
+    assert all(t["usage_definition"] == "ANY_HIT" for t in result.two_part_effects)
+
+
+def test_two_part_contribution_floor_carries_its_threshold_provenance_to_disk(tmp_path):
+    floor = infer_mod.UsageThreshold(value=0.75, null_source="dinucleotide_shuffle_v1")
+    result = interpret.interpret_query(
+        _cancelling_rows(), _cancelling_query(), n_bootstrap=50,
+        usage_definition=infer_mod.UsageDefinition.CONTRIBUTION_FLOOR,
+        usage_threshold=floor)
+    blob = json.loads(result.write(tmp_path / "o").read_text())
+    part = next(t for t in blob["two_part_effects"] if t["family_id"] == "FAM_E")
+    assert part["usage_definition"] == "CONTRIBUTION_FLOOR"
+    assert part["usage_threshold"] == 0.75
+    assert part["usage_threshold_source"] == "dinucleotide_shuffle_v1"
+    # The 0.5 query hits are below the floor: measured non-use, still in the
+    # denominator, so the query side's probability of use drops to 0.
+    assert part["n_used_query"] == 0
+    assert part["n_measured_query"] == 2 * N_BLOCKS
+    assert part["conditional_intensity_effect"] is None      # undefined, not 0.0
+
+
+def test_an_unusable_usage_definition_is_refused_at_the_interpretation_boundary():
+    with pytest.raises(infer_mod.InferError, match="no default"):
+        interpret.interpret_query(_cancelling_rows(), _cancelling_query(),
+                                  n_bootstrap=20, usage_definition="ANY_HIT")
+
+
+def test_two_part_is_suppressed_with_the_effects_it_sits_beside():
+    """It is a contrast, so an unhealthy comparator withholds it too."""
+    result = interpret.interpret_query(
+        _cancelling_rows(),
+        _cancelling_query(comparator_region_ids=[f"e000_{i}" for i in (1, 3)]),
+        n_bootstrap=50, usage_definition=infer_mod.UsageDefinition.ANY_HIT)
+    assert result.effects is None
+    assert result.two_part_effects is None
+    assert result.composition is not None            # query-only reading stands
+    assert any("comparator" in f for f in result.floor_failures)

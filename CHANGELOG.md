@@ -79,6 +79,19 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   *q* withheld. Switching the default is a separate decision and will get its own
   entry here; an unrecognised `--estimator` is refused rather than mapped onto the
   default.
+- **Two-part usage summaries** (`infer.two_part_summary`, `interpret.two_part_effects`).
+  A family used more often and less intensely than its comparator has a one-part mean
+  difference of about zero, which reads as "no difference" for two large opposite
+  effects. Occupancy (`Peak.family_hit_count`) and conditional intensity
+  (`Peak.family_coefficient_sum`) are now reported separately, with the total they
+  multiply to beside them. `infer.UsageDefinition` (`ANY_HIT`, `CONTRIBUTION_FLOOR`,
+  `BUDGET_FRACTION`) has **no default anywhere**: `Interpretation.two_part_effects` is
+  `null` when nobody chose one, and the thresholded definitions require an
+  `infer.UsageThreshold` carrying the null calibration it came from — a cut-off without
+  a named null is refused, not assumed. `NOT_SEARCHED` leaves every denominator;
+  `NO_SEQUENCE_MATCH`, `HIT_BELOW_FLOOR` and sub-threshold hits stay in it as measured
+  non-use. `conditional_intensity_effect` is `null`, never `0.0`, when a side never uses
+  the family.
 - **Contract change:** `compile` takes `compile registry/ --decisions decisions.json`
   instead of the skeleton's `compile review.yaml`, since `adjudicate` — which would
   have produced that review file — does not exist. No migration path is offered at

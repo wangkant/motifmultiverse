@@ -635,3 +635,228 @@ def test_wct_zero_variance_data_is_defined_explicitly_never_nan():
         off_null, null_value=0.0, n_bootstrap=500, seed=0)
     assert p == 1.0 / 501
     assert n_valid == 0
+
+
+# --------------------------------------------------------------------------- #
+# Task 17: two-part usage summaries -- occupancy and intensity, never one number
+# --------------------------------------------------------------------------- #
+def _usage(n, *, hits=1, coefficient=1.0, searched=True, peak_mass=None):
+    """`n` peaks that look alike, for one family."""
+    mass = abs(coefficient) if peak_mass is None else peak_mass
+    return [infer.PeakUsage(searched=searched, hit_count=hits,
+                            coefficient_sum=coefficient,
+                            abs_coefficient_sum=abs(coefficient),
+                            peak_abs_coefficient_sum=mass)
+            for _ in range(n)]
+
+
+def _unused(n, *, searched=True, peak_mass=0.0):
+    """`n` measured peaks in which the family was not used (NO_SEQUENCE_MATCH /
+    HIT_BELOW_FLOOR), or -- with `searched=False` -- NOT_SEARCHED peaks."""
+    return [infer.PeakUsage(searched=searched, hit_count=0, coefficient_sum=0.0,
+                            abs_coefficient_sum=0.0,
+                            peak_abs_coefficient_sum=peak_mass)
+            for _ in range(n)]
+
+
+def test_two_part_cancellation_is_visible_in_the_components_not_the_total():
+    """The whole point of the split, as an executable claim.
+
+    Query uses FAM_A in 30 of 40 peaks at intensity 1.0 (total 0.75); the
+    comparator uses it in 15 of 40 at intensity 2.0 (total 0.75 as well). A
+    one-part mean difference reports exactly 0.0 -- "no difference" -- for a
+    family that is used twice as often on one side and twice as strongly on the
+    other. Both components must be large and opposite.
+    """
+    query = _usage(30, coefficient=1.0) + _unused(10)
+    comparator = _usage(15, coefficient=2.0) + _unused(25)
+    result = infer.two_part_summary(
+        query, comparator, family_id="FAM_A",
+        usage_definition=infer.UsageDefinition.ANY_HIT)
+
+    assert result.total_effect == pytest.approx(0.0)          # what one number would say
+    assert result.probability_effect == pytest.approx(0.75 - 0.375)
+    assert result.conditional_intensity_effect == pytest.approx(1.0 - 2.0)
+    assert result.n_used_query == 30
+    assert result.n_used_comparator == 15
+    assert result.n_measured_query == result.n_measured_comparator == 40
+
+
+def test_two_part_total_is_the_product_of_the_two_margins_on_each_side():
+    """`E[mass] == P(used) * E[mass | used]`, so the total cannot drift from the
+    components it is supposed to decompose."""
+    query = _usage(12, coefficient=1.5) + _unused(8)
+    comparator = _usage(5, coefficient=0.4) + _unused(15)
+    r = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.ANY_HIT)
+    p_q, p_c = 12 / 20, 5 / 20
+    assert r.probability_effect == pytest.approx(p_q - p_c)
+    assert r.conditional_intensity_effect == pytest.approx(1.5 - 0.4)
+    assert r.total_effect == pytest.approx(p_q * 1.5 - p_c * 0.4)
+    # and it equals the plain mean over measured peaks, which is what a one-part
+    # summary computes -- the two-part result contains it, it does not replace it.
+    assert r.total_effect == pytest.approx((12 * 1.5) / 20 - (5 * 0.4) / 20)
+
+
+def test_two_part_requires_a_usage_definition_and_has_no_default():
+    """No default may be selected silently -- checked as a signature property, so
+    a later 'convenience' default is a test failure rather than a quiet change."""
+    import inspect
+    sig = inspect.signature(infer.two_part_summary)
+    assert sig.parameters["usage_definition"].default is inspect.Parameter.empty
+    assert sig.parameters["usage_definition"].kind is inspect.Parameter.KEYWORD_ONLY
+
+    query, comparator = _usage(5), _usage(5)
+    for bad in (None, "ANY_HIT", "any_hit"):
+        with pytest.raises(InferError, match="no default"):
+            infer.two_part_summary(query, comparator, family_id="FAM_A",
+                                   usage_definition=bad)
+
+
+def test_two_part_contribution_floor_refuses_without_a_frozen_null_derived_threshold():
+    query, comparator = _usage(5, coefficient=1.0), _usage(5, coefficient=1.0)
+    with pytest.raises(InferError, match="refusing to invent a cut-off"):
+        infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.CONTRIBUTION_FLOOR)
+
+
+def test_two_part_budget_fraction_refuses_without_a_frozen_null_derived_threshold():
+    query, comparator = _usage(5, coefficient=1.0), _usage(5, coefficient=1.0)
+    with pytest.raises(InferError, match="refusing to invent a cut-off"):
+        infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.BUDGET_FRACTION)
+
+
+def test_two_part_a_threshold_without_a_named_null_is_refused():
+    """A bare number is an invented threshold, whatever it is called."""
+    with pytest.raises(InferError, match="non-empty null_source"):
+        infer.UsageThreshold(value=0.3, null_source="")
+    with pytest.raises(InferError, match="non-empty null_source"):
+        infer.UsageThreshold(value=0.3, null_source="   ")
+    with pytest.raises(InferError, match="must be finite"):
+        infer.UsageThreshold(value=float("nan"), null_source="dinucleotide_shuffle_v1")
+
+
+def test_two_part_any_hit_refuses_a_threshold_it_would_not_use():
+    """A recorded cut-off that changed nothing is a lie in the provenance."""
+    with pytest.raises(InferError, match="ANY_HIT takes no usage threshold"):
+        infer.two_part_summary(
+            _usage(5), _usage(5), family_id="FAM_A",
+            usage_definition=infer.UsageDefinition.ANY_HIT,
+            usage_threshold=infer.UsageThreshold(value=0.1, null_source="null_v1"))
+
+
+def test_two_part_contribution_floor_makes_a_weak_hit_a_measured_non_use():
+    """A sub-threshold hit leaves the numerator and STAYS in the denominator.
+
+    Dropping it instead would raise the reported probability of use by shrinking
+    the denominator -- the peak was searched and the family was measured there.
+    """
+    floor = infer.UsageThreshold(value=0.5, null_source="dinucleotide_shuffle_v1")
+    query = _usage(10, coefficient=1.0) + _usage(10, coefficient=0.1)   # 10 weak hits
+    comparator = _usage(10, coefficient=1.0) + _unused(10)
+    r = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.CONTRIBUTION_FLOOR,
+                               usage_threshold=floor)
+    assert r.n_used_query == 10
+    assert r.n_measured_query == 20            # the weak hits are still measured
+    assert r.probability_effect == pytest.approx(0.0)
+    assert r.usage_threshold == 0.5
+    assert r.usage_threshold_source == "dinucleotide_shuffle_v1"
+    # Under ANY_HIT the same data give a different, equally valid answer -- which
+    # is exactly why the definition may not be chosen silently.
+    any_hit = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                                     usage_definition=infer.UsageDefinition.ANY_HIT)
+    assert any_hit.n_used_query == 20
+    assert any_hit.probability_effect == pytest.approx(0.5)
+
+
+def test_two_part_budget_fraction_reads_the_share_not_the_magnitude():
+    strong_but_minor = _usage(10, coefficient=2.0, peak_mass=100.0)   # 2% of the peak
+    weak_but_dominant = _usage(10, coefficient=0.2, peak_mass=0.25)   # 80% of the peak
+    share = infer.UsageThreshold(value=0.5, null_source="budget_null_v1")
+    r = infer.two_part_summary(strong_but_minor + weak_but_dominant, _usage(4, peak_mass=1.0),
+                               family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.BUDGET_FRACTION,
+                               usage_threshold=share)
+    assert r.n_used_query == 10                 # the dominant ones, not the strong ones
+    assert r.n_measured_query == 20
+
+
+def test_two_part_budget_fraction_refuses_an_undefined_share():
+    """Zero budget with a hit in it: the share has no denominator, and undefined
+    is not `False` any more than it is `0.0`."""
+    broken = [infer.PeakUsage(searched=True, hit_count=1, coefficient_sum=0.0,
+                              abs_coefficient_sum=0.0, peak_abs_coefficient_sum=0.0)]
+    with pytest.raises(InferError, match="has no denominator"):
+        infer.two_part_summary(
+            broken, _usage(4, peak_mass=1.0), family_id="FAM_A",
+            usage_definition=infer.UsageDefinition.BUDGET_FRACTION,
+            usage_threshold=infer.UsageThreshold(value=0.5, null_source="budget_null_v1"))
+
+
+def test_two_part_not_searched_peaks_leave_every_denominator():
+    """NOT_SEARCHED is not evidence of non-use, so it cannot dilute a probability."""
+    query = _usage(10, coefficient=1.0) + _unused(10)
+    comparator = _usage(10, coefficient=1.0) + _unused(10)
+    baseline = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                                      usage_definition=infer.UsageDefinition.ANY_HIT)
+    padded = infer.two_part_summary(query + _unused(50, searched=False), comparator,
+                                    family_id="FAM_A",
+                                    usage_definition=infer.UsageDefinition.ANY_HIT)
+    assert padded.n_measured_query == baseline.n_measured_query == 20
+    assert padded.probability_effect == baseline.probability_effect
+    assert padded.total_effect == baseline.total_effect
+
+
+def test_two_part_measured_non_use_states_stay_in_the_denominator():
+    """The mirror image of the test above, so the two states are not confused.
+
+    NO_SEQUENCE_MATCH and HIT_BELOW_FLOOR ARE measurements: adding them lowers
+    the probability of use. Adding NOT_SEARCHED peaks does not.
+    """
+    query = _usage(10, coefficient=1.0)
+    comparator = _usage(10, coefficient=1.0)
+    with_measured_non_use = infer.two_part_summary(
+        query + _unused(10), comparator, family_id="FAM_A",
+        usage_definition=infer.UsageDefinition.ANY_HIT)
+    with_not_searched = infer.two_part_summary(
+        query + _unused(10, searched=False), comparator, family_id="FAM_A",
+        usage_definition=infer.UsageDefinition.ANY_HIT)
+    assert with_measured_non_use.probability_effect == pytest.approx(0.5 - 1.0)
+    assert with_not_searched.probability_effect == pytest.approx(0.0)
+    assert with_measured_non_use.probability_effect != with_not_searched.probability_effect
+
+
+def test_two_part_conditional_intensity_is_undefined_not_zero_when_a_side_never_uses():
+    """`None`, never `0.0`: a mean over an empty set has no value, and a zero
+    there reads as 'used, at zero intensity'."""
+    query = _usage(10, coefficient=1.2) + _unused(10)
+    comparator = _unused(20)
+    r = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.ANY_HIT)
+    assert r.n_used_comparator == 0
+    assert r.conditional_intensity_effect is None
+    assert r.probability_effect == pytest.approx(0.5)
+    assert r.total_effect == pytest.approx(0.5 * 1.2)     # still defined
+
+
+def test_two_part_opposite_signed_hits_cancel_intensity_but_not_occupancy():
+    """Task 1's separation, carried into the summary: a family whose signed mass
+    cancels to zero is still *present* in every peak it occupies."""
+    query = [infer.PeakUsage(searched=True, hit_count=2, coefficient_sum=0.0,
+                             abs_coefficient_sum=2.0, peak_abs_coefficient_sum=2.0)
+             for _ in range(10)] + _unused(10)
+    comparator = _unused(20)
+    r = infer.two_part_summary(query, comparator, family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.ANY_HIT)
+    assert r.probability_effect == pytest.approx(0.5)      # occupancy survives
+    assert r.conditional_intensity_effect is None          # comparator never uses it
+    assert r.total_effect == pytest.approx(0.0)            # signed mass cancelled
+
+
+def test_two_part_refuses_when_a_side_has_no_measured_peak():
+    with pytest.raises(InferError, match="measured peaks on both sides"):
+        infer.two_part_summary(_usage(10), _unused(10, searched=False),
+                               family_id="FAM_A",
+                               usage_definition=infer.UsageDefinition.ANY_HIT)
