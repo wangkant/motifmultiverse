@@ -15,7 +15,8 @@ from motifmultiverse.validate import (
 
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
-IMPLEMENTED = ["ingest", "compile", "interpret", "align", "annotate", "adjudicate"]
+IMPLEMENTED = ["ingest", "compile", "interpret", "align", "annotate", "adjudicate",
+               "validate", "infer"]
 
 
 def test_version_flag():
@@ -48,7 +49,8 @@ def test_all_eight_subcommands_are_registered():
 
 
 @pytest.mark.parametrize("argv", [
-    ["infer", "instances/"],
+    # `report` is the LAST subcommand with a skeleton body. `infer` left this
+    # list in Task 18, which wired it to the Task 15-17 estimators.
     ["report", "project/"],
 ])
 def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_path):
@@ -567,15 +569,44 @@ def test_interpret_prints_composition_when_only_the_comparator_fails_health(tmp_
     assert blob["suppression_reason"] in printed
 
 
-def test_provenance_records_no_username_or_hostname(tmp_path):
-    """Provenance must be publishable without a scrubbing pass."""
+def test_provenance_records_no_username_or_hostname(tmp_path, monkeypatch):
+    """Provenance must be publishable without a scrubbing pass.
+
+    The recorder's stated policy is `basenames_only_except_command`: `command`
+    echoes what the invoker typed, and every *other* field is redacted. So that
+    is what is asserted -- per field, with `command` named as the one exemption
+    and the reason it exists.
+
+    The argv is stubbed to contain the username on purpose. An earlier version of
+    this test scanned the whole serialized blob for the username and passed only
+    because pytest's own command line happened not to contain it; run from a
+    working directory with the username in its path (`/home/<user>/...`, or a
+    `--junitxml` under one) it failed, having claimed a guarantee the policy
+    never made. A test that depends on the caller's working directory is not
+    testing the code.
+    """
     import getpass
     import socket
+
+    user, host = getpass.getuser(), socket.gethostname()
+    monkeypatch.setattr(
+        "sys.argv", ["motifmultiverse", "align", f"/home/{user}/registry/", "--out", "o"])
     out = tmp_path / "o"
     main(["align", "registry/", "--out", str(out)])
-    blob = (out / "provenance.json").read_text()
-    assert getpass.getuser() not in blob
-    assert socket.gethostname() not in blob
+    record = json.loads((out / "provenance.json").read_text())[0]
+
+    # `command` is the documented exemption: a record that cannot say what was
+    # run describes nothing. It carries the argv verbatim, username and all.
+    assert record["redaction_policy"] == "basenames_only_except_command"
+    assert user in record["command"], "the exemption is not doing what it claims"
+
+    # Every other field must be publishable as-is.
+    rest = {key: value for key, value in record.items() if key != "command"}
+    blob = json.dumps(rest)
+    assert user not in blob, f"username leaked outside `command`: {rest}"
+    assert host not in blob, f"hostname leaked outside `command`: {rest}"
+    # Inputs specifically: recorded by basename, never by the caller's absolute path.
+    assert all("/" not in name for name in record["inputs"])
 
 
 # --------------------------------------------------------------------------- #
@@ -666,3 +697,90 @@ def test_interpret_estimator_rejects_an_unknown_choice(tmp_path):
               "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
               "--estimator", "bogus", "--out", str(tmp_path / "o"), *_floors(32)])
     assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Task 18: the `infer` subcommand and its effect_estimates.tsv artifact        #
+# --------------------------------------------------------------------------- #
+def _infer_argv(hits, q, c, out, *extra):
+    return ["infer", str(hits), "--peaks", str(q), "--comparator", str(c),
+            "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+            "--out", str(out), *extra]
+
+
+def test_infer_writes_the_flat_effect_table_and_the_full_record(tmp_path, capsys):
+    from motifmultiverse.cli import EFFECT_ESTIMATE_COLUMNS
+    hits, q, c = _wild_substrate(tmp_path)
+    out = tmp_path / "inference"
+    rc = main(_infer_argv(hits, q, c, out, "--estimator", "bca-wild-cluster",
+                          "--bootstrap", "100", "--seed", "1", *_floors(32)))
+    assert rc == 0
+    tsv = (out / "effect_estimates.tsv").read_text().strip().split("\n")
+    assert tsv[0].split("\t") == list(EFFECT_ESTIMATE_COLUMNS)
+    assert len(tsv) == 2                       # header + one family
+    row = dict(zip(EFFECT_ESTIMATE_COLUMNS, tsv[1].split("\t"), strict=True))
+    assert row["family_id"] == "FAM_A" and row["comparator_id"] == "odd"
+    assert row["inference_capability"] == "INTERVAL_AND_TEST"
+    assert row["estimator"] == "wild_cluster_bootstrap_t"
+    assert float(row["p_value"]) == 1.0 / 101
+    assert float(row["ci_low"]) > 0.0 < float(row["ci_high"])
+    assert row["substrate_id"] == "e" * 64     # identity travels onto every row
+    assert row["statistical_license"] == "FULL_INFERENCE"
+    # The full record travels beside the flat one; a TSV row cannot hold health.
+    blob = json.loads((out / "interpretation.json").read_text())
+    assert blob["query_health"]["n_blocks"] == 32
+    assert json.loads((out / "provenance.json").read_text())[0]["subcommand"] == "infer"
+    assert "multiverse is not implemented" in capsys.readouterr().out
+
+
+def test_infer_writes_the_missing_sentinel_for_a_withheld_p_never_a_blank_or_zero(tmp_path):
+    """An empty cell reads as "no effect"; `0` reads as "certainly an effect".
+    Neither is what an ESTIMATION_ONLY row means, and the capability column
+    beside it says which of the two the reader is looking at.
+    """
+    from motifmultiverse.cli import EFFECT_ESTIMATE_COLUMNS
+    hits, q, c = _wild_substrate(tmp_path)
+    out = tmp_path / "inference"
+    assert main(_infer_argv(hits, q, c, out, "--bootstrap", "50", *_floors(32))) == 0
+    row = dict(zip(EFFECT_ESTIMATE_COLUMNS,
+                   (out / "effect_estimates.tsv").read_text().strip().split("\n")[1].split("\t"),
+                   strict=True))
+    assert row["p_value"] == "NA" and row["q_value"] == "NA"
+    assert row["inference_capability"] == "ESTIMATION_ONLY"
+    assert row["estimator"] == "percentile_block_bootstrap"
+    assert float(row["effect"]) > 0.0          # the estimate itself is still there
+
+
+def test_infer_refuses_rather_than_writing_a_header_only_table(tmp_path, capsys):
+    """A suppressed reading must not become an empty table: a file with only a
+    header is indistinguishable from "we looked and found nothing"."""
+    hits, q, c = _wild_substrate(tmp_path)
+    out = tmp_path / "inference"
+    rc = main(_infer_argv(hits, q, c, out, "--bootstrap", "50", "--floor-blocks", "999",
+                          "--floor-coverage", "0.9", "--floor-explained", "0.9"))
+    assert rc == 4
+    assert "no effect estimates" in capsys.readouterr().err
+    assert not (out / "effect_estimates.tsv").exists()
+    # ...but the provenance row for the refused attempt still exists (T-09).
+    assert json.loads((out / "provenance.json").read_text())[0]["subcommand"] == "infer"
+
+
+def test_infer_refuses_a_table_that_does_not_match_the_substrate_manifest(tmp_path, capsys):
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+    hits, q, c = _wild_substrate(tmp_path)
+    manifest = write_manifest(
+        build_manifest(
+            peak_universe_hash="a" * 64, n_regions=64,
+            caller_specification=CallerSpecification(
+                caller_name="finemo", caller_version="0.test",
+                lexicon_content_hash="d" * 64, parameters={"motif_type": "cwm"},
+                preprocessing_contract_hash="b" * 64),
+            input_files={"peaks.bed": "c" * 64}, created_at="2026-07-26T12:00:00Z"),
+        tmp_path / "substrate.manifest.json")
+    out = tmp_path / "inference"
+    rc = main(_infer_argv(hits, q, c, out, "--substrate-manifest", str(manifest),
+                          "--bootstrap", "50", *_floors(32)))
+    assert rc == 4
+    assert "does not match --substrate-manifest" in capsys.readouterr().err
+    assert not (out / "effect_estimates.tsv").exists()

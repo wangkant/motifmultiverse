@@ -18,10 +18,47 @@ jobs:
           pip install -e ".[dev]"
       - name: Lint
         run: ruff check src tests
-      # NOT COVERED HERE: the `finemo` backend is not installed, so
-      # test_roundtrip_against_the_real_loader SKIPS. A skipped test is unverified,
-      # not verified -- do not read a green run as evidence that a compiled lexicon
-      # loads. That check has been run manually against a real TF-MoDISco output;
-      # see src/motifmultiverse/compile/README.md.
+      # A green check mark here means "passed", and passed is NOT the same claim
+      # as verified. The `finemo` backend is not installed in CI, so
+      # test_roundtrip_against_the_real_loader SKIPS -- a compiled lexicon is
+      # never actually read back by the tool that will consume it. That check has
+      # been run manually against a real TF-MoDISco output; see
+      # src/motifmultiverse/compile/README.md. The status step below writes the
+      # distinction into an uploaded artifact rather than leaving it to this
+      # comment, which no reader of a green run ever sees.
       - name: Test
-        run: pytest
+        run: pytest --junitxml=pytest-report.xml
+      - name: Implementation status (passed / skipped / failed, never summed)
+        if: always()
+        run: |
+          python -m motifmultiverse.status \
+            --junit-xml pytest-report.xml \
+            --test-command "pytest --junitxml=pytest-report.xml" \
+            --out implementation_status.json
+          python - <<'PY'
+          import json
+          status = json.load(open("implementation_status.json"))
+          tests = status["tests"]
+          print(f"passed  : {tests.get('passed', 'NOT RUN')}")
+          print(f"skipped : {tests.get('skipped', 'NOT RUN')}  <- UNVERIFIED, not passed")
+          print(f"failed  : {tests.get('failed', 'NOT RUN')}")
+          print("optional backends:")
+          for name, entry in status["optional_backends"].items():
+              print(f"  {name:8s} {entry['status']}: {entry['detail']}")
+          PY
+      - name: Upload implementation status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementation-status
+          path: |
+            implementation_status.json
+            pytest-report.xml
+      - name: CLI smoke test (every subcommand exposes real --help)
+        run: |
+          set -e
+          python -m motifmultiverse.cli --help
+          for sub in ingest align annotate adjudicate compile validate infer interpret report; do
+            python -m motifmultiverse.cli "$sub" --help > /dev/null
+            echo "  $sub --help: ok"
+          done

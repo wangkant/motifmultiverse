@@ -24,3 +24,9 @@ htmlcov/
 *.parquet
 # local scratch working artifacts; never tracked
 /.superpowers/
+
+# Generated per run by `python -m motifmultiverse.status`, and per-run facts do
+# not belong in version control: the backend rows and test counts inside it are
+# true of the machine that produced it and of nothing else. CI regenerates and
+# uploads it on every run.
+implementation_status.json

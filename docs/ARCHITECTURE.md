@@ -25,14 +25,15 @@ implementation preferences — they change what the tool is allowed to compute.
 | **D. adjudicate** | merge / refuse / deferred decisions with rationale and decider; emit human review — **implemented** |
 | **E. compile** | build tiered lexicons; separate discovery support from analysis admission — **implemented** |
 | **F. validate** | downstream stability: affected-subset reconstruction and backend verification — **implemented** |
-| **G. infer** | robust inference across a specification multiverse |
+| **G. infer** | effect estimates for ONE specification over a frozen substrate — **implemented**; the specification *multiverse* is not |
 | **H. report** | render the audit trail, denominators and bias ledger |
 | **I. interpret** | describe what is inside a cluster (descriptive, not a test) — **implemented** |
 
 Each module directory carries a README with its rule, the failure that produced
-the rule, and how the rule is checked. `ingest`, `align`, `annotate`,
-`adjudicate`, `compile`, `validate` and `interpret` are implemented; `infer` and
-`report` still raise `NotImplementedError`.
+the rule, and how the rule is checked. Eight of the nine are implemented; `report`
+still raises `NotImplementedError`. The current status is generated from the CLI
+dispatch table rather than restated here — see the table in `README.md` and
+`implementation_status.json`, because this paragraph has been wrong twice.
 
 **The evidence middle now runs.** `ingest` → `align` → `annotate` →
 `adjudicate` → `compile` is a real path from discovery output to a frozen,
@@ -79,33 +80,43 @@ Consequences, stated because they are expensive:
 They share the statistical machinery and have **separate entry points**:
 
 - **`infer`** answers *"how robust is this conclusion to analysis choices?"* — a
-  preregistered question over a specification multiverse.
+  preregistered question over a specification multiverse. **Today it estimates ONE
+  specification** with `FP-15`'s estimators and emits `effect_estimates.tsv`; the
+  axis sweep, and the dropped cells with reasons, are still M4. It runs
+  `interpret`'s code rather than a second copy of the statistics.
 - **`interpret`** answers *"what is in this cluster?"* — descriptive.
 
 Neither may trigger a caller re-run. Keeping them separate is what stops an
 exploratory listing and a preregistered test from becoming indistinguishable in
 the record, which is what happens when both run through the same ad-hoc script.
 
-## 4. Known weak stages, labelled rather than smoothed over
+## 4. Stages that were weak by inheritance, and what closed each gap
 
-Two stages are weak **by inheritance**, and they are weak in different ways:
+Two stages arrived weak, in different ways. Both are now implemented; the history
+stays here because what each one was is why each one is shaped as it is.
 
 - **`align`** was **prose-only** in the reference implementation. Its key artifact,
   a per-pair null p-value, was never persisted, so the constraint had no
   executable check. Worse, the aligner maximised *signed* similarity, which makes
-  it structurally blind to sign-flipped motifs. `guards.sign_alignment` closes the
-  second gap; the persisted null is still to be built. It is **unimplemented**: the
-  rule exists and the code does not.
+  it structurally blind to sign-flipped motifs. Both gaps are closed:
+  registration is chosen on **unsigned PPM** content and signed CWM similarity is
+  measured only at the winning registration (`guards.sign_alignment`), and each
+  pair's null re-runs the whole registration on freshly shuffled data rather than
+  rescoring the observed offset. `alignment_edges.parquet` carries the null
+  shuffle count and seed on every edge.
 - **`annotate`** had **no stage at all**. Family assignment lived as a hand-curated
   prefix dictionary inside an adjudication script, with at least one label
-  overridden by sequence in a special case that left no record of the rule. It is
+  overridden by sequence in a special case that left no record of the rule. It was
   **not unimplemented — it was never specified**, which is a different position on
-  the roadmap: it is waiting for a design decision, not for code. See its README.
+  the roadmap. The design it now has is deliberately minimal: backends *propose*
+  candidates and nothing assigns identity, so two backends disagreeing produce two
+  rows rather than one overwriting the other, and `MotifNode.family_id` stays
+  unset until adjudication decides.
 
-Both raise `NotImplementedError` here. Presenting either as complete would be the
-same class of error that `CONSTRAINTS.md` exists to prevent — and treating the
-second as the first is how a stage gets built to whatever its first caller happened
-to need.
+What has **not** closed: no optional annotation backend (TomTom, HOMER) is
+verified in CI, so `annotation_candidates.parquet` is legitimately empty there.
+That is recorded as `UNVERIFIED` per backend in `implementation_status.json`
+rather than left to a green check mark.
 
 ## 5. What this tool does not do
 

@@ -184,12 +184,52 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--out", default="validation/", help="output directory")
     a.set_defaults(func=_run_validate)
 
-    a = sub.add_parser("infer", help="robust inference across a specification multiverse")
-    a.add_argument("instances", help="instances/ from validate")
-    a.add_argument("--unit", choices=["peak", "instance", "region"], default="peak")
-    a.add_argument("--multiverse", default="specifications.yaml", help="specification axes")
+    a = sub.add_parser(
+        "infer", help="emit effect estimates for one specification over a frozen substrate",
+        description=(
+            "The pipeline's inference stage: read ONE frozen hit table, estimate the "
+            "per-family query-minus-comparator effect with the selected estimator, and "
+            "write a flat effect_estimates.tsv for the report to consume. It runs the "
+            "same code interpret runs -- there is one implementation of these estimators, "
+            "not two -- and differs only in emitting a tabular artifact rather than "
+            "answering an ad-hoc query. "
+            "NOT IMPLEMENTED: the specification MULTIVERSE. This estimates ONE "
+            "specification. Sweeping specification axes and reporting the dropped cells "
+            "with reasons is FP-15's remaining half (docs/ROADMAP.md M4); running one "
+            "specification and calling the result a multiverse would be the exact "
+            "overstatement this tool exists to prevent."
+        ),
+    )
+    a.add_argument("hits", help="frozen hit table (.tsv or .parquet), as interpret reads")
+    a.add_argument("--substrate-manifest", default=None,
+                   help="verified manifest for the one frozen caller specification")
+    a.add_argument("--peaks", required=True, help="queried peak set")
+    a.add_argument("--comparator", required=True,
+                   help="baseline peak set; an effect without a baseline is not an effect")
+    a.add_argument("--comparator-id", required=True, help="name of the baseline, on every row")
+    a.add_argument("--selection-provenance", default=None,
+                   choices=[g.value for g in SelectionProvenance],
+                   help="how the peak set was chosen; omitting it is recorded as "
+                        "DECLARATION_MISSING and costs the query its inference")
+    a.add_argument("--selection-rule", default=None,
+                   help="the executable rule, required by PROGRAMMATIC_RULE")
+    a.add_argument("--held-out", default=None, help="held-out peak set, required by CLUSTERED_WITH_SPLIT")
+    a.add_argument("--query-id", default="query", help="name of this specification")
+    a.add_argument("--estimator", default="percentile", choices=sorted(ESTIMATOR_CHOICES),
+                   help="see `interpret --estimator`; only bca-wild-cluster emits p and q")
+    a.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE,
+                   help=f"genomic block size for the bootstrap (default: {DEFAULT_BLOCK_SIZE})")
+    a.add_argument("--bootstrap", type=int, default=DEFAULT_BOOTSTRAP,
+                   help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP})")
+    a.add_argument("--floor-coverage", type=float, default=HealthFloors().min_intersection_coverage,
+                   help="pre-registered floor on intersection coverage")
+    a.add_argument("--floor-blocks", type=int, default=HealthFloors().min_blocks,
+                   help="pre-registered floor on blocks spanned")
+    a.add_argument("--floor-explained", type=float, default=HealthFloors().min_explained_fraction,
+                   help="pre-registered floor on the fraction the frozen lexicon explains")
+    a.add_argument("--seed", type=int, default=0, help="random seed, recorded with every interval")
     a.add_argument("--out", default="inference/", help="output directory")
-    a.set_defaults(func=lambda ns: _run("infer", ns))
+    a.set_defaults(func=_run_infer)
 
     a = sub.add_parser("report", help="render the audit report")
     a.add_argument("project", help="project directory")
@@ -403,6 +443,123 @@ def _run_validate(ns: argparse.Namespace) -> int:
         print(f"  {backend.backend} {backend.backend_version}: {backend.status}{detail}")
     print(f"written: {Path(ns.out) / 'stability_results.parquet'}")
     print(f"written: {Path(ns.out) / 'backend_verification.tsv'}")
+    return 0
+
+
+#: Columns of `inference/effect_estimates.tsv`, in order. `ci` is split into two
+#: columns because a TSV cell holds one value; every other field keeps the name
+#: it has on `interpret.FamilyEffect`, so the flat artifact and the JSON record
+#: are the same record in two shapes rather than two vocabularies.
+EFFECT_ESTIMATE_COLUMNS = (
+    "id", "family_id", "comparator_id", "is_cross_condition",
+    "effect", "ci_low", "ci_high", "p_value", "q_value",
+    "inference_capability", "estimator",
+    "n_query_peaks", "n_comparator_peaks", "n_blocks",
+    "n_bootstrap", "n_bootstrap_valid", "block_size", "random_seed",
+    "substrate_id", "lexicon_id", "input_scale",
+    "statistical_license", "claim_scope",
+)
+
+
+def _effect_estimate_rows(result) -> list[list[str]]:
+    """Flatten an `Interpretation`'s effects to TSV cells.
+
+    An undefined value is written as the `MISSING_SENTINEL` (`NA`), never as 0 or
+    an empty cell: `p_value` is undefined for every ESTIMATION_ONLY row, and a
+    blank there reads as "no evidence of an effect" rather than "this estimator
+    is not licensed to test". The `inference_capability` column beside it says
+    which of the two the reader is looking at.
+    """
+    rows = []
+    for effect in result.effects:
+        low, high = effect["ci"] if effect["ci"] is not None else (None, None)
+        flat = {
+            **effect,
+            "ci_low": low,
+            "ci_high": high,
+            "substrate_id": result.substrate_id,
+            "lexicon_id": result.lexicon_id,
+            "input_scale": result.input_scale,
+            "statistical_license": result.statistical_license,
+            "claim_scope": result.claim_scope,
+        }
+        rows.append([
+            MISSING_SENTINEL if flat.get(col) is None else str(flat[col])
+            for col in EFFECT_ESTIMATE_COLUMNS
+        ])
+    return rows
+
+
+def _run_infer(ns: argparse.Namespace) -> int:
+    from motifmultiverse import interpret as interpret_mod
+    from motifmultiverse.substrate import read_manifest
+
+    rec = record("infer", seed=ns.seed)
+    hits = interpret_mod.read_hit_table(ns.hits)
+    rec.input_scale = hits[0].input_scale
+    rec.substrate_id = hits[0].substrate_id
+    for path in (ns.hits, ns.substrate_manifest, ns.peaks, ns.comparator, ns.held_out):
+        if path:
+            rec.add_input(path)
+    rec.write(ns.out)
+
+    if ns.substrate_manifest:
+        manifest = read_manifest(ns.substrate_manifest)
+        if hits[0].substrate_id != manifest.substrate_id:
+            raise InterpretError(
+                "hit table substrate_id does not match --substrate-manifest; "
+                "refusing to infer over a different frozen caller run"
+            )
+    query = PeakSetQuery(
+        query_id=ns.query_id,
+        region_ids=interpret_mod.read_peak_set(ns.peaks),
+        selection_provenance=(ns.selection_provenance
+                              or SelectionProvenance.DECLARATION_MISSING),
+        selection_rule=ns.selection_rule or MISSING_SENTINEL,
+        comparator_id=ns.comparator_id,
+        comparator_region_ids=interpret_mod.read_peak_set(ns.comparator),
+        held_out_region_ids=interpret_mod.read_peak_set(ns.held_out) if ns.held_out else [],
+    )
+    result = interpret_mod.interpret_query(
+        hits, query,
+        floors=HealthFloors(min_intersection_coverage=ns.floor_coverage,
+                            min_blocks=ns.floor_blocks,
+                            min_explained_fraction=ns.floor_explained),
+        block_size=ns.block_size, n_bootstrap=ns.bootstrap, seed=ns.seed,
+        estimator=ns.estimator,
+    )
+    if result.effects is None:
+        # No table at all, rather than an empty one. An `effect_estimates.tsv`
+        # holding only a header is indistinguishable from "we looked and found
+        # nothing", which is not what happened: the reading was suppressed, and
+        # the reason belongs in the refusal rather than in a file nobody re-reads.
+        raise InterpretError(
+            f"no effect estimates: {result.suppression_reason or 'this selection provenance ' + f'({result.output_mode}) licenses no effect'}"
+        )
+
+    out = Path(ns.out)
+    out.mkdir(parents=True, exist_ok=True)
+    dest = out / "effect_estimates.tsv"
+    lines = ["\t".join(EFFECT_ESTIMATE_COLUMNS)]
+    lines += ["\t".join(row) for row in _effect_estimate_rows(result)]
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # The full record travels beside the flat one: the TSV is for reading, the
+    # JSON carries the health views and notes a TSV row cannot hold.
+    result.write(out)
+
+    print(f"infer: {len(result.effects)} family effects, estimator={result.estimator} "
+          f"({result.effects[0]['inference_capability']})")
+    print("  ONE specification. The specification multiverse is not implemented; "
+          "see docs/ROADMAP.md M4.")
+    for effect in result.effects[:5]:
+        ci = effect["ci"]
+        interval = "NA" if ci is None else f"[{ci[0]:.4g}, {ci[1]:.4g}]"
+        p = "withheld" if effect["p_value"] is None else f"{effect['p_value']:.4g}"
+        print(f"  {effect['family_id']}: effect={effect['effect']:.4g} ci={interval} p={p}")
+    for note in result.notes:
+        print(f"  note: {note}")
+    print(f"written: {dest}")
+    print(f"written: {out / 'interpretation.json'}")
     return 0
 
 
