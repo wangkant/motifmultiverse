@@ -831,3 +831,43 @@ def test_interpret_refuses_a_substrate_truncated_below_its_manifest(tmp_path, ca
     err = capsys.readouterr().err
     assert "10 regions" in err and "declares 12" in err
     assert not (out / "interpretation.json").exists()
+
+
+def test_comparator_without_an_id_is_refused_not_labelled_with_a_file_path(tmp_path, capsys):
+    """`comparator_id` is semantic and lands in every effect id.
+
+    It used to fall back to the value of `--comparator`, i.e. a filesystem path:
+    an id that cannot be reproduced on another machine, and a local path leaked
+    into a published artifact. An undeclared comparator is now undeclared, which
+    lets `guards.comparator_declared` do what it exists for -- the run is refused
+    with the baseline rule named, instead of quietly carrying a path as a label.
+    """
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        *_floors(),
+    ]) == 4
+    err = capsys.readouterr().err
+    assert "named baseline peak set" in err
+    assert str(c) not in err and str(tmp_path) not in err, "a local path leaked"
+    assert not (out / "interpretation.json").exists()
+
+
+def test_comparator_with_an_id_still_runs(tmp_path):
+    """The declared form is unaffected by the refusal above."""
+    import json
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+        "--comparator-id", "gc_matched",
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        *_floors(),
+    ]) == 0
+    blob = (out / "interpretation.json").read_text()
+    assert "gc_matched" in blob, "the declared comparator id must reach the artifact"
+    assert str(tmp_path) not in blob, "a local path leaked into the artifact"
+    json.loads(blob)

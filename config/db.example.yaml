@@ -1,26 +1,50 @@
-# External annotation databases. Paths are site-specific and intentionally relative.
-# A missing backend must produce a clear "backend not installed" message.
+# Annotation backends read PRECOMPUTED database results, not live binaries.
+#
+# `annotate --tomtom` / `--homer` do not invoke TomTom or HOMER. Running those is
+# a site decision -- the MEME suite and HOMER are external binaries, outside this
+# package's dependency scope -- and what this stage consumes is their *output*,
+# carrying the database release that produced it so a label can be traced back.
+#
+# The earlier version of this file described binaries and thresholds, which is
+# not a shape any adapter here can read: no `version`, no `matches`. Feeding it to
+# `--tomtom` raised "tomtom database configuration has no version". It was an
+# example that could not work.
+#
+# Copy this to config/db.yaml -- the default `--databases` path, deliberately not
+# shipped because its contents are site-specific -- and fill in real results.
+#
+# Every section needs:
+#   version   the database release these matches came from. Recorded on every
+#             candidate as `source_version`, so an unversioned section is refused
+#             rather than defaulted.
+#   matches   a list. May be empty, which is a real claim ("this backend ran and
+#             proposed nothing") and is NOT the same as the backend being absent;
+#             an absent backend is logged UNVERIFIED with its reason instead.
+#
+# Every match needs `node_id`, `proposed_family_id` and `matched_motif_id`.
+# `score`, `q_value`, `aligned_span` and `legacy_label` are optional.
+# A section may instead set `error:` to record that the backend ran and failed;
+# that is retained, not dropped.
 
 tomtom:
-  enabled: true
-  binary: tomtom                 # MEME suite; not a Python dependency
-  motif_db: path/to/motif_db.meme
-  q_threshold: 0.05              # above this -> low_confidence_annotation
+  version: "MEME 5.5.5 / HOCOMOCO v11 HUMAN"
+  matches:
+    - node_id: cbp_promoter::pos_patterns.pattern_0
+      proposed_family_id: SP_KLF
+      matched_motif_id: SP1_HUMAN.H11MO.0.A
+      q_value: 4.98e-07
+      score: 12.4
+      aligned_span: 11
+      legacy_label: SP1
+    - node_id: cbp_promoter::pos_patterns.pattern_1
+      proposed_family_id: ETS
+      matched_motif_id: GABPA_HUMAN.H11MO.0.A
+      q_value: 2.53e-05
+      aligned_span: 8
 
 homer:
-  enabled: false
-  binary: findMotifsGenome.pl
-  known_motifs: path/to/knownResults.txt
-
-jaspar:
-  enabled: false
-  release: "2024"
-  path: path/to/JASPAR2024_CORE.meme
-
-hocomoco:
-  enabled: false
-  version: "v11"
-  path: path/to/HOCOMOCOv11_HUMAN.meme
+  version: "HOMER 4.11 known vertebrates"
+  matches: []
 
 # Annotation is evidence about a LABEL, never an identity claim about a protein.
 # Default output is family-level identity plus a confidence.

@@ -156,9 +156,16 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("evidence", help="evidence/ from align")
     a.add_argument("--registry", default=None,
                    help="motif registry; defaults to <evidence>/registry when embedded")
-    a.add_argument("--tomtom", action="store_true", help="use TomTom matches")
-    a.add_argument("--homer", action="store_true", help="use HOMER matches")
-    a.add_argument("--databases", default="config/db.yaml", help="database path config")
+    a.add_argument("--tomtom", action="store_true",
+                   help="read precomputed TomTom results from --databases "
+                        "(does not invoke TomTom)")
+    a.add_argument("--homer", action="store_true",
+                   help="read precomputed HOMER results from --databases "
+                        "(does not invoke HOMER)")
+    a.add_argument("--databases", default="config/db.yaml",
+                   help="precomputed database results; site-specific and not shipped. "
+                        "See config/db.example.yaml for the required shape "
+                        "(default: config/db.yaml)")
     a.add_argument("--occurrence-null", default=None,
                    help="precomputed JSON map of candidate IDs to optional occurrence-null values")
     a.add_argument("--out", default="evidence/", help="output directory")
@@ -624,7 +631,12 @@ def _run_interpret(ns: argparse.Namespace) -> int:
         selection_provenance=(ns.selection_provenance
                               or SelectionProvenance.DECLARATION_MISSING),
         selection_rule=ns.selection_rule or MISSING_SENTINEL,
-        comparator_id=ns.comparator_id or (MISSING_SENTINEL if not ns.comparator else ns.comparator),
+        # An undeclared comparator is undeclared. Falling back to `ns.comparator`
+        # put a filesystem path into a semantic field that lands in every effect
+        # id: not reproducible on another machine, and a local path leaked into a
+        # published artifact. The sentinel is what `guards.comparator_declared`
+        # exists to act on.
+        comparator_id=ns.comparator_id or MISSING_SENTINEL,
         comparator_region_ids=interpret_mod.read_peak_set(ns.comparator) if ns.comparator else [],
         held_out_region_ids=interpret_mod.read_peak_set(ns.held_out) if ns.held_out else [],
     )

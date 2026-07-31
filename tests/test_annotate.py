@@ -433,3 +433,47 @@ def test_tomtom_adapter_reads_the_yaml_database_path_advertised_by_the_cli(tmp_p
     assert [(row.source, row.source_version, row.proposed_family_id) for row in rows] == [
         ("tomtom", "5.5", "FAM_ALPHA"),
     ]
+
+
+# --- regression: the shipped example must be readable by the adapter it feeds --
+def test_shipped_db_example_is_a_shape_the_adapter_can_read(tmp_path):
+    """`config/db.example.yaml` described binaries and thresholds -- a shape no
+    adapter here reads. Feeding it to --tomtom raised "tomtom database
+    configuration has no version": an example that could not work.
+    """
+    from pathlib import Path
+
+    import motifmultiverse
+    from motifmultiverse.annotate.tomtom import TomTomBackend
+
+    root = Path(motifmultiverse.__file__).resolve().parents[2]
+    example = root / "config" / "db.example.yaml"
+    if not example.exists():
+        pytest.skip("config/ not present in this installation")
+
+    backend = TomTomBackend(str(example))
+    assert backend.version, "the example must carry a database version"
+    # No registry nodes -> the adapter must refuse the example's own matches by
+    # name rather than silently returning nothing, which proves it parsed them.
+    from motifmultiverse.annotate.base import AnnotationBackendError
+    with pytest.raises(AnnotationBackendError, match="absent from the registry"):
+        backend.annotate([])
+
+
+def test_shipped_db_example_declares_a_version_for_every_backend_section():
+    from pathlib import Path
+
+    import yaml
+
+    import motifmultiverse
+
+    root = Path(motifmultiverse.__file__).resolve().parents[2]
+    example = root / "config" / "db.example.yaml"
+    if not example.exists():
+        pytest.skip("config/ not present in this installation")
+    payload = yaml.safe_load(example.read_text())
+    for name in ("tomtom", "homer"):
+        section = payload.get(name)
+        assert isinstance(section, dict), f"{name} section missing"
+        assert section.get("version"), f"{name} section has no version; the adapter refuses it"
+        assert isinstance(section.get("matches"), list), f"{name} matches must be a list"
