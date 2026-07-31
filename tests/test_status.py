@@ -195,3 +195,70 @@ def test_the_generator_accepts_a_junit_report_end_to_end(tmp_path):
                             "--test-command", "pytest --junitxml=report.xml"]) == 0
     tests = json.loads(out.read_text())["tests"]
     assert (tests["passed"], tests["skipped"], tests["failed"]) == (98, 2, 0)
+
+
+# --- prose claims that must be derived, not typed -----------------------------
+# Every hand-maintained status claim in this repository has been wrong at least
+# once; status.py exists because of two, and these are the third and fourth.
+def _repo_root():
+    from pathlib import Path
+
+    import motifmultiverse
+    return Path(motifmultiverse.__file__).resolve().parents[2]
+
+
+def test_cli_epilog_matches_the_dispatch_table():
+    """The epilog said seven modules were implemented and "the remaining two"
+    raised, when `infer` had been implemented and only `report` had not."""
+    from motifmultiverse.cli import _status_epilog, build_parser
+    from motifmultiverse.status import MODULES, module_status
+
+    epilog = _status_epilog()
+    head, sep, tail = epilog.partition(" are implemented; ")
+    assert sep, f"epilog lost its shape: {epilog!r}"
+    for name in MODULES:
+        implemented = module_status(name)["status"] == "IMPLEMENTED"
+        side = head if implemented else tail
+        other = tail if implemented else head
+        assert name in side and name not in other, (
+            f"{name} is {'implemented' if implemented else 'a skeleton'} but the "
+            f"epilog puts it on the other side: {epilog!r}"
+        )
+    # and it must reach the rendered help, not merely be computable (argparse
+    # re-wraps the epilog, so compare on collapsed whitespace)
+    collapse = " ".join(build_parser().format_help().split())
+    assert " ".join(epilog.split()) in collapse
+
+
+def test_cli_module_docstring_does_not_enumerate_module_status():
+    """A count typed into prose is a claim nobody re-derives."""
+    import motifmultiverse.cli as cli
+
+    doc = cli.__doc__ or ""
+    assert "the remaining two" not in doc, "the stale enumeration is back"
+    # It may say that the split is derived; it must not hard-code the split.
+    assert "``interpret`` are implemented" not in doc
+    assert "remaining" not in doc
+
+
+def test_constraint_tally_in_prose_matches_the_machine_readable_source():
+    """README and CONSTRAINTS.md both said 4 / 13 / 8; constraints.tsv says 4 / 14 / 7."""
+    import collections
+    import csv
+
+    root = _repo_root()
+    tsv = root / "docs" / "constraints.tsv"
+    if not tsv.exists():                       # installed without docs/
+        import pytest
+        pytest.skip("docs/ not present in this installation")
+    counts = collections.Counter(
+        r["enforcement"] for r in csv.DictReader(tsv.open(), delimiter="\t")
+    )
+    spaced = f'{counts["ENFORCED"]} / {counts["PARTIAL"]} / {counts["DOC_ONLY"]}'
+    tight = spaced.replace(" ", "")
+    readme = (root / "README.md").read_text()
+    constraints = (root / "docs" / "CONSTRAINTS.md").read_text()
+    assert spaced in readme, f"README tally disagrees with constraints.tsv ({spaced})"
+    assert tight in constraints or spaced in constraints, (
+        f"CONSTRAINTS.md tally disagrees with constraints.tsv ({tight})"
+    )

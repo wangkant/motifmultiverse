@@ -218,7 +218,7 @@ without one.
 
 [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) lists the 25 frozen design principles,
 each labelled `ENFORCED` / `PARTIAL` / `DOC_ONLY` with the current tally — which is
-**4 / 13 / 8**, and deliberately unflattering. It is a roadmap metric: the list comes
+**4 / 14 / 7**, and deliberately unflattering. It is a roadmap metric: the list comes
 from the design, not from the code, so most of it is unenforced until the modules
 that would enforce it exist. Every `DOC_ONLY` entry carries a drafted criterion — the
 check is unimplemented, but what it would check is written down. Labelling a

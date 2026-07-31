@@ -1,9 +1,11 @@
 """Command-line interface (T-08).
 
-Nine subcommands are wired with their real arguments and real ``--help``.
-``ingest``, ``align``, ``annotate``, ``adjudicate``, ``compile``, ``validate``
-and ``interpret`` are implemented; the remaining two raise
-:class:`NotImplementedError` naming the module README that specifies them.
+Nine subcommands are wired with their real arguments and real ``--help``. Which
+of them are implemented is deliberately *not* written here: this sentence used to
+enumerate them and had gone stale for the third time in this repository. The
+split is derived from the dispatch table by :func:`_status_epilog` and shown in
+``--help``; a subcommand that is still a skeleton raises
+:class:`NotImplementedError` naming the module README that specifies it.
 
 Every subcommand writes a provenance record before it raises (T-09), because a
 skeleton that defers provenance is a tool that never has it.
@@ -46,6 +48,48 @@ from motifmultiverse.schema import (
 _README = "src/motifmultiverse/{module}/README.md"
 
 
+def _status_epilog() -> str:
+    """Render the implemented/skeleton split from the dispatch table, not by hand.
+
+    This sentence was hand-maintained and had gone stale for the third time: it
+    named seven implemented modules and "the remaining two" when `infer` had been
+    implemented, leaving only `report`. The README's module table was moved to
+    generation for exactly this reason (`status.py`'s docstring lists the earlier
+    two); the CLI's own copy of the same claim was left behind. Deriving it here
+    means the text cannot disagree with the code it describes.
+
+    Called at help-format time rather than at parser-construction time:
+    `status.module_status` reads the dispatch table by building a parser, so
+    computing this while `build_parser` is still running recurses forever.
+    """
+    from motifmultiverse.status import MODULES, module_status
+
+    done, skeleton = [], []
+    for name in MODULES:
+        (done if module_status(name)["status"] == "IMPLEMENTED" else skeleton).append(name)
+    if skeleton:
+        tail = (f"{'; '.join(skeleton)} raise{'s' if len(skeleton) == 1 else ''} "
+                "NotImplementedError and exit 3")
+    else:
+        tail = "every subcommand is implemented"
+    return (f"pre-alpha: {', '.join(done)} are implemented; {tail}. "
+            "Exit 4 means the tool refused to produce a number. See docs/ROADMAP.md")
+
+
+class _Parser(argparse.ArgumentParser):
+    """ArgumentParser that fills its epilog from the dispatch table when asked.
+
+    The epilog states which subcommands are implemented, and that claim is
+    derived rather than typed (see :func:`_status_epilog`). It has to be produced
+    after construction finishes, so the derivation is deferred to the moment help
+    is actually formatted.
+    """
+
+    def format_help(self) -> str:
+        self.epilog = _status_epilog()
+        return super().format_help()
+
+
 def _not_implemented(module: str) -> NotImplementedError:
     return NotImplementedError(
         f"'{module}' is a skeleton in this pre-alpha release. "
@@ -61,16 +105,12 @@ def _run(module: str, args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="motifmultiverse",
         description=(
             "Bias-aware harmonization and robust inference of attribution-derived "
             "regulatory motifs across models and methods."
         ),
-        epilog=("pre-alpha: ingest, align, annotate, adjudicate, compile, validate and interpret "
-                "are implemented; the remaining two subcommands raise "
-                "NotImplementedError and exit 3. Exit 4 means the tool "
-                "refused to produce a number. See docs/ROADMAP.md"),
     )
     p.add_argument("--version", action="version", version=f"motifmultiverse {__version__}")
     sub = p.add_subparsers(dest="subcommand", metavar="SUBCOMMAND")

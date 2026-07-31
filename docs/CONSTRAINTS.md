@@ -54,7 +54,7 @@ from the design measures how much of the design exists.
 So the number is a **roadmap metric**. It should rise as `align`, `adjudicate`,
 `validate`, `infer` and `report` are implemented, and each rise should come with a
 guard and a falsification test rather than with a relabelling. It went 4/10/11 →
-4/13/8 in one round by implementing `ingest` and `compile`; that is what progress
+4/14/7 in one round by implementing `ingest` and `compile`; that is what progress
 looks like here.
 
 ## The twenty-five principles
