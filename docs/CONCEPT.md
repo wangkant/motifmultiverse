@@ -21,7 +21,7 @@ the original to understand the architecture.
 > Bias-aware harmonization and robust inference of attribution-derived regulatory
 > motifs across models and methods.
 >
-> — concept report §4.1「工作名称与一句话定位」
+> — concept report §4.1, "Working name and one-sentence positioning"
 
 The ecosystem already solves the neighbouring problems: **TF-MoDISco** discovers
 motifs from attributions, **FIMO** scans sequence, **FiNeMo** calls instances,
