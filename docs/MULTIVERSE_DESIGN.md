@@ -106,6 +106,7 @@ where none was, the report says so and stays descriptive.
 | `stability_by_estimand.tsv` | descriptive stability within each fixed estimand |
 | `specification_curve.md` | the report a person reads |
 | `guard_outcomes.json` | what each guard returned, as everywhere else here |
+| `cell_guard_outcomes.tsv` | the same outcomes as `guard_outcomes.json`, joined to the cell each licensed |
 
 ## 8. A design
 

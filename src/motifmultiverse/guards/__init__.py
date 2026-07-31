@@ -872,6 +872,18 @@ def no_cross_estimand_pooling(summaries: Iterable[Mapping[str, Any]],
                     "estimand it belongs to cannot be established"
                 )
             estimands.add(spec.get("estimand_id"))
+        # A summary also states which estimand it is FOR, and that label is what a
+        # reader joins on. One estimand among the members is not enough if the
+        # label names a different one: the rows would be within-estimand and filed
+        # under the wrong question, which reads exactly like the pooling this
+        # refuses and is not caught by the count alone.
+        claimed = summary.get("estimand_id")
+        if claimed is not None and estimands and claimed not in estimands:
+            return _fail(
+                gid,
+                f"{key}: filed under estimand {claimed}, but its cells belong to "
+                f"{', '.join(sorted(map(str, estimands)))} according to the manifest"
+            )
         if len(estimands) > 1:
             return _fail(
                 gid,

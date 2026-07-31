@@ -17,7 +17,11 @@ already existed.
 and none was non-estimable**, so the dropped-cell path is exercised in the test
 suite rather than here — this grid does not demonstrate it and does not claim to.
 522 family-level effects, and 102 stability summaries across 6 estimands, each
-summary inside one estimand.
+summary inside one estimand. 145 guard outcomes: four per cell, plus the
+`no_cross_estimand_pooling` call over the finished summaries. Each is joined to the
+cell it licensed in `cell_guard_outcomes.tsv` — the directory-level
+`guard_outcomes.json` records them all but has no cell to attribute them to, which
+for a 36-cell grid is 144 entries a reader cannot place.
 
 ## 1. The statistical axis moves the interval, not the estimate
 

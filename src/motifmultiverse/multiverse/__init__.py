@@ -407,6 +407,12 @@ class CellResult:
     n_baseline_peaks: int | None = None
     claim_scope: str = ""
     statistical_license: str = ""
+    #: What the guards returned *while this cell ran*. `guard_outcomes.json`
+    #: records every outcome in the directory but has no cell to attribute them
+    #: to -- 144 entries from a 36-cell grid, none of which a reader can join to
+    #: the effect it licensed. A result is required to carry its guard outcomes,
+    #: so the cell keeps the slice of the log it produced.
+    guard_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
     def row(self, spec_row: Mapping[str, Any]) -> dict[str, Any]:
         return {
@@ -419,6 +425,11 @@ class CellResult:
             "n_baseline_peaks": self.n_baseline_peaks,
             "claim_scope": self.claim_scope,
             "statistical_license": self.statistical_license,
+            "n_guards_run": len(self.guard_outcomes),
+            # Not "all passed": with zero guards run that would be vacuously true,
+            # and a cell that refused before reaching a guard is exactly the case
+            # where a reader must not read reassurance into an empty list.
+            "n_guards_failed": sum(1 for g in self.guard_outcomes if not g["passed"]),
         }
 
 
@@ -517,6 +528,10 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
     for spec in specs:
         cell = CellResult(cell_id=spec.cell_id, estimand_id=spec.estimand_id,
                           status=CellStatus.ERROR, reason="not run")
+        # Where this cell's outcomes start in the shared log. The log is bound to
+        # the directory and shared by every cell, so the only way to attribute an
+        # outcome to a cell is to note the boundary before the cell runs.
+        outcomes_before = len(log.outcomes)
         try:
             key = spec.measurement.measurement_id
             if key not in hit_cache:
@@ -575,6 +590,7 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
             cell.reason = f"{type(exc).__name__}: {exc}"
             (out / f"error_{spec.cell_id}.txt").write_text(
                 traceback.format_exc(), encoding="utf-8")
+        cell.guard_outcomes = [o.to_dict() for o in log.outcomes[outcomes_before:]]
         cells.append(cell)
 
     summaries = stability_within_estimand(cells, manifest)
@@ -691,7 +707,11 @@ CELL_COLUMNS = (
     "selection_feature_names", "lexicon_id", "lexicon_content_hash", "substrate_id",
     "estimator", "block_size", "n_bootstrap", "seed", "floor_coverage", "floor_blocks",
     "floor_explained", "n_query_peaks", "n_baseline_peaks", "n_families_estimated",
-    "claim_scope", "statistical_license",
+    "claim_scope", "statistical_license", "n_guards_run", "n_guards_failed",
+)
+
+CELL_GUARD_COLUMNS = (
+    "cell_id", "estimand_id", "guard_id", "passed", "detail", "subject",
 )
 
 EFFECT_COLUMNS = (
@@ -716,6 +736,13 @@ def _write_outputs(result: MultiverseResult, spec_rows: Mapping[str, Mapping[str
     _tsv(out / "cells.tsv", CELL_COLUMNS, cell_rows)
     _tsv(out / "dropped_cells.tsv", CELL_COLUMNS,
          [r for r in cell_rows if r["status"] != CellStatus.SUCCESS])
+    # The same outcomes as `guard_outcomes.json`, with the cell they licensed.
+    # The JSON stays the authority -- this is a join, not a second record, and it
+    # copies `passed` and `detail` without touching either.
+    _tsv(out / "cell_guard_outcomes.tsv", CELL_GUARD_COLUMNS, [
+        {"cell_id": cell.cell_id, "estimand_id": cell.estimand_id, **outcome}
+        for cell in result.cells for outcome in cell.guard_outcomes
+    ])
 
     effect_rows = []
     for cell in result.cells:

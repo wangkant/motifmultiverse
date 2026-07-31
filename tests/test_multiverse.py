@@ -490,3 +490,53 @@ def test_the_design_documented_here_parses(tmp_path):
     assert design.preregistered_threshold == multiverse.NO_PREREGISTERED_THRESHOLD
     # Two baselines means two estimands, which is the point of the example.
     assert len({e.estimand_id for e in design.estimands}) == 2
+
+
+def test_every_cell_carries_the_guard_outcomes_that_licensed_it(dataset, tmp_path):
+    """A result is required to carry its guard outcomes; the log alone cannot.
+
+    `guard_outcomes.json` is bound to the directory and shared by every cell, so a
+    36-cell grid leaves 144 entries with no cell to attribute them to. The join is
+    written down rather than left for a reader to reconstruct from timestamps.
+    """
+    design = _design(dataset, statistical=[_statistical("a"), _statistical("b", seed=1)])
+    out = tmp_path / "out"
+    result = multiverse.run_multiverse(design, out)
+
+    assert all(cell.guard_outcomes for cell in result.cells), (
+        "a cell ran guards and recorded none against itself"
+    )
+    ids = {g["guard_id"] for cell in result.cells for g in cell.guard_outcomes}
+    assert "single_scale" in ids and "health_before_effect" in ids
+
+    text = (out / "cell_guard_outcomes.tsv").read_text().strip().split("\n")
+    assert len(text) - 1 == sum(len(c.guard_outcomes) for c in result.cells)
+    for cell in result.cells:
+        assert cell.cell_id in "\n".join(text)
+
+    # And the join copies the log rather than restating it.
+    logged = json.loads((out / "guard_outcomes.json").read_text())
+    per_cell = [g for cell in result.cells for g in cell.guard_outcomes]
+    assert [g["detail"] for g in per_cell] == [
+        row["detail"] for row in logged[:len(per_cell)]]
+
+
+def test_a_summary_filed_under_the_wrong_estimand_is_refused(dataset):
+    """One estimand among the members is not enough if the label names another.
+
+    Such a summary is within-estimand and filed under the wrong question, which
+    reads to a joining reader exactly like pooling and is invisible to a check
+    that only counts the distinct estimands of the members.
+    """
+    design = _design(dataset, estimands=[_estimand("complement"), _estimand("matched")])
+    manifest = multiverse.plan(design)
+    specs = {s["cell_id"]: s for s in manifest["specifications"]}
+    one = manifest["specifications"][0]
+    other = next(s for s in manifest["specifications"]
+                 if s["estimand_id"] != one["estimand_id"])
+
+    mislabelled = [{"group_key": "CTCF", "estimand_id": other["estimand_id"],
+                    "cell_ids": [one["cell_id"]]}]
+    result = guards.no_cross_estimand_pooling(mislabelled, specs)
+    assert not result.passed
+    assert "filed under estimand" in result.detail
