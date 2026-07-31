@@ -128,6 +128,28 @@ stage carries the fact — and it is worth being exact about what it did **not**
 recording an outcome does not make an unwired guard wireable, because a record of what a
 guard returned is not an independent claim for a guard to check.
 
+### M4c — the specification curve — **DONE, on the `multiverse` path only**
+
+`multiverse` (`src/motifmultiverse/multiverse/`) runs a predeclared grid over one
+frozen dataset. Every planned cell is written to `specification_manifest.json`
+before the first one runs and appears in `cells.tsv` exactly once afterwards with
+its status, so the dropped cells are reported with reasons — the second clause of
+M4's *done when*. Stability is summarised within each estimand and
+`guards.no_cross_estimand_pooling` refuses a summary that spans two, so the axis
+that most often changes an answer cannot be averaged away. Validated on a 36-cell
+grid over frozen K562 artifacts: `docs/K562_MULTIVERSE_AUDIT.md`.
+
+The third clause — "every claim states its baseline population and lexicon
+version" — is closed **on this path and not in general**, and the distinction is
+the whole of what is left. Every row of `family_effects.tsv` carries
+`baseline_population_type`, `baseline_construction_rule`, `lexicon_content_hash`,
+`selection_rule` and `selection_feature_names`, because a `multiverse` design
+*declares* them and the cell id is a hash over the declaration. But
+`interpret.Interpretation` still does not carry any of the three, so a plain
+`interpret` run followed by `report` still prints `NOT RECORDED` for each. A field
+that exists because a grid declared it is not the same as a field the producing
+stage records, and M4b's list stays open on those terms.
+
 ## M5 — cross-project generalisation and public release
 
 *Done when:* the tool runs on a **second dataset** that shares no code path with

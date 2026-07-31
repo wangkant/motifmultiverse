@@ -29,7 +29,8 @@ __all__ = [
     "GuardResult", "GuardError", "PendingGuardInput", "ALL_GUARDS",
     "GUARDS_AWAITING_INPUT", "CROSS_MODEL_AXES", "run_all",
     "single_scale", "variant_id_unique", "no_key_parsing", "four_state_missingness",
-    "no_cross_model_cwm_avg", "sign_alignment", "interaction_required",
+    "no_cross_model_cwm_avg", "no_cross_estimand_pooling", "sign_alignment",
+    "interaction_required",
     "estimability_floor", "stratum_parity", "short_motif_flag", "single_family_layer",
     "selection_provenance_declared", "health_before_effect", "comparator_declared",
     "index_order_matches_loader",
@@ -833,8 +834,57 @@ def index_order_matches_loader(index_names: Sequence[str],
     return _ok(gid, f"{len(index_names)} motifs, index order matches the loader by name")
 
 
+def no_cross_estimand_pooling(summaries: Iterable[Mapping[str, Any]],
+                              specifications: Mapping[str, Mapping[str, Any]]) -> GuardResult:
+    """A stability summary may not span two estimands.
+
+    The failure this refuses is the one a specification multiverse is most likely
+    to commit, and it does not look like an error while you are committing it: run
+    the same contrast against two baseline populations, then report "the effect is
+    stable across specifications". That number averages an answer to one question
+    with an answer to another. Where the baseline is what moved, the finding is
+    that the conclusion is *baseline-sensitive*, and a single score conceals
+    exactly the thing worth reporting.
+
+    Two arguments, because one would make this a guard over its own producer. The
+    summary says which cells it covers; ``specifications`` is the manifest,
+    written before the run by the code that enumerated the grid, and the estimand
+    of each cell is read from **there**. So a summariser that groups wrongly
+    cannot also tell the guard it grouped rightly -- and a summariser that lies
+    about its members is caught by the second half, which refuses a cell the
+    manifest does not contain rather than skipping it.
+    """
+    gid = "no_cross_estimand_pooling"
+    n_groups = 0
+    for summary in summaries:
+        n_groups += 1
+        key = summary.get("group_key", "<unnamed group>")
+        members = list(summary.get("cell_ids", ()))
+        if not members:
+            return _fail(gid, f"{key}: a summary that names no cells cannot be checked")
+        estimands = set()
+        for cell_id in members:
+            spec = specifications.get(cell_id)
+            if spec is None:
+                return _fail(
+                    gid,
+                    f"{key}: cell {cell_id} is not in the specification manifest, so the "
+                    "estimand it belongs to cannot be established"
+                )
+            estimands.add(spec.get("estimand_id"))
+        if len(estimands) > 1:
+            return _fail(
+                gid,
+                f"{key}: pools {len(estimands)} estimands ({', '.join(sorted(map(str, estimands)))}); "
+                "an effect against one baseline population and an effect against another are "
+                "answers to different questions and do not average"
+            )
+    return _ok(gid, f"each of {n_groups} summaries stays within one estimand")
+
+
 ALL_GUARDS = {
     "single_scale": single_scale,
+    "no_cross_estimand_pooling": no_cross_estimand_pooling,
     "variant_id_unique": variant_id_unique,
     "no_key_parsing": no_key_parsing,
     "four_state_missingness": four_state_missingness,

@@ -10,13 +10,30 @@ in `docs/LESSONS.md`, which is where a reader looking for them expects to find t
 
 ## [0.1.0.dev0] - unreleased
 
-**Pre-alpha. The API is not stable.** All nine modules are implemented and `compile`
-produces tiered lexicons; what is *not* implemented is the specification multiverse the
-name promises — `infer` estimates one specification and says so. Read this as an
-auditable lexicon compiler plus a single-specification inference reference
-implementation.
+**Pre-alpha. The API is not stable.** All ten modules are implemented, `compile`
+produces tiered lexicons, and `multiverse` runs a predeclared grid of specifications
+over one frozen dataset — recording every planned cell, keeping estimands,
+measurement definitions and statistical choices on separate axes, and refusing to
+summarise across baseline populations. Read this as an auditable lexicon compiler
+plus a specification-multiverse inference reference implementation.
 
 ### Added
+- `multiverse`: the predeclared specification grid over one frozen dataset. Three
+  axes as three types — `Estimand` (query and **baseline population**, with its type
+  and construction rule), `Measurement` (lexicon and frozen hit table), and
+  `StatisticalChoice` (estimator, block size, replicates, seed, floors) — because a
+  flat bag of options invites averaging over them, which is the generic robustness
+  score that hides which choice the conclusion was sensitive to. The manifest of
+  every planned cell is written *before* the first cell runs; every planned cell
+  appears in `cells.tsv` exactly once with `SUCCESS`, `REFUSED_GUARD`,
+  `REFUSED_SCHEMA`, `NOT_ESTIMABLE` or `ERROR`; stability is summarised within each
+  estimand and never across. No statistics of its own: every effect comes from
+  `interpret.interpret_query`, checked structurally by a test. Validated on a
+  36-cell grid over frozen K562 artifacts (`docs/K562_MULTIVERSE_AUDIT.md`), which
+  found `cl3`'s AP-1/bZIP effect to change sign with the baseline population.
+- `guards.no_cross_estimand_pooling`: refuses a stability summary that spans two
+  estimands, resolving each cell's estimand from the manifest written before the run
+  rather than from the code that grouped the results.
 - Package skeleton for nine modules (ingest, align, annotate, adjudicate, compile,
   validate, infer, interpret, report), each with a README stating its rule, the failure
   that produced the rule, and how the rule is checked.

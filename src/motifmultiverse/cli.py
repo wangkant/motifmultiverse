@@ -319,6 +319,24 @@ def build_parser() -> argparse.ArgumentParser:
     a.set_defaults(func=_run_infer)
 
     a = sub.add_parser(
+        "multiverse", help="run a declared grid of specifications over one frozen dataset",
+        description=(
+            "Run every specification a design file declares, record every planned cell "
+            "including the refused and the non-estimable ones, and summarise stability "
+            "WITHIN each estimand. Estimands (query and baseline population), "
+            "measurements (lexicon and frozen hit table) and statistical choices "
+            "(estimator, block size, replicates, seed, floors) are separate axes: a "
+            "different baseline is a different question, so no summary here averages "
+            "across baselines and `no_cross_estimand_pooling` refuses one that tries. "
+            "All statistics come from `interpret`; this subcommand computes none."
+        ),
+    )
+    a.add_argument("design", help="multiverse design (JSON); paths inside it are "
+                                  "resolved relative to the design file")
+    a.add_argument("--out", default="multiverse/", help="output directory")
+    a.set_defaults(func=_run_multiverse)
+
+    a = sub.add_parser(
         "report", help="render the audit report",
         description=(
             "Render one markdown audit report from the artifacts a stage actually "
@@ -843,6 +861,35 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     for note in result.notes:
         print(f"  note: {note}")
     print(f"written: {dest}")
+    return 0
+
+
+def _run_multiverse(ns: argparse.Namespace) -> int:
+    from motifmultiverse import multiverse as multiverse_mod
+
+    rec = record("multiverse")
+    design = multiverse_mod.read_design(ns.design)
+    rec.add_input(ns.design, key=f"design:{Path(ns.design).name}")
+    # Every distinct hit table the grid will read, by the measurement whose
+    # identity it carries. A grid's provenance that named only the design file
+    # would not say which frozen runs were actually opened.
+    for measurement in design.measurements:
+        path = Path(measurement.hit_table)
+        path = path if path.is_absolute() else design.root / path
+        rec.add_input(path, key=f"hits:{measurement.measurement_id}")
+    rec.write(ns.out)
+
+    log = GuardLog("multiverse", ns.out)
+    result = multiverse_mod.run_multiverse(design, ns.out, guard_log=log)
+    _warn_if_guard_log_degraded(log)
+
+    counts = result.by_status
+    print(f"multiverse {design.multiverse_id}: {len(result.cells)} planned cells -> "
+          + ", ".join(f"{status} {counts[status]}"
+                      for status in multiverse_mod.CellStatus.ALL if counts[status]))
+    print(f"{len(result.summaries)} family stability summaries, "
+          f"within {len({s['estimand_id'] for s in result.summaries})} estimand(s)")
+    print(f"wrote {Path(ns.out) / 'specification_curve.md'}")
     return 0
 
 

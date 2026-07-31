@@ -53,7 +53,7 @@ SCHEMA_VERSION = "1"
 #: alphabetical, so the rendered table reads as the path a user would run.
 MODULES = (
     "ingest", "align", "annotate", "adjudicate", "compile",
-    "validate", "infer", "report", "interpret",
+    "validate", "infer", "report", "interpret", "multiverse",
 )
 
 @dataclass(frozen=True)

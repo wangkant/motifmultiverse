@@ -213,6 +213,46 @@ def test_no_cross_model_cwm_avg_FALSIFIED_when_model_not_held_fixed():
     assert not guards.no_cross_model_cwm_avg(ops).passed
 
 
+# --------------------------------------------------- no_cross_estimand_pooling
+def test_no_cross_estimand_pooling_passes_within_one_estimand():
+    summaries = [{"group_key": "est_a|CTCF", "cell_ids": ["c1", "c2"]}]
+    specs = {"c1": {"estimand_id": "est_a"}, "c2": {"estimand_id": "est_a"}}
+    assert guards.no_cross_estimand_pooling(summaries, specs).passed
+
+
+def test_no_cross_estimand_pooling_FALSIFIED_when_two_baselines_are_averaged():
+    """The failure a specification multiverse is most likely to commit.
+
+    The two cells differ only in their baseline population -- the same family, the
+    same lexicon, the same estimator -- which is exactly the case where the spread
+    looks like robustness and is actually two answers to two questions.
+    """
+    summaries = [{"group_key": "CTCF across specifications", "cell_ids": ["c1", "c2"]}]
+    specs = {"c1": {"estimand_id": "est_complement"},
+             "c2": {"estimand_id": "est_gc_matched"}}
+    result = guards.no_cross_estimand_pooling(summaries, specs)
+    assert not result.passed
+    assert "est_complement" in result.detail and "est_gc_matched" in result.detail
+
+
+def test_no_cross_estimand_pooling_FALSIFIED_when_a_cell_is_not_in_the_manifest():
+    """A summary is checked against the manifest, so an unplanned cell is a refusal.
+
+    Skipping it would let a summariser evade the guard by naming cells the
+    manifest never planned: whatever those cells' estimands were, nothing here can
+    establish that they were one.
+    """
+    summaries = [{"group_key": "est_a|CTCF", "cell_ids": ["c1", "ghost"]}]
+    assert not guards.no_cross_estimand_pooling(
+        summaries, {"c1": {"estimand_id": "est_a"}}).passed
+
+
+def test_no_cross_estimand_pooling_FALSIFIED_by_a_summary_naming_no_cells():
+    """A group that names no members cannot be shown to stay within one estimand."""
+    assert not guards.no_cross_estimand_pooling(
+        [{"group_key": "empty", "cell_ids": []}], {}).passed
+
+
 # ------------------------------------------------------------ sign_alignment
 def test_sign_alignment_passes_on_unsigned_ppm():
     assert guards.sign_alignment([{"registered_on": "unsigned_ppm"}]).passed
@@ -750,6 +790,10 @@ def test_run_all_can_actually_run_every_guard():
             "value_key": "coefficient",
         },
         "no_cross_model_cwm_avg": [],
+        "no_cross_estimand_pooling": {
+            "summaries": [{"group_key": "est_a|CTCF", "cell_ids": ["cell_1"]}],
+            "specifications": {"cell_1": {"estimand_id": "est_a"}},
+        },
         "sign_alignment": [{"registered_on": "unsigned_ppm"}],
         "interaction_required": [],
         "estimability_floor": [],

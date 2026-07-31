@@ -25,7 +25,8 @@ implementation preferences — they change what the tool is allowed to compute.
 | **D. adjudicate** | merge / refuse / deferred decisions with rationale and decider; emit human review — **implemented** |
 | **E. compile** | build tiered lexicons; separate discovery support from analysis admission — **implemented** |
 | **F. validate** | downstream stability: affected-subset reconstruction and backend verification — **implemented** |
-| **G. infer** | effect estimates for ONE specification over a frozen substrate — **implemented**; the specification *multiverse* is not |
+| **G. infer** | effect estimates for ONE specification over a frozen substrate — **implemented** |
+| **J. multiverse** | the predeclared grid over one frozen dataset: every planned cell recorded with its status, stability summarised within each estimand and never across — **implemented** |
 | **H. report** | render the audit trail, denominators and bias ledger |
 | **I. interpret** | describe what is inside a cluster (descriptive, not a test) — **implemented** |
 

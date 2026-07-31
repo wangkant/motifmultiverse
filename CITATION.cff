@@ -7,10 +7,13 @@ abstract: >-
   compiler: it turns several local TF-MoDISco outputs into one shared lexicon
   that is safe to compare across models, and records the merge, naming and
   admission decisions with their evidence rather than leaving them implicit.
-  This pre-alpha implements one specification per inference run, not the
-  specification multiverse the name anticipates, and its shipped adjudication
-  criteria deliberately defer duplicate and fragment collapse rather than
-  applying a merge policy no frozen document defines.
+  It runs a predeclared grid of specifications over one frozen dataset, keeping
+  scientific estimands, measurement definitions and statistical choices on
+  separate axes, recording every planned cell including the refused and the
+  non-estimable ones, and summarising stability within each estimand rather than
+  across baseline populations. Its shipped adjudication criteria deliberately
+  defer duplicate and fragment collapse rather than applying a merge policy no
+  frozen document defines.
 type: software
 authors:
   - family-names: Wang

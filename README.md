@@ -8,13 +8,16 @@ motifs across models and methods.**
 ![API: unstable](https://img.shields.io/badge/API-unstable-red)
 
 > **Pre-alpha.** What this is today, stated as precisely as the code supports: an
-> **auditable motif lexicon compiler**, and a **single-specification inference
-> reference implementation**. All nine analysis modules are implemented — `report`
+> **auditable motif lexicon compiler**, and a **specification-multiverse inference
+> reference implementation**. All ten analysis modules are implemented — `report`
 > was the last skeleton — and no subcommand raises `NotImplementedError` any more.
-> Implemented is not complete, and two gaps matter before the name misleads you:
-> the specification **multiverse** does not exist — `infer` estimates ONE
-> specification and says so on every run — and the adjudication criteria this
-> package ships leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH` undefined, so the
+> `multiverse` runs a predeclared grid over one frozen dataset, records every
+> planned cell including the refused and the non-estimable ones, and summarises
+> stability **within** each estimand: two baseline populations are two questions,
+> and a guard refuses a summary that averages across them. Implemented is not
+> complete, and one gap matters before the name misleads you: the adjudication
+> criteria this package ships leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH`
+> undefined, so the
 > default pipeline defers every duplicate and compiles an **undeduplicated**
 > lexicon by design. The collapse path is implemented and tested; what is missing
 > is a validated merge policy, which is a scientific decision nobody has frozen.
@@ -309,6 +312,7 @@ about the code rather than an opinion about it:
 | `infer` | IMPLEMENTED |
 | `report` | IMPLEMENTED |
 | `interpret` | IMPLEMENTED |
+| `multiverse` | IMPLEMENTED |
 
 Optional-backend verification and the three test counts (passed / skipped /
 failed, never summed) are per-run facts, not repository facts: see
@@ -336,10 +340,11 @@ installed-but-incapable backend is `UNVERIFIED`, with the reason.
 
 ### What does not run
 
-The specification *multiverse* inside `infer`: `infer` estimates ONE specification
-with the `FP-15` estimators and says so; sweeping specification axes and reporting
-the dropped cells with reasons is still M4. `report` renders markdown only, and
-`--html` and `--docx` refuse.
+`infer` still estimates ONE specification with the `FP-15` estimators and says so:
+the grid lives in `multiverse`, which calls `interpret` per cell rather than
+sweeping inside `infer`. What `multiverse` does not do is choose the axes for you —
+a design declares them, and a grid is only as honest as its declaration. `report`
+renders markdown only, and `--html` and `--docx` refuse.
 
 The implemented middle path persists alignment evidence, retains competing annotation
 candidates, records collapse/refusal/deferred adjudications, and validates a merge on
@@ -364,18 +369,19 @@ rather than dates.
 
 ### Guards
 
-Fifteen executable constraints live in `src/motifmultiverse/guards/`. Each has a
+Sixteen executable constraints live in `src/motifmultiverse/guards/`. Each has a
 positive test **and a falsification test that must make it fail** — the direct answer
 to finding 4 above. A meta-test walks the guard registry and fails if any guard ships
 without one.
 
 `single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness`† ·
-`no_cross_model_cwm_avg` · `sign_alignment` · `interaction_required`† ·
+`no_cross_model_cwm_avg` · `no_cross_estimand_pooling` · `sign_alignment` ·
+`interaction_required`† ·
 `estimability_floor`† · `stratum_parity`† · `short_motif_flag` · `single_family_layer`† ·
 `selection_provenance_declared` · `health_before_effect` · `comparator_declared` ·
 `index_order_matches_loader`
 
-† **No call site in this release.** Five of the fifteen are defined and
+† **No call site in this release.** Five of the sixteen are defined and
 falsification-tested but have never been put in front of an artifact, because this
 release emits nothing that carries the thing they check. Counting them as protection
 is the same error the guards exist to prevent, so they are marked here rather than
