@@ -1097,6 +1097,184 @@ def test_compile_refuses_a_motif_type_the_declared_loader_cannot_dispatch(tmp_pa
         assert "sequence" in h5["pos_patterns"]["pattern_0"]
 
 
+# --- the operations log, and the guard that reads it --------------------------
+# `guards.no_cross_model_cwm_avg` had no call site because nothing recorded what
+# any stage did to a CWM. The obvious repair -- have the collapse write down
+# "medoid" beside itself -- would have produced a log that cannot contain a
+# violation, which is the vacuity the pending registry named. `operations_log`
+# instead opens the lexicon that was just written and classifies every motif in
+# it against the registry arrays it stands for, so what the guard reads is a
+# property of the bytes. These tests fix both halves: that it says "selected" on
+# a real compile, and that it says "mean" -- and the guard then refuses -- when
+# the bytes are an average, without the classifier being told.
+def _two_model_registry(tmp_path):
+    """Two analyses, two models, and deliberately different motif content.
+
+    `_modisco` seeds its patterns by position, so two files built with it hold
+    bit-identical matrices -- and the mean of two identical matrices IS one of
+    them, the one case `operations_log` documents that it cannot see. Seeding the
+    second file apart makes an average of one motif from each model a matrix that
+    is neither of its inputs.
+    """
+    first, second = tmp_path / "model_a.h5", tmp_path / "model_b.h5"
+    for path, offset in ((first, 0), (second, 200)):
+        with h5py.File(path, "w") as h5:
+            for i in range(2):
+                _pattern(h5, "pos_patterns", f"pattern_{i}", seed=offset + i)
+    project = _project(tmp_path, analyses=[
+        {"id": "modelA_r1", "model": "modelA", "readout": "r1", "union_id": "MA",
+         "context": "promoter", "modisco_h5": str(first)},
+        {"id": "modelB_r1", "model": "modelB", "readout": "r1", "union_id": "MB",
+         "context": "promoter", "modisco_h5": str(second)},
+    ])
+    registry = tmp_path / "two_model_registry"
+    ingest.ingest_project(project, registry)
+    return registry
+
+
+def _average_on_write(monkeypatch, representative, absorbed):
+    """Make the writer construct `representative` as the mean of it and `absorbed`.
+
+    This is the future edit the guard exists to catch, applied without touching
+    the classifier or the guard: `_write_h5` is the one place a motif's matrices
+    reach the file, and everything downstream of it -- the log, the axes, the
+    refusal -- has to come out of the bytes on its own.
+    """
+    real = compile_mod._write_h5
+
+    def averaging(path, ordered, arrays):
+        payload = {
+            node["node_id"]: {name: np.asarray(arrays[node["node_id"]][name][:], dtype=float)
+                              for name in arrays[node["node_id"]]}
+            for _, _, node in ordered
+        }
+        if representative in payload:
+            other = {name: np.asarray(arrays[absorbed][name][:], dtype=float)
+                     for name in arrays[absorbed]}
+            payload[representative] = {
+                name: (values + other[name]) / 2.0
+                for name, values in payload[representative].items() if name in other
+            }
+        real(path, ordered, payload)
+
+    monkeypatch.setattr(compile_mod, "_write_h5", averaging)
+
+
+def _operations(lex_dir):
+    return json.loads((lex_dir / "combination_operations.json").read_text())
+
+
+def test_the_operations_log_reports_a_collapse_as_a_selection_read_off_the_bytes(tmp_path):
+    """A real collapse, and what the log says about it.
+
+    The representative's emitted matrices are the registry's own, so the entry is
+    `select_representative` and names both members as its inputs. Nothing here
+    asked the collapse what it did.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    representative, absorbed = nodes[0]["node_id"], nodes[1]["node_id"]
+    decisions = _write_decisions(
+        tmp_path, [representative, absorbed], representative, merge_confidence="HIGH")
+
+    lex = tmp_path / "lex"
+    compile_mod.compile_lexicons(registry, lex, decisions_path=decisions, verify="skip")
+
+    operations = _operations(lex)
+    assert {entry["op"] for entry in operations} == {"copy", "select_representative"}
+    collapsed = [entry for entry in operations
+                 if entry["op"] == "select_representative" and entry["tier"] == "core"]
+    assert len(collapsed) == 1
+    assert collapsed[0]["inputs"] == [representative, absorbed]
+    assert collapsed[0]["group_by"] == list(guards.CROSS_MODEL_AXES)
+    assert guards.no_cross_model_cwm_avg(operations).passed
+
+
+def test_a_representative_averaged_across_two_models_is_refused_before_publication(
+        tmp_path, monkeypatch):
+    """The falsification the pending entry said this guard could not have.
+
+    Nothing in the classifier or the guard is told that an average happened: the
+    writer produces one, and the emitted matrices stop matching either input's
+    registry arrays and start matching their mean. `model` is then not among the
+    axes the operation held fixed, and the compile is refused with nothing
+    published.
+    """
+    registry = _two_model_registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    by_analysis = {node["model"]: node["node_id"] for node in reversed(nodes)}
+    representative, absorbed = by_analysis["modelA"], by_analysis["modelB"]
+    decisions = _write_decisions(
+        tmp_path, [representative, absorbed], representative, merge_confidence="HIGH")
+    _average_on_write(monkeypatch, representative, absorbed)
+
+    lex = tmp_path / "lex"
+    with pytest.raises(guards.GuardError, match="does not hold model fixed"):
+        compile_mod.compile_lexicons(registry, lex, decisions_path=decisions, verify="skip")
+    assert sorted(path.name for path in lex.iterdir()) == [
+        "guard_outcomes.json", "provenance.json"]
+    recorded = json.loads((lex / "guard_outcomes.json").read_text())
+    assert [(row["guard_id"], row["passed"]) for row in recorded] == [
+        ("no_cross_model_cwm_avg", False)]
+
+
+def test_a_representative_averaged_within_one_model_is_recorded_and_still_passes(
+        tmp_path, monkeypatch):
+    """FP-05's remaining hole, made visible rather than closed.
+
+    A mean over two motifs from the same analysis holds model, readout and
+    metacluster fixed, so this guard passes it -- deliberately; it is a
+    cross-model rule. What changes is that the operation is no longer invisible:
+    the shipped log says `mean` over two named inputs, which is the evidence a
+    reader needs to notice a constructed representative at all.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    representative, absorbed = nodes[0]["node_id"], nodes[1]["node_id"]
+    assert nodes[0]["model"] == nodes[1]["model"]
+    decisions = _write_decisions(
+        tmp_path, [representative, absorbed], representative, merge_confidence="HIGH")
+    _average_on_write(monkeypatch, representative, absorbed)
+
+    lex = tmp_path / "lex"
+    compile_mod.compile_lexicons(registry, lex, decisions_path=decisions, verify="skip")
+
+    averaged = [entry for entry in _operations(lex) if entry["op"] == "mean"]
+    assert averaged and all(
+        entry["inputs"] == [representative, absorbed] for entry in averaged)
+    assert all(entry["group_by"] == list(guards.CROSS_MODEL_AXES) for entry in averaged)
+    assert guards.no_cross_model_cwm_avg(_operations(lex)).passed
+
+
+def test_an_emitted_motif_that_is_neither_its_input_nor_their_mean_is_refused(
+        tmp_path, monkeypatch):
+    """An operation this package cannot name, it does not file under one it can.
+
+    Labelling an unrecognised construction `mean` would be the classifier
+    inventing the finding; labelling it `copy` would let it past the guard. It is
+    refused instead, naming what it was compared against.
+    """
+    registry = _registry(tmp_path)
+    real = compile_mod._write_h5
+
+    def doctored(path, ordered, arrays):
+        payload = {
+            node["node_id"]: {name: np.asarray(arrays[node["node_id"]][name][:], dtype=float)
+                              for name in arrays[node["node_id"]]}
+            for _, _, node in ordered
+        }
+        first = ordered[0][2]["node_id"]
+        payload[first] = {name: values * 2.0 for name, values in payload[first].items()}
+        real(path, ordered, payload)
+
+    monkeypatch.setattr(compile_mod, "_write_h5", doctored)
+    with pytest.raises(compile_mod.CompileError, match="neither the registry's own matrices"):
+        compile_mod.compile_lexicons(registry, tmp_path / "lex", verify="skip")
+
+
 # --- regression: a refused tier must not leave a publishable fragment ----------
 # `validate.load_lexicon_binding` binds a lexicon set by globbing
 # `*.manifest.json`, so a compile that wrote `core` and then refused `expanded`
@@ -1214,3 +1392,120 @@ def test_the_discovery_file_is_hashed_once_per_analysis_not_once_per_pattern(
     digests = {node.provenance["modisco_h5_sha256"] for node in nodes}
     assert len(digests) == 1
     assert len([c for c in calls if c.endswith("a.h5")]) == 1
+
+
+def test_compile_records_the_round_trip_outcome_beside_the_lexicons(tmp_path):
+    """The round trip is what `compile` exists to guarantee; the directory now says so.
+
+    `index_order_matches_loader` is run per tier against the REAL loader, and the
+    lexicon directory used to carry no statement that it had been. Requires the
+    backend: with none installed no round trip happens and there is, correctly,
+    nothing to record.
+    """
+    require_finemo_backend()
+
+    from motifmultiverse import guard_log
+
+    out = tmp_path / "lex"
+    manifests = compile_mod.compile_lexicons(_registry(tmp_path), out)
+
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    assert {row["guard_id"] for row in recorded} == {
+        "index_order_matches_loader", "no_cross_model_cwm_avg"}
+    assert all(row["stage"] == "compile" and row["passed"] for row in recorded)
+    recorded = [row for row in recorded
+                if row["guard_id"] == "index_order_matches_loader"]
+    assert len(recorded) == len(manifests)
+    for tier, manifest in manifests.items():
+        assert any(f"tier {tier!r}" in row["subject"]
+                   and manifest.lexicon_content_hash in row["subject"]
+                   for row in recorded), tier
+
+
+def test_compile_records_nothing_for_a_tier_no_backend_could_verify(tmp_path,
+                                                                    no_finemo_backend):
+    """No round trip happened, so no outcome exists -- and none is invented.
+
+    Writing a "not verified" entry would put a guard's name in the record of a run
+    where that guard never saw the lexicon, which is an absence rendered as a
+    result. The backend's absence is `status`'s UNVERIFIED and the CLI's own line.
+    """
+    from motifmultiverse import guard_log
+
+    out = tmp_path / "lex"
+    compile_mod.compile_lexicons(_registry(tmp_path), out, verify="auto")
+
+    assert [row["guard_id"] for row in guard_log.read_guard_outcomes(out)] == [
+        "no_cross_model_cwm_avg"]
+
+
+def test_a_cross_model_mean_made_upstream_of_the_registry_passes(tmp_path):
+    """The blind spot in `no_cross_model_cwm_avg`, pinned so it cannot be forgotten.
+
+    `compile.operations_log` classifies the emitted lexicon against the registry
+    arrays, so what it can see is combination performed BETWEEN those two points.
+    A cross-model mean performed one step earlier -- where a real meta-analysed-CWM
+    stage would live -- arrives as an ordinary registry motif, is classified
+    `copy`, and the guard passes on a lexicon that contains exactly the operation
+    the guard prohibits.
+
+    This test asserts the gap rather than the fix, which needs saying. The gap is
+    not closable at compile: nothing downstream of `ingest` can tell a motif that
+    was averaged upstream from one that was discovered. What made it worth a test
+    is the consequence -- the pass sentence is persisted verbatim by `guard_log`
+    and printed verbatim by `report`, so an unscoped one would become a durable
+    published claim of something false. So this also pins the SENTENCE: if a future
+    edit widens it back to "no CWM averaging crosses model, readout or
+    metacluster", this fails and says why.
+
+    When a combining stage does appear, the honest close is a record written by
+    that stage's inputs, not a better classifier here.
+    """
+    reg, lex = tmp_path / "registry", tmp_path / "lex"
+    a, b, c = tmp_path / "a.h5", tmp_path / "b.h5", tmp_path / "c.h5"
+    with h5py.File(a, "w") as h5:
+        _pattern(h5, "pos_patterns", "pattern_0", seed=1)
+    with h5py.File(b, "w") as h5:
+        _pattern(h5, "pos_patterns", "pattern_0", seed=900)
+    # The prohibited operation, performed upstream of the registry.
+    with h5py.File(a) as ha, h5py.File(b) as hb, h5py.File(c, "w") as hc:
+        grp = hc.require_group("pos_patterns").create_group("pattern_0")
+        for ds in ("contrib_scores", "hypothetical_contribs", "sequence"):
+            grp.create_dataset(ds, data=(np.asarray(ha[f"pos_patterns/pattern_0/{ds}"][:], float)
+                                         + np.asarray(hb[f"pos_patterns/pattern_0/{ds}"][:], float)) / 2.0)
+        grp.create_group("seqlets").create_dataset("n_seqlets", data=np.array(500))
+
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "project": "p", "peak_universe_id": "u1",
+        "analyses": [
+            {"id": i, "model": f"model{i}", "readout": "r1", "union_id": f"M{i}",
+             "context": "promoter", "modisco_h5": str(path)}
+            for i, path in (("A", a), ("B", b), ("C", c))
+        ],
+    }))
+    ingest.ingest_project(project, reg)
+    compile_mod.compile_lexicons(reg, lex, verify="skip")
+
+    ops = json.loads((lex / "combination_operations.json").read_text())
+    assert {op["op"] for op in ops} == {"copy"}, (
+        "the averaged motif was classified as something other than a copy; if the "
+        "classifier gained upstream reach, this test is the one to rewrite")
+
+    # It really is the prohibited operation, in the published bytes.
+    _, nodes, arrays = ingest.load_registry(reg)
+    by_model = {n["model"]: n["node_id"] for n in nodes}
+    mean_ab = (np.asarray(arrays[by_model["modelA"]]["cwm"][:], float)
+               + np.asarray(arrays[by_model["modelB"]]["cwm"][:], float)) / 2.0
+    arrays.close()
+    with h5py.File(lex / "core.h5") as h5:
+        published = [name for name in h5["pos_patterns"]
+                     if np.allclose(h5[f"pos_patterns/{name}/contrib_scores"][:], mean_ab)]
+    assert published, "the probe did not actually publish a cross-model mean"
+
+    result = guards.no_cross_model_cwm_avg(ops)
+    assert result.passed, "the guard is expected to pass here -- that IS the gap"
+    assert "outside what this checked" in result.detail, (
+        "the pass sentence no longer states its scope; it is persisted verbatim by "
+        "guard_log and printed verbatim by report, so an unscoped sentence becomes a "
+        f"published claim that this very lexicon refutes. Got: {result.detail!r}")

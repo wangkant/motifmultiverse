@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from motifmultiverse import guards
+from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import MotifNode, SchemaError
 from motifmultiverse.schema.annotation import (
@@ -45,8 +46,17 @@ class AnnotationRun:
 
 
 def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBackend], *,
-                   occurrence_nulls: Mapping[str, Mapping[str, Any]] | None = None) -> AnnotationRun:
-    """Collect backend proposals without ever assigning a node's family fields."""
+                   occurrence_nulls: Mapping[str, Mapping[str, Any]] | None = None,
+                   guard_log: GuardLog | None = None) -> AnnotationRun:
+    """Collect backend proposals without ever assigning a node's family fields.
+
+    ``guard_log`` records what this stage's guard returned; bound to the run's
+    output directory by :func:`annotate_registry`, the outcome is written before
+    the guard's refusal propagates, so an annotation run refused for an unflagged
+    low-confidence motif leaves the sentence that refused it in
+    ``guard_outcomes.json`` rather than only on stderr.
+    """
+    guard_log = guard_log if guard_log is not None else GuardLog("annotate")
     node_ids = {node.node_id for node in nodes}
     candidates_by_id: dict[str, AnnotationCandidate] = {}
     logs: list[AnnotationBackendLog] = []
@@ -93,19 +103,27 @@ def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBack
     # written threshold implementation in guards/. The two had already drifted --
     # the guard read a legitimate motif_length of 0 as "absent" and passed the
     # weakest possible motif -- which is the argument for keeping both.
-    guards.short_motif_flag([
-        {
-            "variant_id": candidate.candidate_id,
-            "motif_length": candidate.motif_length,
-            "seqlet_count": candidate.seqlet_count,
-            "annotation_matches": (
-                {"tomtom_q": candidate.q_value}
-                if candidate.source.casefold() == "tomtom" else {}
-            ),
-            "low_confidence_annotation": candidate.low_confidence_annotation,
-        }
-        for candidate in retained
-    ]).raise_if_failed()
+    guard_log.record(
+        guards.short_motif_flag([
+            {
+                "variant_id": candidate.candidate_id,
+                "motif_length": candidate.motif_length,
+                "seqlet_count": candidate.seqlet_count,
+                "annotation_matches": (
+                    {"tomtom_q": candidate.q_value}
+                    if candidate.source.casefold() == "tomtom" else {}
+                ),
+                "low_confidence_annotation": candidate.low_confidence_annotation,
+            }
+            for candidate in retained
+        ]),
+        subject=(
+            "the annotation candidates about to be written to "
+            "annotation_candidates.parquet, from backend(s) "
+            + (", ".join(f"{entry.backend}/{entry.backend_version}" for entry in logs)
+               or "none")
+        ),
+    ).raise_if_failed()
     return AnnotationRun(candidates=retained, backend_logs=tuple(logs))
 
 
@@ -178,7 +196,8 @@ def annotate_registry(registry_dir: str | Path, out_dir: str | Path, *,
             # adapter runs; inventing a checksum here would obscure that fact.
             continue
     provenance.write(out_dir)
-    result = annotate_nodes(nodes, backends, occurrence_nulls=occurrence_nulls)
+    result = annotate_nodes(nodes, backends, occurrence_nulls=occurrence_nulls,
+                            guard_log=GuardLog("annotate", out_dir))
     write_annotation_artifacts(out_dir, result)
     return result
 

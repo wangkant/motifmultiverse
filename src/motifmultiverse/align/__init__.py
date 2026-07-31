@@ -736,6 +736,7 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     on stdout is exactly what it saw before.
     """
     from motifmultiverse import guards
+    from motifmultiverse.guard_log import GuardLog
     from motifmultiverse.ingest import load_registry
     from motifmultiverse.provenance import record
 
@@ -826,7 +827,19 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
         edges.append(evidence)
         null_rows.append(null_row)
 
-    guards.sign_alignment([e.to_dict() for e in edges]).raise_if_failed()
+    GuardLog("align", out).record(
+        guards.sign_alignment([e.to_dict() for e in edges]),
+        # No edge count here on purpose. `AlignmentRunSummary`'s denominators are
+        # returned and printed and deliberately written to no file; a count
+        # smuggled into a guard-outcome sentence would become the on-disk
+        # denominator this module has decided not to publish, in the one artifact
+        # nobody would think to look for it in.
+        subject=(
+            "the alignment edges about to be written to alignment_edges.parquet, "
+            f"registered under rule version {REGISTRATION_RULE_VERSION} "
+            f"(null_shuffles={null_shuffles}, seed={seed})"
+        ),
+    ).raise_if_failed()
 
     edges_path = _write_edges(out, edges)
     null_summary_path = _write_null_summary(out, null_rows)

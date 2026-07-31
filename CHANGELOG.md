@@ -56,10 +56,30 @@ implementation.
   `comparator_declared`.
 - `docs/LESSONS.md`: every architecture constraint indexed back to the failure that
   produced it, and to what it currently blocks.
+- `compile.operations_log` and the `combination_operations.json` it publishes: for every
+  motif in every emitted tier, whether its matrices are the registry's own (`copy` /
+  `select_representative`) or the mean of the ones it stands for (`mean`), together with
+  the axes that operation held fixed. It is a classification of the written lexicon
+  against the registry arrays, not the compiler's account of its own behaviour, which is
+  what makes it admissible evidence for the guard that reads it.
+- `interpret.FamilyEffect.estimator_min_blocks`: the block floor the effect's own
+  estimator enforced, or `None` where it enforced none. The `bca-wild-cluster` path
+  refuses below `infer.MIN_ESTIMABLE_BLOCKS`; the percentile path floors replicates and
+  not blocks, and the artifact did not say so.
 - Exit code `4` for a refusal — the tool declined to produce a number and says which
   rule declined it.
 
 ### Changed
+- `guards.no_cross_model_cwm_avg` has a call site: `compile.compile_lexicons` runs it over
+  the operations log before publication, so a lexicon holding a CWM averaged across
+  model, readout or metacluster is refused rather than written. Five guards, not six, now
+  have no call site; `guards.GUARDS_AWAITING_INPUT` and the README daggers follow.
+- `guards.GUARDS_AWAITING_INPUT["single_family_layer"]` now states *which* answer it
+  reached about `interpret.FamilyComposition.peak_share` — defined, and out of the
+  guard's scope, because its denominator is searched peaks and being the only family
+  constrains it to nothing (0.310670 for CTCF/CTCFL-like and 0.998143 for AP-1/bZIP on
+  the real K562 substrate) — rather than leaving a future round to re-derive it. The
+  guard stays unwired, still blocked on the `BUDGET_FRACTION` decision.
 - `docs/bias_ledger.tsv` and `docs/constraints.tsv` are now **transcribed** from design
   report v0.8 (20 axes `BA-01`…`BA-20`; 25 principles `FP-01`…`FP-25`) rather than
   reconstructed. The earlier counts of 21 and 26 were miscounts that included the header
@@ -222,6 +242,24 @@ implementation.
   a stale result is labelled rather than removed. Nothing is deleted: destroying a real
   result to prevent a misreading of it was never the repair. A run refused before it
   writes anything still creates no output directory.
+- **Every run records what its guards returned** (`motifmultiverse.guard_log`,
+  `guard_outcomes.json`). A tool whose thesis is that decisions carry their evidence
+  recorded the outcome of none of its own executable constraints: `report` had to print,
+  in *what this report does not know*, that no artifact persisted a `guards.GuardResult`,
+  so the strongest thing it could say was which guards the **code path** calls. Every
+  stage that runs a guard — `interpret`, `infer`, `align`, `annotate`, `compile` — now
+  appends the guard's own pass/fail, its own sentence, and what it was handed, and it is
+  written *as the guard returns*, so a run refused **by** a guard records which one
+  refused it even though it produces no result artifact at all. It is its own file rather
+  than a field of `provenance.json` (written before the body runs, by contract) or of the
+  result (which a failing guard prevents). `report` renders it, joined to the run through
+  `run_status.artifacts_are_from.provenance_records`, and keeps the old sentence for an
+  artifact that carries no such record. Two inferences are refused in code and in prose:
+  a guard **absent** from a record is not recorded as not having run, and a recorded pass
+  is what the guard returned, not evidence that it was right to return it. It closes no
+  entry in `guards.GUARDS_AWAITING_INPUT` — a record of what a guard returned is not an
+  independent claim for a guard to check — and `four_state_missingness`'s entry now says
+  so, along with the two things that do stand between it and a call site.
 - **`report` refuses an unparseable input instead of raising through the CLI.** Both
   `interpretation.json` and `provenance.json` were read with a bare `json.loads`, so a
   truncated or hand-edited record escaped as a `JSONDecodeError`: a traceback and exit 1,

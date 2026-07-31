@@ -976,6 +976,67 @@ def test_estimability_floor_would_be_vacuous_on_the_effects_table():
         assert effect["n_blocks"] >= floors.min_blocks
 
 
+def test_a_single_family_composition_share_is_measured_not_forced_by_being_alone():
+    """The question the entry has to answer: undefined, or defined and out of scope.
+
+    Those are different answers and only one of them puts this guard on
+    `FamilyComposition`. It is the second, and the difference is measurable rather
+    than a matter of reading. The share this guard rules on has the stratum's
+    other families in its denominator, so one family forces it to 1.0
+    IDENTICALLY -- the number cannot come out otherwise, which is why it carries
+    no information. `FamilyComposition.peak_share` counts searched PEAKS, and
+    being the only family constrains it to nothing at all: the same single-family
+    query below reports 0.5 or 1.0 depending on what was measured.
+
+    Verified on the real K562 substrate too (576,589 rows, 33,917 peaks):
+    restricted to one family the composition comes out 0.310670 for
+    CTCF/CTCFL-like and 0.998143 for AP-1/bZIP -- two single-family compositions,
+    neither of them 1.0.
+
+    So an estimability status on `FamilyComposition` would not be wiring this
+    guard, it would be inventing an estimability semantics for an estimable
+    quantity -- and a 1.0 marked NOT_ESTIMABLE would suppress the finding that
+    every searched peak carries the family. This fails if that field is ever
+    added, or if the entry stops recording which of the two answers it reached.
+    """
+    from motifmultiverse import interpret
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    from motifmultiverse.schema import HitRecord, Missingness
+
+    entry = GUARDS_AWAITING_INPUT["single_family_layer"]
+    assert "DEFINED AND OUT OF SCOPE" in entry.why_not_a_call_site, (
+        "the entry must say WHICH answer it reached about FamilyComposition.peak_share, "
+        "not only that the guard is not wired there"
+    )
+    assert not {"status", "estimability", "estimable"} & set(
+        interpret.FamilyComposition.__dataclass_fields__), (
+        "FamilyComposition now carries an estimability state; re-read "
+        "GUARDS_AWAITING_INPUT['single_family_layer'] -- the entry records that the "
+        "share there is defined, so a status field on it is a decision someone made "
+        "on other grounds and this guard is still not its reader"
+    )
+
+    def rows(n_carrying: int, n_total: int) -> list[HitRecord]:
+        out = []
+        for i in range(n_total):
+            start = i * 1_000_000
+            carries = i < n_carrying
+            out.append(HitRecord(
+                region_id=f"r{i:03d}", chrom="chr1", start=start, end=start + 500,
+                missingness=Missingness.USED if carries else Missingness.NO_SEQUENCE_MATCH,
+                input_scale=17, lexicon_id="lex", substrate_id="e" * 64,
+                variant_id="UA_ONLY_00", family_id="ONLY",
+                hit_coefficient=1.0 if carries else None))
+        return out
+
+    for n_carrying, expected in ((4, 0.5), (8, 1.0)):
+        peaks = interpret.peak_universe(rows(n_carrying, 8), 1_000_000)
+        composition = interpret.compose(peaks, sorted(peaks))
+        assert [c.family_id for c in composition] == ["ONLY"], "a single-family composition"
+        assert composition[0].peak_share == expected
+        assert composition[0].n_peaks_searched == 8
+
+
 def test_single_family_layer_names_a_share_that_really_does_come_out_one():
     """The failure the guard describes is live under BUDGET_FRACTION.
 
@@ -1014,26 +1075,27 @@ def test_single_family_layer_names_a_share_that_really_does_come_out_one():
     )
 
 
-def test_the_three_guards_with_no_producing_stage_have_none():
-    """`no_cross_model_cwm_avg`, `interaction_required`, `stratum_parity`.
+def test_the_two_guards_with_no_producing_stage_have_none():
+    """`interaction_required`, `stratum_parity`.
 
     Each waits on a stage that does not exist, and "does not exist" is checkable:
     no record type carries the field the guard reads. When one appears, this fails
     and says which entry to re-read -- which beats discovering it by grepping, the
     way the seven unwired guards were found in the first place.
+
+    `no_cross_model_cwm_avg` used to be the third, and the way it left is the
+    reason this test is worth keeping. Its entry said an operations log would hold
+    "only medoid-shaped entries" and so could not contain a violation. That was
+    true of a log the combining stage writes about itself; it stopped being true
+    when `compile.operations_log` began classifying the emitted lexicon against the
+    registry arrays instead -- the same code, handed a file that averages, produces
+    the violating entry. What the entry was really waiting for was a log with an
+    author it is not.
     """
-    from motifmultiverse import align, compile, infer, interpret
+    from motifmultiverse import infer, interpret
     from motifmultiverse.guards import GUARDS_AWAITING_INPUT
 
-    assert GUARDS_AWAITING_INPUT["no_cross_model_cwm_avg"].nearest_artifact == (
-        "compile.compile_lexicons")
-    combining = [n for n in (*align.__all__, *compile.__all__)
-                 if any(word in n.lower() for word in ("average", "mean_cwm", "operations_log"))]
-    assert not combining, (
-        f"a stage that can combine CWMs now exists ({combining}); it must log each "
-        "combination with the axes it held fixed, and no_cross_model_cwm_avg reads "
-        "that log"
-    )
+    assert "no_cross_model_cwm_avg" not in GUARDS_AWAITING_INPUT
 
     records = (interpret.FamilyEffect, interpret.FamilyComposition, infer.TwoPartEffect)
     fields = {f for record in records for f in record.__dataclass_fields__}

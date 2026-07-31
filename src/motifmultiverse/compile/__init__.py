@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from motifmultiverse import guards
+from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.ingest import GROUP_METACLUSTER, MODISCO_GROUPS, load_registry
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import (
@@ -61,7 +62,7 @@ from motifmultiverse.schema import (
 __all__ = [
     "CompileError", "BackendMissing", "BackendIncompatible", "TIERS",
     "compile_lexicons", "lexicon_semantic_hash", "load_back", "probe_backend",
-    "validate_compiled_lexicon", "verify_roundtrip",
+    "operations_log", "validate_compiled_lexicon", "verify_roundtrip",
 ]
 
 TIERS = ("core", "expanded", "sensitivity")
@@ -807,6 +808,185 @@ def _write_h5(path: Path, ordered: list[tuple[str, str, dict[str, Any]]], arrays
                 dest.create_dataset("sequence", data=np.asarray(src["ppm"][:], dtype=float))
 
 
+#: The emitted HDF5 dataset -> the registry array it must have been copied from.
+#: The reverse of what :func:`_write_h5` writes. ``_MOTIF_TYPE_DATASET`` maps the
+#: *loader's* vocabulary onto ours for the motif the loader will read; this maps
+#: the *file's*, because :func:`operations_log` has to open the written file and
+#: account for every dataset in it, not only the one the loader wants.
+_EMITTED_DATASET_SOURCE = {
+    "contrib_scores": "cwm",
+    "hypothetical_contribs": "hypothetical_cwm",
+    "sequence": "ppm",
+}
+
+#: Relative tolerance for recognising an emitted matrix AS the arithmetic mean of
+#: the matrices it stands for. "Unchanged" is tested exactly -- a copy is a copy,
+#: and any inexactness there is already a change -- but a mean is *computed*, and
+#: the same mean computed in a different summation order differs in the last bits.
+#: An operation must not escape classification (and therefore the guard) because
+#: whoever wrote it summed in a different order than this classifier does.
+_MEAN_MATCH_RTOL = 1e-12
+
+
+def _registry_matrix(arrays: Any, registry_node: str, array_key: str) -> Any:
+    """One node's registry matrix as float64, or None if the registry has none."""
+    import numpy as np
+
+    group = arrays[registry_node]
+    if array_key not in group:
+        return None
+    return np.asarray(group[array_key][:], dtype=float)
+
+
+def operations_log(tier: str,
+                   ordered: list[tuple[str, str, dict[str, Any]]],
+                   decisions: list[dict[str, Any]],
+                   nodes_by_id: dict[str, dict[str, Any]],
+                   registry_arrays: Any,
+                   emitted_h5_path: str | os.PathLike[str]) -> list[dict[str, Any]]:
+    """What each emitted motif was built from, classified from the bytes.
+
+    This is the input :func:`guards.no_cross_model_cwm_avg` reads, and where it
+    comes from is the whole point of it. The obvious operations log is one the
+    combining stage writes about itself -- ``{"op": "medoid", "group_by": [...]}``
+    appended next to the code that picked the medoid. A guard fed that log audits
+    a claim produced by the code it is auditing: it passes for exactly as long as
+    somebody keeps the claim honest by hand, which is the same unchecked
+    invariant the guard was written to replace, one level further in. It is the
+    same reason the four-state missingness guard is deliberately not wired into
+    ``interpret.health_report``, where the claim and the recomputation would be
+    the same expression.
+
+    So nothing here asks the writer what it did. The lexicon is opened and read
+    back, and each emitted motif is classified against the arrays ``ingest``
+    recorded for the nodes it stands for:
+
+    ``copy``
+        the emitted matrices are bit-identical to the registry's for this node,
+        and no collapse absorbed anything into it.
+    ``select_representative``
+        the same, for a motif that IS a collapse's representative: the collapse
+        was applied by choosing an observed member, not by combining members.
+    ``mean``
+        the emitted matrices are the elementwise arithmetic mean of the matrices
+        of the nodes this motif stands for. This is the entry the guard rules on,
+        and no stage in this release produces it -- but a stage that started to
+        would produce it *here*, without editing this function, because the
+        classification is of the file.
+
+    Anything else is refused rather than filed under a label that does not fit:
+    an emitted matrix that is neither one of its inputs nor their mean was
+    produced by an operation this package cannot name, and an operation nobody
+    can name cannot be audited for which axes it held fixed.
+
+    ``group_by`` is the subset of ``guards.CROSS_MODEL_AXES`` on which the inputs
+    all agree -- what the operation held fixed, read from the registry records
+    rather than declared. It is recorded for every entry, including the ones the
+    guard skips, because "this collapse crossed two models but averaged nothing"
+    is worth being able to see.
+
+    Three limits, stated because a pass here should not be read as more than it
+    is:
+
+    * If every input carries identical matrices, their mean IS one of them and
+      this classifier calls it ``copy``. An averaging step over indistinguishable
+      inputs is invisible in the artifact -- to this reader and to any other.
+    * ``inputs`` is the representative plus the decision's other members that
+      this tier did not emit. A member that this tier dropped for an unrelated
+      reason (an ``EXCLUDED`` analysis tier) is therefore in the input set as
+      well; that can only widen the set a mean is checked against, so it can
+      cause a refusal to classify, never a silent pass.
+    * The guard this feeds says nothing about a representative averaged *within*
+      one model (`docs/CONSTRAINTS.md` FP-05). That clause is carried by
+      ``_members_for_tier``, which refuses a representative that is not one of
+      its own members.
+    """
+    import h5py
+    import numpy as np
+
+    emitted_ids = {node["node_id"] for _, _, node in ordered}
+    absorbed_by_representative: dict[str, tuple[str, list[str]]] = {}
+    for decision in decisions:
+        if decision.get("decision") != Decision.COLLAPSE.value:
+            continue
+        representative = decision.get("representative")
+        if representative not in emitted_ids:
+            continue
+        absorbed = [member for member in (decision.get("members") or ())
+                    if member != representative
+                    and member not in emitted_ids
+                    and member in nodes_by_id]
+        if absorbed:
+            absorbed_by_representative[representative] = (
+                str(decision.get("cluster_id")), absorbed,
+            )
+
+    log: list[dict[str, Any]] = []
+    with h5py.File(emitted_h5_path, "r") as h5:
+        for group, pattern_name, node in ordered:
+            emitted_node = node["node_id"]
+            tag = f"{group}.{pattern_name}"
+            motif = h5[group][pattern_name]
+            unknown = sorted(set(motif) - set(_EMITTED_DATASET_SOURCE))
+            if unknown:
+                raise CompileError(
+                    f"{tier}: emitted motif {tag} carries dataset(s) {unknown} that no "
+                    "registry array corresponds to, so what produced them cannot be "
+                    "classified and no operations log can account for this lexicon."
+                )
+            emitted = {name: np.asarray(motif[name][:], dtype=float) for name in motif}
+            cluster_id, absorbed = absorbed_by_representative.get(emitted_node, (None, []))
+            inputs = [emitted_node, *absorbed]
+
+            unchanged = True
+            for name, values in emitted.items():
+                own = _registry_matrix(registry_arrays, emitted_node,
+                                       _EMITTED_DATASET_SOURCE[name])
+                if own is None or not np.array_equal(values, own):
+                    unchanged = False
+                    break
+            operation: str | None = None
+            if unchanged:
+                operation = "select_representative" if absorbed else "copy"
+            else:
+                parts_per_dataset = {
+                    name: [_registry_matrix(registry_arrays, source,
+                                            _EMITTED_DATASET_SOURCE[name])
+                           for source in inputs]
+                    for name in emitted
+                }
+                if all(
+                    all(part is not None for part in parts)
+                    and len({part.shape for part in parts}) == 1
+                    and np.allclose(emitted[name], sum(parts[1:], parts[0]) / len(parts),
+                                    rtol=_MEAN_MATCH_RTOL, atol=0.0)
+                    for name, parts in parts_per_dataset.items()
+                ):
+                    operation = "mean"
+            if operation is None:
+                raise CompileError(
+                    f"{tier}: emitted motif {tag} ({emitted_node}) is neither the "
+                    f"registry's own matrices for that node nor the elementwise mean of "
+                    f"{sorted(inputs)}. This package cannot name the operation that "
+                    "produced it, and an operation it cannot name cannot be audited "
+                    "for the axes it held fixed (guards.no_cross_model_cwm_avg). "
+                    "Refusing to publish a lexicon whose contents are unaccounted for."
+                )
+
+            log.append({
+                "tier": tier,
+                "pattern_tag": tag,
+                "op": operation,
+                "emitted_node": emitted_node,
+                "cluster_id": cluster_id,
+                "inputs": inputs,
+                "group_by": [axis for axis in guards.CROSS_MODEL_AXES
+                             if len({nodes_by_id[source].get(axis)
+                                     for source in inputs}) == 1],
+            })
+    return log
+
+
 def _compare(tier: str, index: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, Any]]:
     """State, for every other tier, what this contrast does and does not vary."""
     def split(rows: list[dict[str, Any]]) -> tuple[set[str], set[str]]:
@@ -1119,6 +1299,11 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
     loader_parameters = _resolve_loader_parameters(loader_parameters)
 
     prov = record("compile", seed=seed)
+    # Bound to `out`, not to the staging directory: the outcome of a round trip is
+    # a fact about the run whether or not the tier it verified is ever published,
+    # and staging is deleted on refusal. Same reason the provenance record above
+    # goes to `out` before anything is compiled.
+    guard_log = GuardLog("compile", out)
     meta, nodes, arrays = load_registry(registry_dir)
     try:
         payload: dict[str, Any] = {}
@@ -1188,10 +1373,17 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             )
 
         manifests: dict[str, LexiconManifest] = {}
+        nodes_by_id = {node["node_id"]: node for node in nodes}
+        operations: list[dict[str, Any]] = []
         for tier in tiers:
             ordered = ordered_by_tier[tier]
             h5_path = staging / f"{tier}.h5"
             _write_h5(h5_path, ordered, arrays)
+            # Read back what was just written and classify it against the
+            # registry. Deliberately not a note this loop makes about its own
+            # intentions: see `operations_log`.
+            operations += operations_log(
+                tier, ordered, decisions, nodes_by_id, arrays, h5_path)
             content_hash = lexicon_semantic_hash(
                 ordered, arrays,
                 schema_version=LEXICON_MANIFEST_SCHEMA_VERSION,
@@ -1229,10 +1421,41 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             if verify == "skip":
                 continue
             try:
-                verify_roundtrip(h5_path, manifest).raise_if_failed()
+                guard_log.record(
+                    verify_roundtrip(h5_path, manifest),
+                    subject=(
+                        f"tier {tier!r}: the pattern order recorded in its manifest "
+                        f"(lexicon_content_hash={manifest.lexicon_content_hash}) against the "
+                        f"order the real {loader_backend} loader returns for {tier}.h5"
+                    ),
+                ).raise_if_failed()
             except BackendMissing:
+                # Nothing is recorded for this tier: the loader could not be
+                # called, so no guard ran and no outcome exists. Writing a
+                # "not verified" entry here would put a guard id in the record
+                # of a run where that guard never saw the lexicon, which is the
+                # absence-as-a-result failure the log exists to avoid. The
+                # backend's absence is already `status`'s UNVERIFIED and the
+                # CLI's "round-trip: NOT verified" line.
                 if verify == "require":
                     raise
+
+        # Every emitted motif in every tier, and what it was built from. The
+        # guard runs before publication, so a lexicon holding a CWM averaged
+        # across models is refused rather than written and annotated -- and the
+        # log itself is shipped, so a reader can re-run the guard against the
+        # lexicon without this package's cooperation.
+        guard_log.record(
+            guards.no_cross_model_cwm_avg(operations),
+            subject=(
+                f"every motif emitted into tiers {list(tiers)}, each classified "
+                "against the registry arrays ingest recorded for the nodes it "
+                "stands for -- combination performed at or before ingest is not "
+                "visible to this classification"
+            ),
+        ).raise_if_failed()
+        (staging / "combination_operations.json").write_text(
+            json.dumps(operations, indent=2, sort_keys=True))
 
         rows = ["\t".join(["tier", "index", "pattern_tag", "node_id", "variant_id",
                            "metacluster", "lexicon_content_hash"])]

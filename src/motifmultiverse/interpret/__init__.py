@@ -41,6 +41,7 @@ from sys import intern
 from typing import Any
 
 from motifmultiverse import guards, infer
+from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.schema import (
     DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
     ESTIMATOR_CAPABILITY,
@@ -65,7 +66,19 @@ __all__ = [
     "estimate_effects", "two_part_effects", "interpret_query",
     "ESTIMATOR", "ESTIMATOR_PERCENTILE", "ESTIMATOR_BCA_WILD", "ESTIMATOR_CHOICES",
     "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP", "MIN_PERCENTILE_REPLICATES",
+    "INTERPRETATION_SCHEMA_VERSION",
 ]
+
+#: ``interpretation.json`` was the one artifact this package emits that carried no
+#: schema version, and it was noticed the way such things usually are: a field was
+#: added to the effect record and there was no way for a reader holding two files
+#: to tell which vocabulary each was written in. Every other emitted artifact here
+#: -- the registry, the lexicon manifests, the decision bundle, ``run_status``,
+#: ``guard_outcomes`` -- says which version it is, so this one does too. It starts
+#: at "2": the unversioned files already in the wild are version 1 by convention,
+#: and reusing "1" for a wider record would make the two indistinguishable, which
+#: is the failure the field exists to prevent.
+INTERPRETATION_SCHEMA_VERSION = "2"
 
 #: The weaker of the two estimator paths: a percentile block bootstrap. It is
 #: named in every result rather than described as "block bootstrap", because the
@@ -681,6 +694,22 @@ class FamilyEffect:
     n_bootstrap_valid: int
     block_size: int
     random_seed: int
+    #: The block floor THIS estimator enforced on `n_blocks`, or ``None`` where it
+    #: enforced none. It is not the run's health floor (`HealthFloors.min_blocks`,
+    #: which `--floor-blocks` moves and which gates whether an effect is computed
+    #: at all); it is what the estimator itself refused below.
+    #:
+    #: It is recorded because the two paths differ and nothing in the artifact
+    #: said so. `bca-wild-cluster` refuses under `infer.MIN_ESTIMABLE_BLOCKS`
+    #: whatever the run declared. The percentile path floors REPLICATES
+    #: (`MIN_PERCENTILE_REPLICATES`) and never floors blocks, so `--floor-blocks 6`
+    #: yields a 95% percentile interval resampled from six units -- data the other
+    #: estimator would refuse outright. Whether that asymmetry is right is a
+    #: question about what a percentile block bootstrap needs and is not settled
+    #: here; what is settled is that a reader can now see which floor, if any, the
+    #: number in front of them cleared, instead of inferring it from the estimator
+    #: name.
+    estimator_min_blocks: int | None = None
     estimator: str = ESTIMATOR
     inference_capability: str = CAPABILITY.value
 
@@ -883,6 +912,11 @@ def _effects_percentile(q_peaks: list[Peak], c_peaks: list[Peak], families: list
             n_bootstrap_valid=n_valid,
             block_size=block_size,
             random_seed=seed,
+            # None, not 0: this path applies no floor to the block count at all,
+            # which is a different statement from applying a floor of zero and is
+            # the one a reader has to be able to tell apart. The floor it DOES
+            # apply is on replicates, twice (requested and estimable), above.
+            estimator_min_blocks=None,
             estimator=ESTIMATOR_PERCENTILE,
             inference_capability=ESTIMATOR_CAPABILITY[
                 Estimator(ESTIMATOR_PERCENTILE)].value,
@@ -999,6 +1033,9 @@ def _effects_bca_wild(q_peaks: list[Peak], c_peaks: list[Peak], families: list[s
             n_bootstrap_valid=n_valid,
             block_size=block_size,
             random_seed=seed,
+            # Read from `infer`, not restated: both halves of this pair refuse
+            # below it, and a copy here could disagree with what actually ran.
+            estimator_min_blocks=infer.MIN_ESTIMABLE_BLOCKS,
             estimator=ESTIMATOR_BCA_WILD,
             inference_capability=capability,
         )
@@ -1123,7 +1160,7 @@ class Interpretation:
     health: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "schema_version": INTERPRETATION_SCHEMA_VERSION}
 
     def write(self, out_dir: str | os.PathLike[str]) -> Path:
         out = Path(out_dir)
@@ -1141,6 +1178,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                     estimator: str = ESTIMATOR,
                     usage_definition: infer.UsageDefinition | None = None,
                     usage_threshold: infer.UsageThreshold | None = None,
+                    guard_log: GuardLog | None = None,
                     ) -> Interpretation:
     """Answer one peak-set query at the strength its selection provenance licenses.
 
@@ -1155,7 +1193,18 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     beside the effects. It has **no default**: omitting it leaves
     ``two_part_effects`` at ``None``, which records that no definition of "used"
     was chosen -- not that one was chosen for the caller and produced nothing.
+
+    ``guard_log`` is where the outcome of every guard this function runs is
+    written down (:mod:`motifmultiverse.guard_log`). Bound to the run's output
+    directory by ``cli``, an outcome reaches ``guard_outcomes.json`` before the
+    guard's own ``raise_if_failed`` propagates, so a run refused *by* a guard still
+    says which guard refused it and what it saw -- which is the run whose outcome
+    matters most and the one that produces no ``interpretation.json`` at all.
+    Omitted, the outcomes are still collected on an unbound log (nothing is
+    written), because a library caller who named no directory has nowhere to put
+    them and must not be refused for it.
     """
+    guard_log = guard_log if guard_log is not None else GuardLog("interpret")
     floors = floors or HealthFloors()
     # Resolved first: a refusal that depends on no data should not wait behind a
     # bootstrap, and every downstream capability decision reads this one value.
@@ -1333,7 +1382,14 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                         "than its comparator has a total effect near zero that describes "
                         "neither margin."
                     )
-                guards.comparator_declared(effects).raise_if_failed()
+                guard_log.record(
+                    guards.comparator_declared(effects),
+                    subject=(
+                        f"the effects {query.query_id} is about to emit, each against "
+                        f"comparator_id={query.comparator_id!r} "
+                        f"(substrate_id={substrate_id}, lexicon_id={hits[0].lexicon_id})"
+                    ),
+                ).raise_if_failed()
                 # Once per interpretation, not once per family: which estimator
                 # ran, and what it therefore may emit, is a property of the run.
                 # `effects` can legally be `[]` (query and comparator share no
@@ -1395,17 +1451,36 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
     # what is checked is exactly what a reader would receive. health_before_effect
     # reads the query view only: it gates composition, which is a query-only
     # reading, not the bilateral contrast that gates effects.
-    guards.selection_provenance_declared([{
-        "query_id": query.query_id,
-        "selection_provenance": query.selection_provenance.value,
-        "output_mode": mode.value,
-    }]).raise_if_failed()
-    guards.health_before_effect({
-        "health": result.query_health,
-        "emitted_order": result.emitted_order,
-        "floor_failures": contrast.query.floor_failures,
-        "effects": result.effects or [],
-        "interpretation_emitted": result.interpretation_emitted,
-    }).raise_if_failed()
-    guards.single_scale([{"input_scale": h.input_scale} for h in hits]).raise_if_failed()
+    guard_log.record(
+        guards.selection_provenance_declared([{
+            "query_id": query.query_id,
+            "selection_provenance": query.selection_provenance.value,
+            "output_mode": mode.value,
+        }]),
+        subject=(
+            f"the finished record for {query.query_id}: selection_provenance="
+            f"{query.selection_provenance.value} against the output_mode it ran in "
+            f"({mode.value})"
+        ),
+    ).raise_if_failed()
+    guard_log.record(
+        guards.health_before_effect({
+            "health": result.query_health,
+            "emitted_order": result.emitted_order,
+            "floor_failures": contrast.query.floor_failures,
+            "effects": result.effects or [],
+            "interpretation_emitted": result.interpretation_emitted,
+        }),
+        subject=(
+            f"the finished record for {query.query_id}: its query-side health block, its "
+            "emitted_order and the query-side floor failures"
+        ),
+    ).raise_if_failed()
+    guard_log.record(
+        guards.single_scale([{"input_scale": h.input_scale} for h in hits]),
+        subject=(
+            f"the input_scale of every hit row read for {query.query_id} "
+            f"(substrate_id={substrate_id})"
+        ),
+    ).raise_if_failed()
     return result

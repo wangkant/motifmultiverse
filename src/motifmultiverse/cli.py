@@ -37,6 +37,7 @@ from motifmultiverse.align import DEFAULT_NULL_SHUFFLES, DEFAULT_WORKERS, Alignm
 from motifmultiverse.annotate import AnnotationError
 from motifmultiverse.compile import TIERS as COMPILE_TIERS
 from motifmultiverse.compile import BackendMissing, CompileError
+from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.guards import GuardError
 from motifmultiverse.infer import InferError
 from motifmultiverse.ingest import DEFAULT_TRIM_THRESHOLD, IngestError
@@ -661,6 +662,20 @@ def _effect_estimate_rows(result) -> list[list[str]]:
     return rows
 
 
+def _warn_if_guard_log_degraded(log: GuardLog) -> None:
+    """Say on stderr that the outcomes went somewhere other than the usual file.
+
+    A warning and not a refusal, deliberately: by the time this is reachable the
+    guards have run and passed, and the only thing that went wrong is where their
+    record could be filed. Refusing here would let a corrupt bookkeeping file left
+    behind by something else discard a completed interpretation -- which is what
+    the first version of this did. stderr, never stdout, like every other progress
+    line here.
+    """
+    if log.degraded:
+        print(f"motifmultiverse: {log.degraded}", file=sys.stderr)
+
+
 def _run_infer(ns: argparse.Namespace) -> int:
     from motifmultiverse import interpret as interpret_mod
     from motifmultiverse.substrate import read_manifest
@@ -701,7 +716,13 @@ def _run_infer(ns: argparse.Namespace) -> int:
                             min_explained_fraction=ns.floor_explained),
         block_size=ns.block_size, n_bootstrap=ns.bootstrap, seed=ns.seed,
         estimator=ns.estimator,
+        # Bound to the same directory as the provenance record above, and for the
+        # same reason: a run refused BY a guard produces no effect table, so the
+        # only place its outcome can survive is a file written as the guard
+        # returns rather than a field of a result that is never emitted.
+        guard_log=(infer_guard_log := GuardLog("infer", ns.out)),
     )
+    _warn_if_guard_log_degraded(infer_guard_log)
     if result.effects is None:
         # No table at all, rather than an empty one. An `effect_estimates.tsv`
         # holding only a header is indistinguishable from "we looked and found
@@ -785,7 +806,9 @@ def _run_interpret(ns: argparse.Namespace) -> int:
                             min_explained_fraction=ns.floor_explained),
         block_size=ns.block_size, n_bootstrap=ns.bootstrap, seed=ns.seed,
         estimator=ns.estimator,
+        guard_log=(interpret_guard_log := GuardLog("interpret", ns.out)),
     )
+    _warn_if_guard_log_degraded(interpret_guard_log)
     dest = result.write(ns.out)
 
     h = result.health

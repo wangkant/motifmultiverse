@@ -23,8 +23,11 @@ saying so.
 `schema.MotifNode` requires `tier_reason` whenever `discovery_tier !=
 analysis_tier`; `guards.variant_id_unique` enforces 1:1 identity;
 `guards.index_order_matches_loader` compares the written index to what the real
-loader returns, **by name**; and each manifest's `comparisons` block states whether
-the positive and negative sets differ from every other tier's.
+loader returns, **by name**, and what it returned per tier is written to
+`guard_outcomes.json` beside the lexicons (`motifmultiverse.guard_log`) — with no entry
+for a tier no backend could read back, because no guard ran there; and each manifest's
+`comparisons` block states whether the positive and negative sets differ from every
+other tier's.
 
 ### The loader round trip runs
 
@@ -159,6 +162,47 @@ costs one extra sensitivity lexicon rather than an unchecked merge.
 A collapse names a representative, and `compile` refuses one that is not among its
 own members — that is what "observed medoid, never a constructed average" means at
 the artifact level (`FP-05`).
+
+### The operations log
+
+`combination_operations.json` says, for every motif in every emitted tier, what it
+was built from: `copy`, `select_representative` (a collapse that chose an observed
+member), or `mean`. `guards.no_cross_model_cwm_avg` reads it before anything is
+published and refuses a `mean` that does not hold model, readout and metacluster
+fixed.
+
+**Where the log comes from is the whole of it.** The obvious version is one the
+collapse writes about itself — append `{"op": "medoid"}` next to the code that
+picked the medoid — and a guard reading that audits a claim made by the code it is
+auditing. It passes for exactly as long as somebody keeps the claim current by
+hand, which is the unchecked invariant the guard replaces, one level in.
+`compile.operations_log` therefore asks nothing: it opens the lexicon that was
+just written and classifies each motif's matrices against the registry arrays of
+the nodes it stands for. A future stage that starts averaging produces a `mean`
+entry without editing the classifier, because the classification is of the file.
+
+Four limits, since a pass here should not be read as wider than it is, and the
+first is the largest. **The check reaches back to the registry and no further.**
+The classifier's reference set is what `ingest` wrote, so a cross-model mean
+performed *before* that — precisely where a "meta-analysed CWM across models" stage
+would live — arrives as an ordinary registry motif, classifies as `copy`, and
+passes; `test_a_cross_model_mean_made_upstream_of_the_registry_passes` builds one
+and asserts exactly that, so the gap is pinned rather than described. A pass
+therefore means "nothing downstream of the registry averaged", never "this lexicon
+contains no cross-model average", and the guard's own sentence says so, because it
+is persisted verbatim in `guard_outcomes.json` and printed verbatim by `report`.
+An average over inputs whose matrices are identical *is* another of them, and no
+reader of the artifact can see that it happened. The inputs of a collapse are taken to be its
+representative plus the decision's other members that this tier did not emit, so a
+member dropped for an unrelated reason widens the set a mean is checked against —
+which can only cause a refusal to classify, never a silent pass. And a
+representative averaged *within* one model holds all three axes fixed and passes
+the guard (`FP-05`); what changes is that the log records it as `mean`, so it is
+visible in a shipped artifact instead of nowhere.
+
+An emitted motif that is neither its inputs nor their mean is refused, not filed
+under the nearer label: an operation this package cannot name is one it cannot
+audit for the axes it held fixed.
 
 ### `motif_type` is the loader's vocabulary
 

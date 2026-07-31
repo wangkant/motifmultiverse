@@ -179,6 +179,18 @@ outcome is known.
 **A downstream reader's rule is one line: trust the artifacts only when
 `status == "SUCCESS"`.**
 
+### And so is the outcome of every guard that ran
+
+A stage that runs an executable constraint writes a **`guard_outcomes.json`** beside
+its results: which guard, on what the stage handed it, and what it returned — the
+guard's own pass/fail and its own sentence, copied and never rewritten. It is a
+separate file rather than a field of `provenance.json` because provenance is written
+*before* the body runs, and rather than a field of the result because a failing guard
+**raises**: the run whose outcome matters most is the one that produces no result at
+all, so each outcome is appended the moment the guard returns and survives the refusal
+that follows. What the file cannot say is the inverse: a guard that is absent from it
+is not thereby recorded as not having run.
+
 ### What individual modules guarantee
 
 Running any subcommand writes a provenance record — input checksums, command line,
@@ -217,8 +229,11 @@ recomputed here, because a renderer that recomputes is a second implementation o
 statistics that can disagree with the first. Nothing absent is defaulted: a withheld
 *p* value prints as `WITHHELD — inference_capability = ESTIMATION_ONLY` rather than
 blank, and a field no artifact carries — `baseline_population`, the lexicon *content*
-hash, `selection_rule`, every guard outcome — prints as `NOT RECORDED` in a mandatory
-*What this report does not know* section that names the field that would have said it.
+hash, `selection_rule` — prints as `NOT RECORDED` in a mandatory *What this report does
+not know* section that names the field that would have said it. Guard outcomes used to
+be on that list; where a run left a `guard_outcomes.json` the report now renders what
+each guard returned, verbatim, and where it did not it still says so rather than
+implying there was nothing to record.
 This is the module whose founding failure was a bootstrap resolution floor printed as
 though it were a measured *p* value.
 
@@ -355,12 +370,12 @@ to finding 4 above. A meta-test walks the guard registry and fails if any guard 
 without one.
 
 `single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness`† ·
-`no_cross_model_cwm_avg`† · `sign_alignment` · `interaction_required`† ·
+`no_cross_model_cwm_avg` · `sign_alignment` · `interaction_required`† ·
 `estimability_floor`† · `stratum_parity`† · `short_motif_flag` · `single_family_layer`† ·
 `selection_provenance_declared` · `health_before_effect` · `comparator_declared` ·
 `index_order_matches_loader`
 
-† **No call site in this release.** Six of the fifteen are defined and
+† **No call site in this release.** Five of the fifteen are defined and
 falsification-tested but have never been put in front of an artifact, because this
 release emits nothing that carries the thing they check. Counting them as protection
 is the same error the guards exist to prevent, so they are marked here rather than

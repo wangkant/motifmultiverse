@@ -46,12 +46,21 @@ the rule above demands — is carried by no artifact in this package, so it rend
 literal token `NOT RECORDED` in a mandatory *What this report does not know* section,
 beside the lexicon-citation gap (`lexicon_id` is a declared string on the hit rows, not
 `LexiconManifest.lexicon_content_hash`, which is what `FP-11` requires a family-level
-number to cite), the absence of `selection_rule` and `selection_feature_names` from
-`interpret.Interpretation`, and the fact that **no artifact in this package persists a
-`guards.GuardResult`** — so the report names which guards `interpret.interpret_query`
-invokes as source facts about the code path and never states that a guard passed on this
-artifact. A guard's absence from `guards.GUARDS_AWAITING_INPUT` is *not* evidence that it
-has a call site, and is reported as not known.
+number to cite) and the absence of `selection_rule` and `selection_feature_names` from
+`interpret.Interpretation`. A guard's absence from `guards.GUARDS_AWAITING_INPUT` is
+*not* evidence that it has a call site, and is reported as not known.
+
+**Guard outcomes.** A run that wrote a `guard_outcomes.json` (`motifmultiverse.guard_log`)
+gets a section rendering it verbatim: the guard's own `passed` and its own `detail`, with
+the `subject` the stage recorded. Entries are joined to the run that wrote the artifacts
+here through `run_status.artifacts_are_from.provenance_records`; outcomes from other runs
+into the same directory are listed apart and claimed for nothing, and where the join
+cannot be made the section says the outcomes cannot be attributed rather than assuming
+the newest are the right ones. An artifact with **no** such file — every artifact
+produced before that file existed — still gets the old sentence: this report cannot state
+that any guard passed on it. Two inferences stay forbidden in both cases: a guard absent
+from a present record is not recorded as not having run, and a recorded pass is what the
+guard returned, not evidence that the guard was right to return it.
 
 See `docs/ROADMAP.md` (M4b) for what remains: the fields above have to be carried by the
 stages that produce them before this report can stop saying it does not know them.

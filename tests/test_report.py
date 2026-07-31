@@ -56,7 +56,7 @@ from pathlib import Path
 
 import pytest
 
-from motifmultiverse import cli, guards, report
+from motifmultiverse import cli, guard_log, guards, report
 
 # --------------------------------------------------------------------------- #
 # The real artifact.
@@ -865,8 +865,12 @@ def test_what_this_report_does_not_know_names_the_fields_that_would_have_said_it
     # The provenance record names three input roles and not a manifest.
     assert "substrate_manifest" in flat
     assert "verify_against_manifest" in flat
-    # Nothing here may claim a guard ran.
-    assert "GuardResult" in flat
+    # Nothing here may claim a guard ran. This fixture is a project directory with
+    # no `guard_outcomes.json` -- the state of every artifact written before that
+    # file existed -- so the section names the file that would have held one and
+    # says, in those words, that it cannot state a guard passed on this artifact.
+    assert "guard_outcomes.json" in flat
+    assert "does not and cannot state that any guard passed" in flat
 
 
 # --------------------------------------------------------------------------- #
@@ -974,19 +978,19 @@ def test_a_malformed_bias_ledger_is_refused(tmp_path, monkeypatch, real_project)
 def test_a_guard_absent_from_guards_awaiting_input_is_not_thereby_wired(real_project, tmp_path):
     """The inversion that sank the previous attempt, held shut.
 
-    `GUARDS_AWAITING_INPUT` records why six guards have no call site. It is not a
-    complement: the nine guards it does not mention are not thereby known to be
-    called, and no artifact in this package persists a `guards.GuardResult`, so
-    nothing the report can read says any guard passed on this run. Concluding
-    otherwise from an absence is the shape of fabrication the whole module exists
-    to make impossible.
+    `GUARDS_AWAITING_INPUT` records why five guards have no call site. It is not a
+    complement: the ten guards it does not mention are not thereby known to be
+    called. This fixture carries no `guard_outcomes.json`, so nothing the report
+    can read says any guard passed on this run, and concluding otherwise from an
+    absence is the shape of fabrication the whole module exists to make
+    impossible.
     """
     doc = render(real_project, tmp_path / "out")
     flat = _flat(doc)
 
     awaiting = guards.GUARDS_AWAITING_INPUT
     assert set(awaiting) == {
-        "four_state_missingness", "no_cross_model_cwm_avg", "interaction_required",
+        "four_state_missingness", "interaction_required",
         "estimability_floor", "stratum_parity", "single_family_layer",
     }
     for guard_id, pending in awaiting.items():
@@ -1013,6 +1017,160 @@ def test_a_guard_absent_from_guards_awaiting_input_is_not_thereby_wired(real_pro
             found = re.search(pattern, flat)
             assert found is None, (
                 f"the report puts `{guard_id}` beside a passing outcome -- {found.group(0)!r} -- "
-                "and no artifact in this package records a GuardResult"
+                "and this artifact records no GuardResult for it to have read"
             )
     assert not re.search(r"\b(all|every|the)\s+guards?\b.{0,40}?\bpass(ed|es)?\b", flat)
+
+
+# --------------------------------------------------------------------------- #
+# 5. Recorded guard outcomes: rendered when they exist, and only ever as read.
+# --------------------------------------------------------------------------- #
+def _guard_record(**overrides) -> dict:
+    """One recorded outcome, in the shape `guard_log.GuardOutcome` writes."""
+    row = {
+        "stage": "interpret",
+        "guard_id": "single_scale",
+        "passed": True,
+        "detail": "single input_scale=33917",
+        "subject": "the input_scale of every hit row read for cl5",
+        "recorded_utc": "2026-07-31T05:49:08Z",
+        "provenance_records": 1,
+        "schema_version": "1",
+    }
+    row.update(overrides)
+    return row
+
+
+def _project_with_guard_record(tmp_path: Path, name: str, outcomes, *,
+                               artifacts_from: int | None = 1) -> Path:
+    from motifmultiverse import guard_log
+
+    project = _write_project(tmp_path, name)
+    if outcomes is not None:
+        (project / guard_log.GUARD_OUTCOMES_FILENAME).write_text(
+            outcomes if isinstance(outcomes, str) else json.dumps(outcomes, indent=2),
+            encoding="utf-8",
+        )
+    status: dict = {"schema_version": "1", "status": "SUCCESS", "subcommand": "interpret"}
+    if artifacts_from is not None:
+        status["artifacts_are_from"] = {"status": "SUCCESS",
+                                        "provenance_records": artifacts_from}
+    (project / "run_status.json").write_text(json.dumps(status), encoding="utf-8")
+    return project
+
+
+def test_a_recorded_guard_outcome_is_rendered_verbatim(tmp_path):
+    """With a record present, naming a guard beside its outcome is reading, not inferring.
+
+    This is the other half of
+    `test_a_guard_absent_from_guards_awaiting_input_is_not_thereby_wired`: that
+    test holds the inversion shut for an artifact carrying no record, and this one
+    requires the report to actually render the record when there is one. The
+    fields are asserted as `str()` of what the file holds, like every other number
+    on the page -- the renderer must not summarise four outcomes into "all guards
+    passed", and must not restate a verdict in its own words.
+    """
+    outcomes = [
+        _guard_record(),
+        _guard_record(guard_id="comparator_declared",
+                      detail="12 cross-condition effects, each against exactly one named baseline",
+                      subject="the effects cl5 is about to emit"),
+    ]
+    project = _project_with_guard_record(tmp_path, "recorded", outcomes)
+    flat = _flat(render(project, tmp_path / "out"))
+
+    for row in outcomes:
+        assert row["guard_id"] in flat
+        assert _flat(row["detail"]) in flat
+        assert _flat(row["subject"]) in flat
+    # The renderer states no aggregate verdict of its own.
+    assert not re.search(r"\b(all|every)\s+guards?\b.{0,40}?\bpass(ed|es)?\b", flat)
+    # And it still says what a present record cannot establish.
+    assert "not recorded as not having run" in flat
+
+
+def test_a_recorded_failure_is_rendered_as_a_failure(tmp_path):
+    """A page that could only ever show passes would be decoration.
+
+    An outcome reaches a directory whose result was refused, so a rendered record
+    has to be able to say `False` -- and to carry the sentence the guard refused
+    with, which is the only thing that says why.
+    """
+    project = _project_with_guard_record(tmp_path, "failed", [
+        _guard_record(passed=False, detail="results span 2 input scales: [9999, 12345]"),
+    ])
+    flat = _flat(render(project, tmp_path / "out"))
+
+    assert "results span 2 input scales: [9999, 12345]" in flat
+    assert "False" in flat
+    assert not re.search(r"single_scale.{0,80}?\bpassed\b", flat)
+
+
+def test_outcomes_written_by_another_run_are_not_claimed_for_this_artifact(tmp_path):
+    """One `--out` legitimately holds several runs; only one wrote these artifacts.
+
+    The join is `run_status.artifacts_are_from.provenance_records` against the
+    `provenance_records` each outcome carries. An outcome from a later run in the
+    same directory must not be presented as evidence about the interpretation
+    being rendered.
+    """
+    project = _project_with_guard_record(tmp_path, "twice", [
+        _guard_record(subject="MINE: the run that wrote these artifacts"),
+        _guard_record(provenance_records=2, subject="THEIRS: a later run in this directory"),
+    ], artifacts_from=1)
+    doc = render(project, tmp_path / "out")
+    flat = _flat(doc)
+
+    assert "MINE: the run that wrote these artifacts" in flat
+    assert "THEIRS: a later run in this directory" in flat, (
+        "an outcome recorded here must not be deleted from the page; it must be labelled"
+    )
+    mine = flat.index("MINE: the run that wrote these artifacts")
+    theirs = flat.index("THEIRS: a later run in this directory")
+    heading = flat.index("Outcomes recorded in this directory by OTHER runs")
+    assert mine < heading < theirs, (
+        "the other run's outcome must fall under the heading that disclaims it"
+    )
+
+
+def test_outcomes_that_cannot_be_joined_to_a_run_are_not_attributed(tmp_path):
+    """No `artifacts_are_from` means the report may not guess which run these are."""
+    project = _project_with_guard_record(
+        tmp_path, "unjoined", [_guard_record()], artifacts_from=None)
+    flat = _flat(render(project, tmp_path / "out"))
+
+    assert "run unattributed" in flat
+    assert "cannot be joined to the run that wrote" in flat
+    assert "Outcomes of the run that wrote the artifacts here" not in flat
+
+
+def test_an_unreadable_guard_record_is_not_rendered_as_an_absent_one(tmp_path):
+    """A directory that recorded outcomes and lost them is not one that recorded none."""
+    project = _project_with_guard_record(tmp_path, "broken", '[{"guard_id": ')
+    flat = _flat(render(project, tmp_path / "out"))
+
+    assert "could not be read" in flat
+    assert "is not the same as an absent record" in flat
+    assert str(project) not in flat, (
+        "the log's absolute path reached the page through the error text. A report "
+        "is a document that gets sent to people, and `redaction_policy` exempts the "
+        "provenance `command` string by name -- not this."
+    )
+    assert guard_log.GUARD_OUTCOMES_FILENAME in flat, (
+        "redacting the path must not cost the reader the file's name"
+    )
+
+
+def test_an_absent_guard_record_keeps_the_sentence_it_always_had(tmp_path, real_project):
+    """Every artifact written before this file existed must render as it did.
+
+    The claim that changed is scoped to artifacts that carry a record. An older
+    directory has to keep the unconditional refusal, and it has to be visible that
+    the refusal is about THIS artifact rather than about the package.
+    """
+    flat = _flat(render(real_project, tmp_path / "out"))
+
+    assert "does not and cannot state that any guard passed" in flat
+    assert "absence of a RECORD and not a record of an absence" in flat
+    for guard_id in guards.ALL_GUARDS:
+        assert not re.search(rf"{re.escape(guard_id)}.{{0,80}}?\bpassed\b", flat)

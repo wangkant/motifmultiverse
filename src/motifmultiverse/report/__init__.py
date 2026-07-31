@@ -48,6 +48,16 @@ already happened somewhere:
    whether it ran, and this module prints exactly that rather than inferring the
    opposite. (An earlier attempt inferred the opposite and named a call site.
    That is fabrication, and it is why this paragraph exists.)
+
+   What this report may now say about a guard changed, and only this much: a run
+   writes :mod:`motifmultiverse.guard_log`'s ``guard_outcomes.json`` beside its
+   result, so where that file exists §11 renders the outcomes it holds --
+   verbatim, the guard's own ``passed`` and its own ``detail`` -- and §10 stops
+   saying no artifact records one. Where it does *not* exist, which is every
+   artifact produced before that file did, §10 says so in the old terms. The
+   inference that stays forbidden is the reverse one: a guard **absent** from a
+   present record is not thereby recorded as not having run, because a stage that
+   binds no output directory writes no entries at all.
 4. **A missing block is never inferred from a failed one.** Section rendering
    branches on ``composition is None`` / ``effects is None`` /
    ``two_part_effects is None`` and on the record's own ``emitted_order`` --
@@ -70,13 +80,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-from motifmultiverse import guards
+from motifmultiverse import guard_log, guards
 from motifmultiverse.schema import SchemaError
 
 __all__ = [
     "ReportError", "NOT_RECORDED", "NOT_COMPUTED", "BIAS_AXIS_IDS",
-    "BIAS_LEDGER_COLUMNS", "BIAS_LEDGER_RESOURCE", "packaged_bias_ledger_path",
-    "read_bias_ledger", "render_markdown", "run",
+    "BIAS_LEDGER_COLUMNS", "BIAS_LEDGER_RESOURCE", "GuardRecord",
+    "packaged_bias_ledger_path", "read_bias_ledger", "read_guard_record",
+    "render_markdown", "run",
 ]
 
 #: A field no artifact in this package carries. Printed as a token, never as a
@@ -236,6 +247,93 @@ def read_bias_ledger(path: str | os.PathLike[str]) -> list[list[str]]:
             f"{list(BIAS_AXIS_IDS)}. A ledger missing an axis still reads as a complete accounting."
         )
     return body
+
+
+class GuardRecord:
+    """What the directory says about the guards that ran in it -- in three states.
+
+    ``ABSENT``, ``UNREADABLE`` and ``PRESENT`` are kept apart all the way to the
+    page, because collapsing any two of them is the founding failure's shape in
+    miniature. An absent record means *nothing was written down*, which is the
+    state of every artifact produced before ``guard_outcomes.json`` existed and of
+    every stage run through the library with no output directory bound; it is not
+    evidence that no guard ran. An unreadable record is not an absent one -- a
+    truncated log in a directory that recorded outcomes must not render as a
+    directory that recorded none. Only ``PRESENT`` licenses the sentence "this
+    guard returned this".
+
+    :meth:`partition` answers the further question the states above do not
+    answer: several runs legitimately write one ``--out``, so an outcome in the
+    file is not automatically an outcome of the run that wrote
+    ``interpretation.json``. Each entry records how many provenance records
+    existed when it was written, and ``run_status.artifacts_are_from`` records the
+    same number for the run whose artifacts are lying here. Where both are
+    present the join is exact; where either is missing this class says the
+    outcomes cannot be attributed rather than guessing that the newest ones are
+    the right ones.
+    """
+
+    ABSENT = "ABSENT"
+    PRESENT = "PRESENT"
+    UNREADABLE = "UNREADABLE"
+
+    def __init__(self, state: str, outcomes: list[dict[str, Any]] | None = None,
+                 detail: str = "", artifact_run: Any = None) -> None:
+        self.state = state
+        self.outcomes = outcomes or []
+        self.detail = detail
+        #: The `provenance_records` index of the run that wrote the artifacts in
+        #: this directory, or None when `run_status.json` does not say.
+        self.artifact_run = artifact_run
+
+    @property
+    def attributable(self) -> bool:
+        return self.state == self.PRESENT and isinstance(self.artifact_run, int)
+
+    def partition(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """(outcomes of the run that wrote the artifacts here, outcomes of others).
+
+        Everything lands in the second list when the join cannot be made, so a
+        caller that renders only the first can never present another run's
+        outcome as this artifact's.
+        """
+        if not self.attributable:
+            return [], list(self.outcomes)
+        mine, others = [], []
+        for row in self.outcomes:
+            (mine if row.get("provenance_records") == self.artifact_run else others).append(row)
+        return mine, others
+
+
+def read_guard_record(project: str | os.PathLike[str]) -> GuardRecord:
+    """Read ``guard_outcomes.json`` and the run status that says whose it is.
+
+    Never raises. This is the one input of the report whose *absence is the
+    normal case* -- every artifact written before the log existed has none -- so
+    an unreadable or missing file here downgrades what the page may say and does
+    not refuse the page. (``interpretation.json`` and ``provenance.json`` still
+    refuse: without those there is nothing to render at all.)
+    """
+    directory = Path(project)
+    try:
+        outcomes = guard_log.read_guard_outcomes(directory)
+    except guard_log.GuardLogError as exc:
+        # The message names the file by absolute path, and a report is a document
+        # that gets sent to people. `redaction_policy` exempts the provenance
+        # `command` string by name and nothing else, so this one is reduced to the
+        # file name: the reader is looking at the directory it is in.
+        detail = str(exc).replace(str(directory / guard_log.GUARD_OUTCOMES_FILENAME),
+                                  guard_log.GUARD_OUTCOMES_FILENAME)
+        return GuardRecord(GuardRecord.UNREADABLE, detail=detail)
+    if outcomes is None:
+        return GuardRecord(GuardRecord.ABSENT)
+    from motifmultiverse.run_status import read_run_status
+
+    status = read_run_status(directory) or {}
+    origin = status.get("artifacts_are_from")
+    artifact_run = origin.get("provenance_records") if isinstance(origin, dict) else None
+    return GuardRecord(GuardRecord.PRESENT, outcomes=outcomes,
+                       artifact_run=artifact_run if isinstance(artifact_run, int) else None)
 
 
 def packaged_bias_ledger_path() -> Path:
@@ -733,7 +831,157 @@ def _baseline_block(interp: dict[str, Any], provenance: Any) -> list[str]:
     ]
 
 
-def _section_unknown(interp: dict[str, Any], provenance: Any) -> list[str]:
+def _guard_outcomes_bullet(record: GuardRecord) -> list[str]:
+    """The §10 entry for guard outcomes -- one sentence per state, never a default.
+
+    The absent case is the sentence this report carried unconditionally until a
+    producer existed to make it false, kept word for word where it is still true.
+    """
+    if record.state == GuardRecord.ABSENT:
+        return [
+            f"- Guard outcomes: {NOT_RECORDED}. This directory carries no "
+            f"`{guard_log.GUARD_OUTCOMES_FILENAME}`, which is the state of every artifact "
+            "written before this package recorded guard outcomes and of any stage run with no "
+            "output directory bound. This report may name which guards "
+            "`interpret.interpret_query` invokes, as facts about the code path; for THIS "
+            "artifact it does not and cannot state that any guard passed. Nothing in the "
+            "guards sections below should be read as a guard that passed.",
+            "",
+        ]
+    if record.state == GuardRecord.UNREADABLE:
+        return [
+            f"- Guard outcomes: a `{guard_log.GUARD_OUTCOMES_FILENAME}` is present here and "
+            f"could not be read ({_s(record.detail)}). That is not the same as an absent "
+            "record, and this report will not treat it as one: outcomes were written in this "
+            "directory and this page cannot say what they were.",
+            "",
+        ]
+    mine, others = record.partition()
+    lines = [
+        f"- Guard outcomes: recorded. `{guard_log.GUARD_OUTCOMES_FILENAME}` holds "
+        f"{len(record.outcomes)} outcome(s) and they are rendered in section 11. Three things "
+        "that record still does not establish, and this report does not imply any of them:",
+        "",
+        "  - It is written by the same run that ran the guard, so it attests **what the guard "
+        "returned**, not that the guard was right to return it. A guard applied to a claim "
+        "computed by the code it audits corroborates itself, and no log can repair that.",
+        "  - A guard **absent** from the record is not recorded as not having run. Entries "
+        "exist only for calls made by a stage that bound an output directory; "
+        "`compile.probe_backend`'s call belongs to the environment `status` reports on and to "
+        "no directory at all.",
+        "  - Each outcome describes only the input its `subject` names. It says nothing about "
+        "any other artifact in this directory.",
+        "",
+    ]
+    if not record.attributable:
+        lines += [
+            "  This report additionally cannot tell which run in this directory produced those "
+            "outcomes: `run_status.json` records no `artifacts_are_from.provenance_records` to "
+            "join them to. They are rendered in section 11 as outcomes recorded HERE, not as "
+            "outcomes of the run that wrote this interpretation.",
+            "",
+        ]
+    elif others:
+        lines += [
+            f"  {len(others)} of them were written by other runs into this same directory and "
+            "are listed separately in section 11; they are not this artifact's.",
+            "",
+        ]
+    return lines
+
+
+def _section_guard_outcomes(record: GuardRecord) -> list[str]:
+    """Section 11: the recorded outcomes, verbatim.
+
+    Verbatim in the strict sense this module means everywhere else: ``passed`` is
+    the guard's own boolean and ``detail`` is the guard's own sentence, copied.
+    This renderer runs no guard, re-derives no verdict, and has no opinion about
+    whether a recorded pass was deserved.
+    """
+    lines = ["## 11. GUARD OUTCOMES RECORDED IN THIS DIRECTORY", ""]
+    if record.state == GuardRecord.ABSENT:
+        return lines + [
+            f"No `{guard_log.GUARD_OUTCOMES_FILENAME}` accompanies this artifact, so there is "
+            "no recorded outcome to render. This is the absence of a RECORD and not a record "
+            "of an absence: it does not say that no guard ran, and nothing below may be read "
+            "as evidence either way.",
+            "",
+        ]
+    if record.state == GuardRecord.UNREADABLE:
+        return lines + [
+            f"A `{guard_log.GUARD_OUTCOMES_FILENAME}` is present in this directory and could "
+            f"not be read: {_s(record.detail)}",
+            "",
+            "It is not rendered as absent. A directory that recorded outcomes and lost them is "
+            "a different state from one that recorded none.",
+            "",
+        ]
+    mine, others = record.partition()
+
+    def _table(rows: list[dict[str, Any]]) -> list[str]:
+        out = [
+            "| guard_id | stage | passed | subject | detail |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for row in rows:
+            out.append("| " + " | ".join([
+                f"`{_cell(row.get('guard_id', NOT_RECORDED))}`",
+                _cell(row.get("stage", NOT_RECORDED)),
+                _cell(row.get("passed", NOT_RECORDED)),
+                _cell(row.get("subject", NOT_RECORDED)),
+                _cell(row.get("detail", NOT_RECORDED)),
+            ]) + " |")
+        return out
+
+    lines += [
+        f"Rendered verbatim from `{guard_log.GUARD_OUTCOMES_FILENAME}`. `passed` is the "
+        "guard's own boolean and `detail` its own sentence; this renderer runs no guard and "
+        "recomputes no verdict. `subject` is what the stage handed the guard, in the stage's "
+        "own words.",
+        "",
+    ]
+    if record.attributable:
+        lines += [
+            "### Outcomes of the run that wrote the artifacts here (`provenance_records` = "
+            f"{_s(record.artifact_run)})",
+            "",
+        ]
+        lines += _table(mine) if mine else [
+            "This run recorded no guard outcome. The file exists and holds outcomes of other "
+            "runs only; nothing here says a guard ran for this artifact.",
+        ]
+        lines.append("")
+        if others:
+            lines += [
+                "### Outcomes recorded in this directory by OTHER runs",
+                "",
+                "Listed because deleting them would hide that this directory was written more "
+                "than once; they are not this artifact's and no claim above rests on them.",
+                "",
+            ]
+            lines += _table(others)
+            lines.append("")
+    else:
+        lines += [
+            "### Outcomes recorded in this directory, run unattributed",
+            "",
+            "`run_status.json` does not record an `artifacts_are_from.provenance_records` for "
+            "this directory, so these outcomes cannot be joined to the run that wrote "
+            "`interpretation.json`. They are what was recorded HERE, by some run.",
+            "",
+        ]
+        lines += _table(others)
+        lines.append("")
+    lines += [
+        "A guard that does not appear above is **not** thereby recorded as not having run: "
+        "only calls made by a stage with an output directory bound leave an entry.",
+        "",
+    ]
+    return lines
+
+
+def _section_unknown(interp: dict[str, Any], provenance: Any,
+                     guard_record: GuardRecord) -> list[str]:
     lines = [
         "## 10. WHAT THIS REPORT DOES NOT KNOW",
         "",
@@ -757,11 +1005,9 @@ def _section_unknown(interp: dict[str, Any], provenance: Any) -> list[str]:
         "`INTERNAL_DECOMPOSITION`, are not readable from this artifact. They survive only inside "
         "the provenance `command` string, which is rendered verbatim above and parsed nowhere.",
         "",
-        "- Guard outcomes: **no** artifact in this package persists a `guards.GuardResult`. This "
-        "report may name which guards `interpret.interpret_query` invokes, as facts about the code "
-        "path; it does not and cannot state that any guard passed on this artifact. Nothing in "
-        "section 11 should be read as a guard that passed.",
-        "",
+    ]
+    lines += _guard_outcomes_bullet(guard_record)
+    lines += [
         "- Alignment denominators: `align.AlignmentRunSummary` (`n_nodes`, `n_pairs_considered`, "
         "`n_edges`, `n_pairs_excluded`) is returned from `align.run` and printed to stdout by "
         "`cli._run_align`, and written to no file. An alignment edge table therefore has no "
@@ -773,7 +1019,7 @@ def _section_unknown(interp: dict[str, Any], provenance: Any) -> list[str]:
 
 def _section_guards() -> list[str]:
     lines = [
-        "## 11. GUARDS AWAITING INPUT",
+        "## 12. GUARDS AWAITING INPUT",
         "",
         "Rendered verbatim from `guards.GUARDS_AWAITING_INPUT`. Each entry is a guard with **no "
         "call site** in this release, with the artifact that comes nearest, why that artifact is "
@@ -821,10 +1067,18 @@ _ORDERED_SECTIONS = ("health", "composition", "effects")
 
 
 def render_markdown(interpretation: dict[str, Any], provenance: Any,
-                    bias_ledger_rows: list[list[str]], bias_ledger_source: Path) -> str:
-    """Render one recorded interpretation to markdown. Computes nothing."""
+                    bias_ledger_rows: list[list[str]], bias_ledger_source: Path,
+                    guard_record: GuardRecord | None = None) -> str:
+    """Render one recorded interpretation to markdown. Computes nothing.
+
+    ``guard_record`` defaults to the ABSENT state rather than to "assume the
+    caller read one": a renderer handed no guard record must produce the page it
+    produced before guard outcomes existed, not a page that quietly implies there
+    were none to read.
+    """
     if not isinstance(interpretation, dict):
         raise ReportError("interpretation.json is not a record")
+    guard_record = guard_record if guard_record is not None else GuardRecord(GuardRecord.ABSENT)
     baseline = _baseline_block(interpretation, provenance)
     lines = [
         f"# Audit report -- `{_s(_field(interpretation, 'query_id', 'interpretation.json'))}`",
@@ -888,7 +1142,8 @@ def render_markdown(interpretation: dict[str, Any], provenance: Any,
     lines += _section_two_part(_field(interpretation, "two_part_effects", "interpretation.json"))
     lines += _section_permissions(interpretation)
     lines += _section_bias_ledger(bias_ledger_rows, bias_ledger_source)
-    lines += _section_unknown(interpretation, provenance)
+    lines += _section_unknown(interpretation, provenance, guard_record)
+    lines += _section_guard_outcomes(guard_record)
     lines += _section_guards()
     return "\n".join(lines).rstrip() + "\n"
 
@@ -963,5 +1218,7 @@ def run(project: str | os.PathLike[str],
     out.mkdir(parents=True, exist_ok=True)
     target = out / "report.md"
     target.write_text(
-        render_markdown(interpretation, provenance, rows, ledger_source), encoding="utf-8")
+        render_markdown(interpretation, provenance, rows, ledger_source,
+                        read_guard_record(project_dir)),
+        encoding="utf-8")
     return target

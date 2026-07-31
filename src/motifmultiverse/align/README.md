@@ -10,7 +10,7 @@ An aligner maximising signed CWM cosine is structurally blind to a sign-flipped 
 
 ## How to check it
 
-`guards.sign_alignment` rejects any alignment whose registration used signed similarity. Per-pair null p-values must be persisted, not asserted in prose.
+`guards.sign_alignment` rejects any alignment whose registration used signed similarity, and what it returned is written to `guard_outcomes.json` beside the edge table (`motifmultiverse.guard_log`) — an edge table used to carry no statement that the question had been asked. Per-pair null p-values must be persisted, not asserted in prose.
 
 ## Recorded limitations
 

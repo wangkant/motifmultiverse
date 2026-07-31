@@ -113,13 +113,20 @@ not yet carry it:
 - `selection_rule` and `selection_feature_names` are fields of `schema.PeakSetQuery`
   and are not emitted on `interpret.Interpretation`, so the executable rule that
   `PROGRAMMATIC_RULE` asserts, and the features that decide `SUBSTRATE_CIRCULAR`
-  against `INTERNAL_DECOMPOSITION`, cannot be read back off a result;
-- nothing in this package persists a `guards.GuardResult`, so no artifact records that
-  a guard ran, let alone that it passed.
+  against `INTERNAL_DECOMPOSITION`, cannot be read back off a result.
 
 The report prints each of these as `NOT RECORDED` and names the field that would have
 said it. *Done when:* the producing stages carry those fields — **not** when the
 renderer stops mentioning them.
+
+Guard outcomes were the fourth item on that list and are **closed**: every stage that
+runs a guard now appends what it returned to `guard_outcomes.json` in the run's `--out`
+(`motifmultiverse.guard_log`), written as the guard returns so that a run refused *by* a
+guard still records which one refused it, and the report renders those outcomes instead
+of saying it cannot know. This is the shape the rest of the list wants — the producing
+stage carries the fact — and it is worth being exact about what it did **not** buy:
+recording an outcome does not make an unwired guard wireable, because a record of what a
+guard returned is not an independent claim for a guard to check.
 
 ## M5 — cross-project generalisation and public release
 

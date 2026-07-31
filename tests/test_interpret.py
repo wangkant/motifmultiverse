@@ -1352,6 +1352,68 @@ def test_a_family_every_query_peak_measured_as_zero_keeps_its_composition_row():
     assert rows["FAM_C"].n_peaks_searched == len(_ids(0))
 
 
+def test_every_effect_records_the_block_floor_its_own_estimator_enforced():
+    """The two estimator paths treat the resampling-unit count differently, and
+    until now nothing in the artifact said so.
+
+    `bca-wild-cluster` refuses below `infer.MIN_ESTIMABLE_BLOCKS` whatever the run
+    declared. The percentile path floors REPLICATES twice -- requested and
+    estimable -- and never floors blocks, so a run that lowers `--floor-blocks`
+    past the health gate gets a 95% percentile interval resampled from that many
+    units, on data the other estimator would have refused. Whether it *should*
+    floor blocks is a question about what a percentile block bootstrap needs, and
+    it is not answered here; what is recorded is which floor, if any, the number
+    in front of the reader cleared.
+    """
+    blocks = range(12)
+    query = _query(region_ids=_ids(0, blocks), comparator_region_ids=_ids(1, blocks))
+
+    percentile = interpret.interpret_query(
+        _rows(), query, floors=HealthFloors(min_blocks=6), n_bootstrap=100, seed=1)
+    assert percentile.effects
+    for effect in percentile.effects:
+        assert effect["n_blocks"] == 12
+        assert effect["estimator_min_blocks"] is None, (
+            "the percentile path applies no floor to the block count; None says that, "
+            "and 0 would read as a floor that was met"
+        )
+        assert effect["n_blocks"] < infer_mod.MIN_ESTIMABLE_BLOCKS, (
+            "the fixture must actually be a frame the other estimator would refuse, "
+            "or this test is not about the asymmetry it names"
+        )
+
+    licensed = interpret.interpret_query(
+        _rows(), _query(), floors=HealthFloors(min_blocks=6), n_bootstrap=100, seed=1,
+        estimator=interpret.ESTIMATOR_BCA_WILD)
+    assert licensed.effects
+    for effect in licensed.effects:
+        assert effect["estimator_min_blocks"] == infer_mod.MIN_ESTIMABLE_BLOCKS
+        assert effect["n_blocks"] >= effect["estimator_min_blocks"]
+
+
+def test_the_emitted_interpretation_says_which_schema_it_is(tmp_path):
+    """A widened record that does not say it widened is two files a reader cannot tell apart.
+
+    `estimator_min_blocks` was added to the effect record while `interpretation.json`
+    was the one artifact here carrying no schema version -- so an old file and a new
+    one differed by a missing key and nothing else, and "absent" would have had to be
+    read as both "written before the field existed" and "the estimator applied no
+    floor". Those are different facts and one of them is a finding.
+    """
+    written = interpret.interpret_query(
+        _rows(), _query(), floors=HealthFloors(min_blocks=6), n_bootstrap=100, seed=1)
+    payload = json.loads(written.write(tmp_path).read_text())
+
+    assert payload["schema_version"] == interpret.INTERPRETATION_SCHEMA_VERSION
+    assert interpret.INTERPRETATION_SCHEMA_VERSION != "1", (
+        "version 1 is the unversioned files already written; a wider record reusing "
+        "it would be indistinguishable from them"
+    )
+    assert "estimator_min_blocks" in payload["effects"][0], (
+        "the field whose arrival motivated the version is not in the versioned record"
+    )
+
+
 def test_an_unnamed_family_is_not_promoted_to_a_measured_zero():
     """The sentinel is an absent assignment, not a family that measured zero.
 

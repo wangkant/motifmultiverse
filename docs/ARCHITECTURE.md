@@ -122,9 +122,13 @@ rather than left to a green check mark.
 
 It consumes discovery output; it does not compute attributions, discover motifs,
 or re-implement a hit caller. Cross-model raw CWM averaging is a **design
-prohibition**, not a missing feature (`guards.no_cross_model_cwm_avg` states it;
-nothing in this release combines CWMs at all, so the guard has **no call site** and
-the prohibition is structural rather than checked), because the
+prohibition**, not a missing feature (`guards.no_cross_model_cwm_avg` states it, and
+`compile.operations_log` gives it something to read: every compiled lexicon is opened
+again and each emitted motif is classified against the registry arrays it stands for,
+so combination performed between those two points is checked on the bytes rather than
+resting on nothing in this release combining CWMs — and combination performed *before*
+`ingest` is not covered, arriving as an ordinary registry motif that classifies as
+`copy`), because the
 CWM belongs to a specific model and readout while the ontology is what crosses
 them. And the default annotation output is family-level identity with a
 confidence — mapping a motif to a specific protein is not promised.

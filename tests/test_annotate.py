@@ -574,3 +574,31 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     )
     assert _adjudicate(complete.candidates, frozen_duplicate).decision == Decision.REFUSE_MERGE
     assert _adjudicate(dropped.candidates, frozen_duplicate).decision == Decision.COLLAPSE
+
+
+def test_annotate_records_what_its_guard_returned_beside_the_candidates(tmp_path):
+    """The stage's own threshold check leaves a record, not only an exception path."""
+    import json
+
+    from motifmultiverse import guard_log
+    from motifmultiverse.annotate import annotate_registry
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "registry.json").write_text(json.dumps({
+        "registry_metadata": {}, "nodes": [_node().to_dict()],
+    }))
+    candidate = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
+        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=10,
+        seqlet_count=150,
+    )
+    out = tmp_path / "annotation"
+    annotate_registry(registry, out,
+                      backends=[_StaticBackend("homer", "4.11", [candidate])])
+
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    assert [row["guard_id"] for row in recorded] == ["short_motif_flag"]
+    assert recorded[0]["stage"] == "annotate" and recorded[0]["passed"] is True
+    assert "homer/4.11" in recorded[0]["subject"]

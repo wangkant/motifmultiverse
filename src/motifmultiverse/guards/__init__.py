@@ -27,7 +27,7 @@ from motifmultiverse.schema import Missingness
 
 __all__ = [
     "GuardResult", "GuardError", "PendingGuardInput", "ALL_GUARDS",
-    "GUARDS_AWAITING_INPUT", "run_all",
+    "GUARDS_AWAITING_INPUT", "CROSS_MODEL_AXES", "run_all",
     "single_scale", "variant_id_unique", "no_key_parsing", "four_state_missingness",
     "no_cross_model_cwm_avg", "sign_alignment", "interaction_required",
     "estimability_floor", "stratum_parity", "short_motif_flag", "single_family_layer",
@@ -210,38 +210,45 @@ GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
             "count and no coverage, and the only place those exist is "
             "`interpret.health_report`, where the claim and the recomputation are the "
             "same expression: the guard would corroborate itself, which is the failure "
-            "mode it exists to catch."
+            "mode it exists to catch.\n"
+            "Persisting guard outcomes does not change this, and was checked rather "
+            "than assumed: `guard_log`'s record holds what a guard RETURNED, so using "
+            "it as the claim would put a guard in front of its own output, which T-16 "
+            "forbids for the same reason. Neither does the health block on "
+            "`interpret.Interpretation`, which is the other place a coverage now "
+            "reaches disk: `explained_fraction` is n_with_used_hit / n_searched over "
+            "PEAKS, and this guard recomputes over the ROWS it is handed, so pointing "
+            "it at the hit table would compare two different quantities and fail on "
+            "correct data -- and synthesising one row per peak so that they line up is "
+            "manufacturing the very claim this entry is waiting for, in the code that "
+            "would then be audited by it."
         ),
         closes_when=(
             "the manifest -- or a ledger written by the program that froze the run, "
             "not by this package -- records how many (region, variant) opportunities "
-            "were searched and how many were retained. The real K562 substrate is "
-            "materialised from an upstream opportunity table that knows both numbers "
-            "and does not carry them across, so closing this is a matter of the caller "
-            "writing down two integers it already has, not of new science. Once they "
-            "are there, `read_hit_table` compares them against a recomputation from "
-            "the missingness column and the guard has an author it is not."
-        ),
-    ),
-    "no_cross_model_cwm_avg": PendingGuardInput(
-        nearest_artifact="compile.compile_lexicons",
-        why_not_a_call_site=(
-            "No stage in this release combines CWMs at all. `align.register_pair` "
-            "scores a signed CWM cosine at an offset the unsigned PPM already chose "
-            "and never averages; `compile.compile_lexicons` names an observed member "
-            "as a collapse's representative and refuses one that is absent from its "
-            "own tier. An operations log emitted by those two would therefore hold "
-            "only medoid-shaped entries, and this guard inspects nothing but "
-            "`op in {mean, average}` -- it would pass an input that cannot contain a "
-            "violation, which is vacuity, not enforcement."
-        ),
-        closes_when=(
-            "a stage exists that can produce a CWM by combining others -- a "
-            "constructed representative, a meta-analysed CWM across models -- and "
-            "records each combination with the axes it held fixed. Note what stays "
-            "open even then, because the guard does not cover it and "
-            "`docs/CONSTRAINTS.md` FP-05 says so: a representative averaged WITHIN one "
-            "model holds model, readout and metacluster fixed and passes this guard."
+            "were searched and how many were retained, and "
+            "`interpret.verify_against_manifest` puts them in front of a recomputation "
+            "from the missingness column, passing value_key='hit_coefficient' (the "
+            "column a fill could have written into; the guard refuses to guess it). "
+            "That function, not `read_hit_table` as this entry used to say: it is "
+            "where the manifest and the rows are both already in hand, and it already "
+            "makes this comparison for n_regions. The real K562 substrate is "
+            "materialised from an upstream opportunity table whose own vocabulary is "
+            "USED / SEARCHED_NOT_RETAINED / NOT_SEARCHED, so both numbers exist "
+            "upstream and are not carried across. Two things stand between that and a "
+            "call site, and this entry is not closed without both. (1) It is a schema "
+            "change, not an added field: `substrate.read_manifest` refuses any key set "
+            "other than its seven, and n_regions sits inside the hashed semantic "
+            "payload, so two more counts bump the manifest's schema version and "
+            "re-identify every substrate. (2) A DECISION nobody has made about what "
+            "'defined' means. This guard counts only `used`; `interpret.peak_universe` "
+            "treats NO_SEQUENCE_MATCH and HIT_BELOW_FLOOR as measurements that "
+            "contribute 0 and only NOT_SEARCHED as undefined. A caller writing down "
+            "'retained' means the first, a caller writing down 'measured' means the "
+            "second, and the denominator moves with it -- every opportunity, or only "
+            "the searched ones. Wired before that is settled, the guard rejects "
+            "correct data for a definitional reason, and a guard that cries wolf is a "
+            "guard the next maintainer deletes."
         ),
     ),
     "interaction_required": PendingGuardInput(
@@ -330,11 +337,23 @@ GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
         nearest_artifact="infer.UsageDefinition.BUDGET_FRACTION",
         why_not_a_call_site=(
             "`interpret.FamilyComposition.peak_share` is not the share this guard is "
-            "about: its denominator is searched PEAKS, so 1.0 in a single-family "
-            "composition is a defined statement -- every searched peak carries that "
-            "family -- and giving FamilyComposition a status field to mark it "
-            "NOT_ESTIMABLE would invent an estimability semantics for a quantity that "
-            "is not undefined.\n"
+            "about, and the question of WHICH it is -- undefined, or defined but out "
+            "of the guard's scope -- has an answer that can be measured rather than "
+            "argued. It is DEFINED AND OUT OF SCOPE. Its denominator is searched "
+            "PEAKS, so a single-family composition reports the fraction of searched "
+            "peaks carrying the only family present, and single-familyness does not "
+            "force that fraction to anything: on the real K562 substrate "
+            "(576,589 rows, 33,917 peaks) a composition restricted to one family "
+            "comes out 0.310670 for CTCF/CTCFL-like and 0.998143 for AP-1/bZIP. Both "
+            "are measurements; neither is 1.0; a 1.0 there would be the measurement "
+            "that every searched peak carries it. The share this guard rules on is "
+            "the other kind -- a family's share of its peak's own family layer, whose "
+            "denominator is the other families -- where one family forces 1.0 "
+            "IDENTICALLY and the number carries no information. Giving "
+            "FamilyComposition an estimability status would therefore not be wiring "
+            "this guard; it would be inventing an estimability semantics for a "
+            "quantity that is estimable, and marking a real 1.0 NOT_ESTIMABLE would "
+            "suppress a finding.\n"
             "The share the guard IS about -- a family's share of its peak's own family "
             "layer -- does exist, in `infer._usage_predicate` under BUDGET_FRACTION: "
             "`abs_coefficient_sum / peak_abs_coefficient_sum`. On a peak whose only "
@@ -356,7 +375,12 @@ GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
             "peak does to a BUDGET_FRACTION denominator: dropped from it as "
             "NOT_ESTIMABLE, or kept with its share recorded as undefined rather than "
             "1.0. The field alone is not enough -- it would let the guard fire on every "
-            "real substrate with no state in which the run could legitimately proceed."
+            "real substrate with no state in which the run could legitimately proceed. "
+            "What does NOT close it, and has now been looked at twice: an estimability "
+            "status on `FamilyComposition`. That entry point is settled above -- the "
+            "share there is defined and the guard's rule does not reach it -- so a "
+            "future round should spend its attention on PeakUsage and the decision, "
+            "not on re-deriving the composition question."
         ),
     ),
 }
@@ -459,17 +483,61 @@ def four_state_missingness(
     )
 
 
+#: The axes a CWM combination must hold fixed. Exported because the operations
+#: log that feeds `no_cross_model_cwm_avg` has to report which of them each
+#: operation held fixed: two hand-maintained lists of the same three strings
+#: would be free to drift into disagreeing about what "cross-model" means, and
+#: the disagreement would show up as a guard that quietly stops testing an axis.
+CROSS_MODEL_AXES = ("model", "readout", "metacluster")
+
+
 def no_cross_model_cwm_avg(operations: Iterable[Mapping[str, Any]]) -> GuardResult:
-    """Averaging CWMs across model / readout / metacluster is a design prohibition."""
+    """Averaging CWMs across model / readout / metacluster is a design prohibition.
+
+    Each operation states what it did (``op``) and which axes it held fixed
+    (``group_by``). The guard is only as good as where that pair comes from: an
+    operation record written by the stage that performed the operation is that
+    stage testifying about itself, and it passes for exactly as long as the
+    testimony is kept up to date by hand. `compile.operations_log` therefore does
+    not ask the writer -- it reads the emitted lexicon back and classifies each
+    motif against the registry arrays it stands for, so ``op`` is a property of
+    the bytes rather than of anyone's intent.
+
+    What this guard does NOT cover, stated here because a reader would otherwise
+    read a pass as broader than it is. Two things, and the second is the larger.
+
+    1. A representative averaged WITHIN one model holds all three axes fixed and
+       passes (`docs/CONSTRAINTS.md` FP-05). The prohibition on constructed
+       representatives as such is a separate rule, enforced at compile by
+       requiring a representative to be one of its own members.
+    2. **The check reaches back exactly as far as the operations log does, and no
+       further.** `compile.operations_log` classifies the emitted lexicon against
+       the registry `ingest` wrote, so it sees combination performed between those
+       two points -- and a cross-model mean performed *before* the registry, where
+       a real meta-analysed-CWM stage would live, arrives as an ordinary registry
+       motif and is classified `copy`. That is not a hypothetical: it is pinned by
+       `test_ingest_compile`'s
+       `test_a_cross_model_mean_made_upstream_of_the_registry_passes`, which builds
+       one and asserts this guard passes on it. So a pass here means
+       "nothing downstream of the registry averaged", never "this lexicon contains
+       no cross-model average" -- and because the pass sentence is persisted
+       verbatim by `guard_log` and printed verbatim by `report`, it says so
+       itself rather than relying on a reader finding this docstring.
+    """
     gid = "no_cross_model_cwm_avg"
     for op in operations:
         if op.get("op") not in {"mean", "average"}:
             continue
         grouped = set(op.get("group_by", ()))
-        for axis in ("model", "readout", "metacluster"):
+        for axis in CROSS_MODEL_AXES:
             if axis not in grouped:
                 return _fail(gid, f"CWM {op['op']} does not hold {axis} fixed (group_by={sorted(grouped)})")
-    return _ok(gid, "no CWM averaging crosses model, readout or metacluster")
+    return _ok(
+        gid,
+        "no CWM combination recorded in this log averages across model, readout or "
+        "metacluster; combination performed before the operations were recorded is "
+        "outside what this checked",
+    )
 
 
 def sign_alignment(alignments: Iterable[Mapping[str, Any]]) -> GuardResult:

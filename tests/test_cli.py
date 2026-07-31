@@ -1301,3 +1301,85 @@ def test_the_peaks_flag_states_how_a_bed_is_matched(capsys):
     help_text = capsys.readouterr().out
     assert "4th column IS the region_id" in help_text
     assert "exact string equality" in help_text
+
+
+def test_interpret_records_what_each_guard_returned_beside_its_result(tmp_path):
+    """The stage's guards leave a trace in the directory, not only on stdout.
+
+    Four guards run inside `interpret.interpret_query`; before this file existed a
+    reader of the output directory could not tell a run whose guards all passed
+    from a run in which they had never been reached. The entries are joined to
+    this run through the provenance log's length, the same join
+    `run_status.json` uses.
+    """
+    from motifmultiverse import guard_log
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+                 "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+                 "--bootstrap", "50", "--out", str(out), *_floors()]) == 0
+
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    assert {row["guard_id"] for row in recorded} == {
+        "comparator_declared", "selection_provenance_declared",
+        "health_before_effect", "single_scale",
+    }
+    assert all(row["stage"] == "interpret" for row in recorded)
+    assert all(row["passed"] is True for row in recorded)
+    assert all(row["detail"] for row in recorded)
+
+    n_records = len(json.loads((out / "provenance.json").read_text()))
+    assert all(row["provenance_records"] == n_records for row in recorded)
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["artifacts_are_from"]["provenance_records"] == n_records
+
+
+def test_infer_records_its_guard_outcomes_under_its_own_stage_name(tmp_path):
+    """`infer` and `interpret` run the same guards; the record says which ran here."""
+    from motifmultiverse import guard_log
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main(["infer", str(hits), "--peaks", str(q), "--comparator", str(c),
+                 "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+                 "--bootstrap", "50", "--out", str(out), *_floors()]) == 0
+
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    assert recorded and all(row["stage"] == "infer" for row in recorded)
+
+
+def test_a_run_refused_by_a_guard_still_records_which_guard_refused_it(tmp_path, monkeypatch,
+                                                                      capsys):
+    """The case the record exists for: no result artifact is written at all.
+
+    A guard failure is a refusal (exit 4) and `interpretation.json` is never
+    produced, so an outcome stored inside that result would be missing from
+    precisely the run a reader needs to explain. The failure is injected at the
+    guard rather than by contriving data, because what is under test is the
+    ORDERING -- the outcome reaches disk before the refusal propagates -- and not
+    any particular guard's own logic.
+    """
+    from motifmultiverse import guard_log, guards
+    from motifmultiverse import interpret as interpret_mod
+
+    def refuse(records):
+        return guards.GuardResult("single_scale", False, "injected: two input scales")
+
+    monkeypatch.setattr(interpret_mod.guards, "single_scale", refuse)
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+                 "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+                 "--bootstrap", "50", "--out", str(out), *_floors()]) == 4
+    assert "refused" in capsys.readouterr().err
+
+    assert not (out / "interpretation.json").exists(), (
+        "the refusal must not have written a result; otherwise this proves nothing"
+    )
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    failed = [row for row in recorded if not row["passed"]]
+    assert [row["guard_id"] for row in failed] == ["single_scale"]
+    assert failed[0]["detail"] == "injected: two input scales"
+    assert json.loads((out / "run_status.json").read_text())["status"] == "REFUSED"

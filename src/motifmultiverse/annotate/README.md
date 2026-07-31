@@ -10,7 +10,7 @@ In the reference implementation `annotate` had no stage at all -- family assignm
 
 ## How to check it
 
-`guards.short_motif_flag`: PWM <= 6 bp, or TomTom q > 0.05, or seqlet count < 100 requires `low_confidence_annotation`.
+`guards.short_motif_flag`: PWM <= 6 bp, or TomTom q > 0.05, or seqlet count < 100 requires `low_confidence_annotation`. What it returned is written to `guard_outcomes.json` beside the candidate table (`motifmultiverse.guard_log`).
 
 ---
 

@@ -1048,3 +1048,32 @@ def test_cli_align_workers_progress_goes_to_stderr_not_stdout(tmp_path, capsys):
     )
     assert "written:" in captured.out and "workers=2" in captured.out
     assert len(pd.read_parquet(out / "alignment_edges.parquet")) > 1
+
+
+def test_align_records_what_its_guard_returned_beside_the_edge_table(
+    tmp_path, shared_ppm, short_overlap_target, sign_flip_cwm,
+):
+    """`sign_alignment` is this stage's whole executable claim; it now leaves a trace.
+
+    Registration on signed CWM cosine is structurally blind to a sign-flipped
+    motif, so "no flips" can be an artefact of the instrument. The guard says the
+    registration was unsigned; until this record existed, a directory holding an
+    edge table could not say whether it had ever been asked.
+    """
+    import json
+
+    from motifmultiverse import guard_log
+
+    registry = _registry_arrays_h5(tmp_path, {
+        "a": {"ppm": shared_ppm, "cwm": sign_flip_cwm},
+        "b": {"ppm": short_overlap_target, "cwm": -sign_flip_cwm},
+    })
+    out = tmp_path / "evidence"
+    align_registry(registry, out, null_shuffles=3, seed=4)
+
+    recorded = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+    assert [row["guard_id"] for row in recorded] == ["sign_alignment"]
+    assert recorded[0]["stage"] == "align" and recorded[0]["passed"] is True
+    assert "unsigned" in recorded[0]["detail"]
+    # Written after the provenance record, so the join to the run holds.
+    assert recorded[0]["provenance_records"] == 1

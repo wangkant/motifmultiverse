@@ -22,8 +22,10 @@ visible when the peak set was chosen.
 `guards.selection_provenance_declared` (an undeclared query takes the most
 conservative mode, never a permissive default), `guards.health_before_effect`
 (health first; a failed floor suppresses the reading), `guards.comparator_declared`
-(no baseline, no number) and `guards.single_scale`. Interpret outputs are labelled
-descriptive and may not be cited as a test result.
+(no baseline, no number) and `guards.single_scale`. What each of those four returned
+is written to `guard_outcomes.json` in the run's `--out` (`motifmultiverse.guard_log`),
+as the guard returns, so a run one of them refused still says which one and what it saw.
+Interpret outputs are labelled descriptive and may not be cited as a test result.
 
 ---
 
@@ -142,6 +144,18 @@ than degrading: `B` replicates resolve a tail no finer than 1/(B+1), so a 2.5%
 tail needs `B ≥ 39`, and below it both endpoints are the extreme replicates. At
 `B = 1` that produced `[x, x]` — a zero-width 95% interval printed beside its
 point estimate, which reads as infinite precision rather than as one draw.
+
+The two paths do **not** treat the resampling-unit count alike, and every effect
+now records which floor it cleared in `estimator_min_blocks`. `bca-wild-cluster`
+refuses below `infer.MIN_ESTIMABLE_BLOCKS` (30) whatever the run declared, so its
+effects record 30. The default path floors *replicates* — twice, requested and
+estimable — and floors **blocks not at all**, so its effects record `None`: with
+`--floor-blocks 6` past the health gate, a 95% percentile interval is computed
+from six resampling units, which is data the other estimator would refuse
+outright. Whether a percentile block bootstrap *should* carry a block floor is a
+question about the estimator and is open; what is settled is that the number in
+front of a reader now says which floor, if any, it met, instead of leaving it to
+be inferred from the estimator's name.
 
 Every result names its estimator rather than saying "block bootstrap", because the
 distance between what was specified and what ran is exactly the thing that
