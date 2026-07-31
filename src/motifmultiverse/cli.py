@@ -14,15 +14,16 @@ Exit codes: ``0`` success, ``2`` no subcommand, ``3`` unimplemented body,
 ``4`` refusal -- the tool declined to produce a number and says which rule
 declined it.
 
-KNOWN LIMITATION: a refusal appends its provenance record and produces nothing
-else, so it neither writes nor removes result artifacts. Re-running into a
-``--out`` that already holds a result therefore leaves that earlier result in
-place beside the refusal's record, with nothing in the directory relating the
-two. Read the exit code, not the directory. Deleting the earlier result to
-prevent the misreading would destroy a real result, and marking it stale needs
-a decision about what an output directory promises that this design has not
-made; ``tests/test_cli.py::test_a_refused_run_leaves_the_earlier_result_beside_its_own_refusal``
-pins the behaviour so it stays a known state rather than a surprise.
+Every run that names an ``--out`` also writes :mod:`motifmultiverse.run_status`
+there when it finishes, whatever the outcome. This used to be a known limitation
+recorded in this docstring: a refusal appended its provenance record and produced
+nothing else, so re-running into a ``--out`` that already held a result left that
+earlier result in place beside the refusal's record with nothing relating the
+two, and the advice was "read the exit code, not the directory". The exit code is
+gone by the time anyone opens the folder, so it is now written into the folder:
+``run_status.json`` records the outcome, and its ``artifacts_are_from`` names the
+last run that actually succeeded here. Nothing is deleted -- destroying a real
+result to prevent a misreading of it was never the repair.
 """
 from __future__ import annotations
 
@@ -48,6 +49,7 @@ from motifmultiverse.interpret import (
 )
 from motifmultiverse.provenance import ProvenanceError, record
 from motifmultiverse.report import ReportError
+from motifmultiverse.run_status import write_run_status
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
     Decision,
@@ -331,10 +333,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("interpretation",
                    help="directory holding interpretation.json and the provenance.json "
                         "log beside it, as written by `interpret --out` / `infer --out`")
-    a.add_argument("--bias-ledger", default="docs/bias_ledger.tsv",
-                   help="the bias ledger to render (default: docs/bias_ledger.tsv). The "
-                        "TSV is authoritative where docs/BIAS_LEDGER.md's English gloss "
-                        "differs from it")
+    a.add_argument("--bias-ledger", default=None,
+                   help="the bias ledger to render (default: the bias_ledger.tsv packaged "
+                        "with this distribution, so the default resolves from a wheel and "
+                        "not only from a checkout). The TSV is authoritative where "
+                        "docs/BIAS_LEDGER.md's English gloss differs from it")
     a.add_argument("--html", action="store_true",
                    help="NOT IMPLEMENTED: refuses (exit 4). Rendering markdown while the "
                         "caller asked for HTML is the specified-versus-ran gap this "
@@ -836,13 +839,20 @@ def _run_report(ns: argparse.Namespace) -> int:
     from motifmultiverse import report as report_mod
 
     src = Path(ns.interpretation)
+    # Resolved before the record is written, because the record has to checksum
+    # the ledger that will actually be rendered. `--bias-ledger` omitted means the
+    # packaged one; it is not a repository path that happens to exist beside a
+    # checkout, which is what the default used to be and why `report` refused
+    # after a plain `pip install`.
+    ledger = (Path(ns.bias_ledger) if ns.bias_ledger
+              else report_mod.packaged_bias_ledger_path())
     rec = record("report")
     # Keyed by the ROLE each file played, as `interpret` and `infer` key theirs:
     # `interpretation.json` and `provenance.json` are fixed basenames that several
     # directories legitimately share.
     for role, path in (("interpretation", src / "interpretation.json"),
                        ("provenance", src / "provenance.json"),
-                       ("bias_ledger", Path(ns.bias_ledger))):
+                       ("bias_ledger", ledger)):
         if path.is_file():
             rec.add_input(path, key=f"{role}:{path.name}")
     rec.write(ns.out)
@@ -858,12 +868,44 @@ def _run_report(ns: argparse.Namespace) -> int:
             "a semantic no-op. This renderer emits markdown only."
         )
 
-    dest = report_mod.run(src, ns.out, bias_ledger=ns.bias_ledger)
+    dest = report_mod.run(src, ns.out, bias_ledger=ledger)
     print(f"report: rendered from {src / 'interpretation.json'} "
           f"and the provenance log beside it")
-    print(f"  bias ledger: {ns.bias_ledger}")
+    print(f"  bias ledger: {ledger}"
+          f"{'' if ns.bias_ledger else ' (packaged with this distribution)'}")
     print(f"written: {dest}")
     return 0
+
+
+def _record_outcome(ns: argparse.Namespace, status: str, detail: str | None = None,
+                    exit_code: int | None = None) -> None:
+    """Write ``run_status.json`` into this run's ``--out``, if it named one.
+
+    Best-effort by construction: a status file that could not be written must not
+    change the exit code the run earned, or a refusal would turn into a crash on
+    a read-only directory. It is written for *every* outcome, including the
+    successful one, because a directory that only gets a status file when
+    something goes wrong is a directory where the file's absence means two
+    different things.
+
+    It is *not* written into a directory that does not already exist. A run
+    refused before it wrote anything -- ``validate --fimo-heldout``, refused at
+    argument level -- creates no output directory at all today, and
+    ``tests/test_cli.py`` pins that. There is nothing to misread in a directory
+    that is not there, so creating one to say so would add an artifact to prevent
+    a confusion that cannot arise. Every case this record exists for -- artifacts
+    from an earlier run lying beside a later failure -- is a directory that
+    exists by definition.
+    """
+    out = getattr(ns, "out", None)
+    if not out or not Path(out).is_dir():
+        return
+    try:
+        write_run_status(out, status=status, detail=detail, exit_code=exit_code,
+                         subcommand=ns.subcommand,
+                         command=" ".join([Path(sys.argv[0]).name, *sys.argv[1:]]))
+    except OSError as exc:                                  # pragma: no cover - filesystem
+        print(f"motifmultiverse: could not write run_status.json: {exc}", file=sys.stderr)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -873,12 +915,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 2
     try:
-        return ns.func(ns)
+        code = ns.func(ns)
     except NotImplementedError as exc:
         print(f"motifmultiverse: {exc}", file=sys.stderr)
+        _record_outcome(ns, "UNIMPLEMENTED", str(exc))
         return 3
     except FileNotFoundError as exc:
         print(f"motifmultiverse: {exc.filename}: no such file", file=sys.stderr)
+        _record_outcome(ns, "INPUT_MISSING", f"{exc.filename}: no such file")
         return 2
     except (GuardError, InterpretError, InferError, IngestError, CompileError,
             BackendMissing, SchemaError, AlignmentError, AnnotationError,
@@ -886,7 +930,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.
         print(f"motifmultiverse: refused: {exc}", file=sys.stderr)
+        _record_outcome(ns, "REFUSED", str(exc))
         return 4
+    except BaseException as exc:
+        # An unexpected exception still propagates -- a traceback is the right
+        # output for a defect, and swallowing it here would turn one into a
+        # refusal. What is not left to the traceback is the directory: a crashed
+        # run must not leave a `--out` whose newest statement is an earlier run's
+        # success.
+        _record_outcome(ns, "CRASHED", f"{type(exc).__name__}: {exc}")
+        raise
+    if code == 0:
+        _record_outcome(ns, "SUCCESS")
+    else:
+        # No runner returns non-zero; every one of them raises instead. If one
+        # ever does, it is not recorded as a success with a non-zero exit code
+        # beside it in the same document -- that document would contradict
+        # itself, and a reader checking `status == "SUCCESS"` would believe the
+        # wrong half of it.
+        _record_outcome(ns, "CRASHED", f"the runner returned exit code {code}", exit_code=code)
+    return code
 
 
 if __name__ == "__main__":  # pragma: no cover

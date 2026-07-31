@@ -1145,25 +1145,21 @@ def test_an_interrupted_provenance_write_cannot_truncate_the_existing_log(tmp_pa
     assert len(json.loads(dest.read_text())) == 1
 
 
-def test_a_refused_run_leaves_the_earlier_result_beside_its_own_refusal(tmp_path):
-    """KNOWN LIMITATION, pinned: an output directory carries no staleness contract.
+def test_a_refused_run_marks_the_directory_and_names_whose_result_is_in_it(tmp_path):
+    """The repair for what this module's docstring used to call a KNOWN LIMITATION.
 
-    Provenance is written before anything is computed, on purpose (see this
-    module's docstring and provenance/__init__.py): a record that arrives only
-    on success is a record the runs you most want to explain never get. So a
-    refused run appends its record and then refuses, and the directory ends up
-    holding a result from an earlier run, a refusal record, and nothing that
-    relates the two. A reader who sees only the directory reads the old result
-    as this run's.
+    Provenance is written before anything is computed, on purpose (see
+    provenance/__init__.py): a record that arrives only on success is a record
+    the runs you most want to explain never get. So a refused run appends its
+    record and refuses, and the earlier run's result is still lying in the
+    directory -- correctly, because deleting a real result to prevent a
+    misreading of it is a worse trade. What was missing was the sentence saying
+    which run the files belong to, and "read the exit code, not the directory"
+    was advice rather than a mechanism: the exit code is gone by the time anyone
+    opens the folder.
 
-    Not fixed, and specifically not by any of these. Deleting the earlier
-    result would destroy a real result to prevent a misreading of it. Adding a
-    staleness marker file makes a new artifact whose meaning to every downstream
-    reader is undecided. Saying it in the refusal message would break the
-    refusal contract this CLI's docstring states -- exit 4, one sentence.
-    Recording the run's outcome *in* the provenance record is the honest repair
-    and is a schema change plus a second write, which needs a ruling on what a
-    record written before the work means once the work is known to have failed.
+    `run_status.json` is that sentence. The earlier result is still there,
+    untouched and byte-identical -- and now labelled.
     """
     from motifmultiverse.schema.substrate import CallerSpecification
     from motifmultiverse.substrate import build_manifest, write_manifest
@@ -1189,7 +1185,88 @@ def test_a_refused_run_leaves_the_earlier_result_beside_its_own_refusal(tmp_path
 
     records = json.loads((out / "provenance.json").read_text())
     assert [r["subcommand"] for r in records] == ["interpret", "interpret"]
-    assert (out / "interpretation.json").read_text() == produced, "stale, and unmarked"
+    assert (out / "interpretation.json").read_text() == produced, "the earlier result was destroyed"
+
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["status"] == "REFUSED" and status["exit_code"] == 4
+    # The refusal's own sentence, in the directory rather than only on a stderr
+    # nobody kept: a reader who arrives later can see WHY, not just that.
+    assert "substrate" in status["detail"].lower() or status["detail"]
+    # And the thing that makes the stale result readable rather than misleading:
+    # the artifacts here belong to the run named by `artifacts_are_from`, which is
+    # the earlier successful one and NOT this refusal.
+    came_from = status["artifacts_are_from"]
+    assert came_from["status"] == "SUCCESS"
+    assert came_from["finished_utc"] <= status["finished_utc"]
+    # An EARLIER run: the log had one record when it finished and two when the
+    # refusal did. (`command` cannot tell them apart here -- it is read from
+    # `sys.argv`, which under an in-process test is pytest's own command line for
+    # both runs, the same way `provenance.command` is.)
+    assert came_from["provenance_records"] < status["provenance_records"], (
+        "the refusal recorded itself as the run the artifacts came from"
+    )
+
+
+def test_a_successful_run_says_so_in_the_directory_it_wrote(tmp_path):
+    """The other half: SUCCESS is written too, so an absent file means one thing.
+
+    A status file that appears only on failure makes its own absence ambiguous --
+    "this run succeeded" and "this tool is too old to say" would look identical to
+    a downstream reader deciding whether to trust the artifacts beside it.
+    """
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+                 "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+                 "--bootstrap", "50", "--out", str(out), *_floors()]) == 0
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["status"] == "SUCCESS" and status["exit_code"] == 0
+    assert status["detail"] is None
+    assert status["subcommand"] == "interpret"
+    assert status["provenance_records"] == 1
+    assert status["artifacts_are_from"]["status"] == "SUCCESS"
+
+
+def test_a_run_that_refuses_into_a_fresh_directory_says_no_run_succeeded_here(tmp_path):
+    """With nothing earlier to inherit, the carry-forward must not invent one.
+
+    `null` would read as "from nowhere in particular"; the token says the true and
+    stronger thing -- that no run this file has seen has ever succeeded here, so
+    anything in the directory was not written by one.
+    """
+    from motifmultiverse.run_status import NO_SUCCESSFUL_RUN
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "never_succeeded"
+    assert main(["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+                 "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+                 "--bootstrap", "5", "--out", str(out), *_floors()]) == 4
+    status = json.loads((out / "run_status.json").read_text())
+    assert status["status"] == "REFUSED"
+    assert status["artifacts_are_from"] == NO_SUCCESSFUL_RUN
+
+
+def test_report_refuses_an_unparseable_interpretation_with_exit_4_and_no_report(tmp_path, capsys):
+    """A truncated input is a refusal, not a traceback and not an undocumented exit.
+
+    `report` read both its inputs with a bare `json.loads`, so a half-written
+    `interpretation.json` -- a run killed mid-write, a partially copied directory
+    -- escaped as a `JSONDecodeError` that `main` does not catch: exit 1, a
+    traceback, and a code this CLI never defined. The contract is exit 4 and a
+    sentence naming the rule.
+    """
+    src = tmp_path / "interpretation"
+    src.mkdir()
+    (src / "interpretation.json").write_text('{"query_id": "cl5", "substrate', encoding="utf-8")
+    (src / "provenance.json").write_text("[]", encoding="utf-8")
+    out = tmp_path / "report"
+
+    assert main(["report", str(src), "--out", str(out)]) == 4
+    err = capsys.readouterr().err
+    assert "refused" in err and "interpretation.json" in err
+    assert "Traceback" not in err
+    assert not (out / "report.md").exists(), "a report was written from a record nobody could read"
+    assert json.loads((out / "run_status.json").read_text())["status"] == "REFUSED"
 
 
 def test_the_printed_interpretation_names_both_permission_axes(tmp_path, capsys):

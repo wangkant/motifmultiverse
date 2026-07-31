@@ -332,15 +332,17 @@ def _within(doc: str, anchor: str, needle: str, window: int = 400) -> bool:
     return needle in flat[max(0, start - window):start + len(anchor) + window]
 
 
-def _repo_root() -> Path:
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "docs" / "bias_ledger.tsv").is_file():
-            return parent
-    pytest.fail("docs/bias_ledger.tsv is not above tests/; section 9 has nothing to render")
-
-
 def _ledger_rows() -> list[list[str]]:
-    text = (_repo_root() / "docs" / "bias_ledger.tsv").read_text(encoding="utf-8")
+    """The ledger as the CODE reaches it, not as the repository lays it out.
+
+    Read through `packaged_bias_ledger_path` rather than from a path spelled out
+    here: the ledger is package data now, and a test that walked the source tree
+    to find it would keep passing on the exact defect that move fixed -- a ledger
+    present in the checkout and absent from the wheel.
+    """
+    from motifmultiverse.report import packaged_bias_ledger_path
+
+    text = packaged_bias_ledger_path().read_text(encoding="utf-8")
     return [line.split("\t") for line in text.splitlines() if line.strip()]
 
 
@@ -437,6 +439,32 @@ def test_a_figure_with_no_denominator_is_refused(tmp_path, mutate, missing):
     assert missing in str(excinfo.value), (
         "the refusal must name the field whose absence caused it, or a reader cannot "
         f"tell which denominator is missing; got: {excinfo.value}"
+    )
+
+
+@pytest.mark.parametrize("broken", ["interpretation.json", "provenance.json"])
+@pytest.mark.parametrize(
+    "content",
+    ['{"query_id": "cl5", "substrate_id":', "", "\x00\x01 not text at all"],
+    ids=["truncated", "empty", "binary"],
+)
+def test_an_unparseable_input_is_refused_and_never_a_traceback(tmp_path, broken, content):
+    """A truncated record is a refusal, exactly like an absent one.
+
+    Both inputs were read with a bare `json.loads`, so a run killed mid-write, a
+    file edited by hand, or a directory a pipeline copied only half of came out
+    as a `JSONDecodeError` traceback -- which `cli.main` does not catch, so the
+    process exited 1, a code this CLI's contract does not define. `ReportError`
+    is what makes it exit 4 and name the file. `compile` already wraps its
+    decisions payload for the same reason; this is the same rule applied to the
+    stage whose entire input is JSON somebody else wrote.
+    """
+    project = _write_project(tmp_path, f"broken_{broken}_{len(content)}")
+    (project / broken).write_text(content, encoding="utf-8", errors="surrogateescape")
+    with pytest.raises(_report_error()) as excinfo:
+        render(project, tmp_path / f"out_{broken}_{len(content)}")
+    assert broken in str(excinfo.value), (
+        f"the refusal must name the file it could not read; got: {excinfo.value}"
     )
 
 
@@ -844,8 +872,40 @@ def test_what_this_report_does_not_know_names_the_fields_that_would_have_said_it
 # --------------------------------------------------------------------------- #
 # 4. The bias ledger, and the guards.
 # --------------------------------------------------------------------------- #
+def test_the_default_bias_ledger_resolves_without_the_repository(real_project, tmp_path,
+                                                                 monkeypatch):
+    """`report` with no `--bias-ledger` must render from an installed package.
+
+    The default used to be `docs/bias_ledger.tsv` resolved by walking up from
+    `report/__init__.py`, so it existed in a checkout and did not in a wheel:
+    `pip install motifmultiverse` then `motifmultiverse report interpretation/`
+    refused, naming a file the distribution had never contained. The refusal read
+    as the tool being careful and was a packaging defect.
+
+    Running from a directory with no `docs/` in it or above it is the condition
+    that distinguishes the two -- under the old default the render below fails,
+    under package data it does not.
+    """
+    from motifmultiverse.report import packaged_bias_ledger_path
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert not any((p / "docs" / "bias_ledger.tsv").exists()
+                   for p in [elsewhere, *elsewhere.parents]), "this test needs a docs-free cwd"
+
+    ledger = packaged_bias_ledger_path()
+    assert ledger.is_file(), "the ledger this package ships is not where the package looks"
+    assert ledger.parent.name == "report", (
+        f"{ledger} is not inside the package; a wheel carries package data and not the "
+        "repository around it"
+    )
+    doc = render(real_project, elsewhere / "out")          # no bias_ledger= argument
+    assert "BA-01" in doc and "BA-20" in doc
+
+
 def test_the_bias_ledger_renders_from_the_tsv(real_project, tmp_path):
-    """From `docs/bias_ledger.tsv`, which the rule names, verbatim.
+    """From the packaged `bias_ledger.tsv`, which the rule names, verbatim.
 
     docs/BIAS_LEDGER.md carries an English gloss and an "enforced here" column
     that are this repository's annotation of the ledger rather than the ledger;

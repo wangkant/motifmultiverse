@@ -4,28 +4,43 @@ on:
   push:
   pull_request:
 
+# Three jobs, because "the tests passed" is three different claims and they used
+# to be one. `core` says the suite passes on both supported interpreters;
+# `roundtrip` says a compiled lexicon was actually read back by the real hit
+# caller; `wheel` says the thing a user installs behaves like the thing we test.
+# A green check mark that covers only the first is the shape of assurance this
+# repository exists to distrust: before this split, the round trip SKIPPED in
+# every CI run (the backend was never installed), the package metadata claimed
+# Python 3.12 support that nothing exercised, and no job ever built a wheel --
+# so a packaging defect that made `report` refuse on a plain `pip install` could
+# not have been caught here.
+
 jobs:
-  check:
+  core:
+    name: core (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both interpreters `pyproject.toml` claims in its classifiers. A
+        # classifier nothing runs is a claim, not a fact.
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Lint
         run: ruff check src tests
-      # A green check mark here means "passed", and passed is NOT the same claim
-      # as verified. The `finemo` backend is not installed in CI, so
-      # test_roundtrip_against_the_real_loader SKIPS -- a compiled lexicon is
-      # never actually read back by the tool that will consume it. That check has
-      # been run manually against a real TF-MoDISco output; see
-      # src/motifmultiverse/compile/README.md. The status step below writes the
-      # distinction into an uploaded artifact rather than leaving it to this
-      # comment, which no reader of a green run ever sees.
+      # The finemo backend is NOT installed in this job, so
+      # test_roundtrip_against_the_real_loader skips here -- and a skip is
+      # unverified, not passed. The `roundtrip` job below is where that claim is
+      # made; this job's green means the rest of the suite passes on this
+      # interpreter, and nothing more.
       - name: Test
         run: pytest --junitxml=pytest-report.xml
       - name: Implementation status (passed / skipped / failed, never summed)
@@ -50,7 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: implementation-status
+          name: implementation-status-py${{ matrix.python-version }}
           path: |
             implementation_status.json
             pytest-report.xml
@@ -62,3 +77,178 @@ jobs:
             python -m motifmultiverse.cli "$sub" --help > /dev/null
             echo "  $sub --help: ok"
           done
+
+  roundtrip:
+    # The one check that proves what `compile` exists to guarantee: the file it
+    # writes is read back by the tool that will consume it. It is a REQUIRED job,
+    # not an optional extra -- when it lived inside `core` with the backend
+    # uninstalled, it skipped on every run this repository has ever had, and a
+    # skipped round trip is exactly the unverified-reads-as-green failure the
+    # README's finding 4 is about. MOTIFMULTIVERSE_REQUIRE_FINEMO=1 turns a
+    # missing backend into a failure instead of a skip, so this job cannot go
+    # green by quietly not running the thing it is named after.
+    name: finemo round-trip (required)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install with the backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,finemo]"
+      - name: The backend is importable AND usable
+        # Not `import finemo`. `status.backend_status` runs the capability probe
+        # in `compile.probe_backend` -- compile a one-motif lexicon, read it back
+        # with the real loader, compare the order -- and reports UNVERIFIED for a
+        # backend that imports and cannot do that. finemo 0.40 renamed an
+        # argument and every importable installation of it failed this way.
+        run: |
+          python - <<'PY'
+          import sys
+          from motifmultiverse.status import OPTIONAL_BACKENDS, backend_status
+          entry = backend_status("finemo", OPTIONAL_BACKENDS["finemo"])
+          print(f"finemo {entry['status']}: {entry['detail']}")
+          sys.exit(0 if entry["status"] == "VERIFIED" else 1)
+          PY
+      - name: Test, with the round trip required rather than skipped
+        env:
+          MOTIFMULTIVERSE_REQUIRE_FINEMO: "1"
+        run: pytest --junitxml=pytest-report.xml
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-report-roundtrip
+          path: pytest-report.xml
+
+  wheel:
+    # What a user installs, exercised the way a user installs it: build the
+    # wheel, install it into a clean environment with no source tree on the
+    # path, and run the subcommands from a directory that is not the repository.
+    # Every check here is one the previous workflow could not make: package data
+    # missing from the wheel resolves fine under `pip install -e` and fails
+    # under `pip install`.
+    name: wheel install and run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          ls -l dist/
+      - name: Install the wheel into a clean environment
+        run: |
+          python -m venv /tmp/wheelenv
+          /tmp/wheelenv/bin/pip install --upgrade pip
+          /tmp/wheelenv/bin/pip install dist/*.whl
+      - name: Every subcommand still exposes real --help, from the console script
+        # Run from a directory with no source tree and no `docs/`, because that
+        # is where a user runs it and it is the condition the old default failed.
+        run: |
+          set -e
+          mkdir -p /tmp/elsewhere && cd /tmp/elsewhere
+          /tmp/wheelenv/bin/motifmultiverse --help > /dev/null
+          for sub in ingest align annotate adjudicate compile validate infer interpret report; do
+            /tmp/wheelenv/bin/motifmultiverse "$sub" --help > /dev/null
+            echo "  $sub --help: ok"
+          done
+      - name: The wheel carries the data the code reads
+        run: |
+          cd /tmp/elsewhere
+          /tmp/wheelenv/bin/python - <<'PY'
+          from pathlib import Path
+
+          import motifmultiverse
+          from motifmultiverse.adjudicate import packaged_criteria_path
+          from motifmultiverse.report import packaged_bias_ledger_path, read_bias_ledger
+
+          criteria = packaged_criteria_path()
+          assert criteria.is_file(), f"packaged criteria missing from the wheel: {criteria}"
+          assert criteria.read_text(encoding="utf-8").strip(), "packaged criteria are empty"
+          ledger = packaged_bias_ledger_path()
+          assert ledger.is_file(), f"packaged bias ledger missing from the wheel: {ledger}"
+          rows = read_bias_ledger(ledger)
+          assert len(rows) == 20, f"the packaged ledger has {len(rows)} axes, expected 20"
+          root = Path(motifmultiverse.__file__).parent
+          for module in ("ingest", "align", "annotate", "adjudicate", "compile",
+                         "validate", "infer", "interpret", "report"):
+              assert (root / module / "README.md").is_file(), \
+                  f"{module}/README.md missing from the wheel"
+          print("packaged data: criteria, bias ledger and nine module READMEs all present")
+          PY
+      - name: End to end, from the installed wheel, with the DEFAULT bias ledger
+        # The regression this job exists for. `motifmultiverse report <dir>/` with
+        # no --bias-ledger must render, from a directory that contains no `docs/`.
+        # It used to refuse, because the default named a repository path the wheel
+        # did not ship -- an honest-looking refusal produced by a packaging defect.
+        run: |
+          set -e
+          cd /tmp/elsewhere
+          /tmp/wheelenv/bin/python - <<'PY'
+          # One frozen hit table, one query peak set, one comparator: the smallest
+          # input `interpret` accepts, written here rather than copied from
+          # tests/, which a wheel does not carry. The column list comes from the
+          # INSTALLED package, so this smoke test cannot drift from the schema it
+          # is feeding.
+          from motifmultiverse.schema import HIT_TABLE_COLUMNS
+
+          query, comparator, rows = [], [], []
+          for b in range(32):                 # >= the default min_blocks floor of 30
+              for i in (0, 1):
+                  rid = f"r{b}_{i}"
+                  (query if i == 0 else comparator).append(rid)
+                  start = b * 1_000_000 + i * 1000
+                  rows.append([rid, "chr1", str(start), str(start + 500), f"UA_FAM_A_{i}",
+                               "FAM_A", "1.0" if i == 0 else "0.2", "used", "9999",
+                               "lex_v1", "e" * 64])
+          with open("hits.tsv", "w") as fh:
+              fh.write("\t".join(HIT_TABLE_COLUMNS) + "\n")
+              for row in rows:
+                  fh.write("\t".join(row) + "\n")
+          open("query.txt", "w").write("\n".join(query) + "\n")
+          open("comparator.txt", "w").write("\n".join(comparator) + "\n")
+          PY
+          /tmp/wheelenv/bin/motifmultiverse interpret hits.tsv \
+            --peaks query.txt --comparator comparator.txt --comparator-id background \
+            --selection-provenance EXTERNAL --bootstrap 200 --out interpretation/
+          /tmp/wheelenv/bin/motifmultiverse report interpretation/ --out report/
+          test -s report/report.md
+          grep -q "BA-01" report/report.md
+          grep -q "BA-20" report/report.md
+          echo "report rendered from the packaged ledger, $(wc -l < report/report.md) lines"
+      - name: A run's outcome is written into its output directory
+        run: |
+          set -e
+          cd /tmp/elsewhere
+          /tmp/wheelenv/bin/python -c "
+          import json
+          status = json.load(open('interpretation/run_status.json'))
+          assert status['status'] == 'SUCCESS', status
+          print('run_status.json:', status['status'], '/ exit', status['exit_code'])
+          "
+          # And a refusal marks the directory rather than leaving the earlier
+          # result to be read as this run's.
+          set +e
+          /tmp/wheelenv/bin/motifmultiverse report interpretation/ --html --out report/
+          test $? -eq 4 || { echo "--html did not refuse with exit 4"; exit 1; }
+          set -e
+          /tmp/wheelenv/bin/python -c "
+          import json
+          status = json.load(open('report/run_status.json'))
+          assert status['status'] == 'REFUSED', status
+          assert status['artifacts_are_from']['status'] == 'SUCCESS', status
+          print('after a refusal:', status['status'],
+                '-- artifacts are from', status['artifacts_are_from']['finished_utc'])
+          "
+      - name: Upload the distribution
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

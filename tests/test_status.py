@@ -8,6 +8,8 @@ drift away from the code it describes.
 from __future__ import annotations
 
 import json
+import sys
+import types
 
 import pytest
 
@@ -56,8 +58,14 @@ def test_an_absent_subcommand_is_absent_not_silently_implemented():
         "status": "ABSENT", "detail": "no CLI subcommand is registered"}
 
 
+def _probe(module: str, run) -> status_mod.BackendProbe:
+    return status_mod.BackendProbe(
+        module=module, capability="the stand-in capability under test", run=run)
+
+
 def test_a_backend_that_cannot_be_imported_is_unverified_never_assumed():
-    result = status_mod.backend_status("finemo", "definitely_not_installed_xyz")
+    result = status_mod.backend_status(
+        "finemo", _probe("definitely_not_installed_xyz", lambda: "unreachable"))
     assert result["status"] == "UNVERIFIED"
     assert "not installed" in result["detail"]
 
@@ -71,8 +79,91 @@ def test_a_backend_with_no_check_is_unverified_rather_than_omitted():
     assert set(status_mod.build_status()["optional_backends"]) == set(status_mod.OPTIONAL_BACKENDS)
 
 
-def test_a_backend_that_imports_here_is_verified():
-    assert status_mod.backend_status("json-as-a-stand-in", "json")["status"] == "VERIFIED"
+def test_verified_requires_a_capability_that_ran_here_not_merely_an_import():
+    """The claim behind VERIFIED, and the fact that an import cannot make it.
+
+    `backend_status` used to return VERIFIED the moment `import_module` returned,
+    which this package's own code contradicts: `compile` separates
+    `BackendMissing` from `BackendIncompatible` precisely because an importable
+    backend may be unable to read a lexicon back, and finemo 0.40 renamed an
+    argument so that every importable installation of it was in exactly that
+    state. A status document that called those machines VERIFIED was describing
+    the import system, not the backend.
+    """
+    ran: list[str] = []
+
+    def capable() -> str:
+        ran.append("probe")
+        return "the stand-in round trip returned what it was given"
+
+    result = status_mod.backend_status("json-as-a-stand-in", _probe("json", capable))
+    assert result["status"] == "VERIFIED"
+    assert ran == ["probe"], "VERIFIED was reported without running the probe"
+    assert "the stand-in round trip returned what it was given" in result["detail"]
+    assert "the stand-in capability under test" in result["detail"], (
+        "a VERIFIED must say what was verified; a reader cannot go and look the probe up"
+    )
+
+
+def test_an_importable_backend_whose_capability_check_fails_is_unverified():
+    """The falsification half: the probe must be able to turn a green into a red.
+
+    This is the state an incompatible backend release puts a machine in --
+    installed, importable, and unable to perform the one operation `compile`
+    exists to guarantee. Without this test the capability check could silently
+    stop running and every backend would go on reporting VERIFIED, which is the
+    guard-that-has-never-failed shape the README's finding 4 is about.
+    """
+    def incapable() -> str:
+        raise RuntimeError("the loader read back ['pattern_1'], not ['pattern_0']")
+
+    result = status_mod.backend_status("json-as-a-stand-in", _probe("json", incapable))
+    assert result["status"] == "UNVERIFIED"
+    assert "imports but the capability check failed" in result["detail"]
+    assert "pattern_1" in result["detail"], "the reason a reader would act on is dropped"
+
+
+def test_a_probe_that_fails_unexpectedly_still_only_costs_a_verification():
+    """A broken probe must not take the status document down with it.
+
+    The document exists to be generated on machines whose backends are in unknown
+    states; a generator that raises on a surprising failure produces no status at
+    all, which is strictly less informative than UNVERIFIED.
+    """
+    def explodes() -> str:
+        raise KeyboardInterrupt("something no caller predicted")
+
+    result = status_mod.backend_status("json-as-a-stand-in", _probe("json", explodes))
+    assert result["status"] == "UNVERIFIED"
+    assert "KeyboardInterrupt" in result["detail"]
+
+
+def test_the_shipped_finemo_probe_is_a_round_trip_and_not_an_import(monkeypatch):
+    """The probe this package actually ships must exercise the real loader.
+
+    Asserted against the shipped `OPTIONAL_BACKENDS` entry rather than a stand-in,
+    because the stand-ins above prove the mechanism and this proves the wiring:
+    the entry could be a lambda returning "ok" and every test above would still
+    pass.
+    """
+    entry = status_mod.OPTIONAL_BACKENDS["finemo"]
+    assert entry is not None and entry.module == "finemo"
+    assert "read back" in entry.capability
+
+    called: dict[str, object] = {}
+
+    def fake_probe_backend(**kwargs):
+        called["called"] = True
+        called.update(kwargs)
+        return "stand-in evidence"
+
+    from motifmultiverse import compile as compile_mod
+
+    monkeypatch.setattr(compile_mod, "probe_backend", fake_probe_backend)
+    monkeypatch.setitem(sys.modules, "finemo", types.ModuleType("finemo"))
+    result = status_mod.backend_status("finemo", entry)
+    assert result["status"] == "VERIFIED"
+    assert called.get("called"), "the shipped finemo probe does not call compile.probe_backend"
 
 
 def test_backend_status_has_no_third_comfortable_value():

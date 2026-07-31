@@ -12,8 +12,16 @@ run, and the prose renders from the result:
 * **module status** is read from the CLI dispatch table -- a module is a skeleton
   when its subcommand raises `NotImplementedError`, which is a fact about the
   code rather than an opinion about it;
-* **optional backend status** is `VERIFIED` only when the backend is importable
-  *here*, and `UNVERIFIED` otherwise. There is no third, comfortable value;
+* **optional backend status** is `VERIFIED` only when a capability probe *ran
+  here and did the thing the backend is for*, and `UNVERIFIED` otherwise. There
+  is no third, comfortable value. It used to be `VERIFIED` on a bare
+  `import_module`, which this package's own code contradicts: `compile`
+  separates `BackendMissing` from `BackendIncompatible` precisely because a
+  backend that imports may still be unable to read a lexicon back -- finemo 0.40
+  renamed an argument and every importable installation of it raised `TypeError`
+  from inside `compile_lexicons`. An import is not a capability, and a status
+  document whose green means "imports" is the guard-that-cannot-fail shape this
+  repository is organised against;
 * **test counts** are three separate numbers -- passed, skipped, failed -- and
   are absent (`NOT_RUN`) rather than zero when no run was supplied. A skipped
   test is never added to the passed count anywhere in this file, because that
@@ -24,6 +32,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -31,7 +41,7 @@ from typing import Any
 from motifmultiverse import __version__
 
 __all__ = [
-    "SCHEMA_VERSION", "MODULES", "OPTIONAL_BACKENDS",
+    "SCHEMA_VERSION", "MODULES", "OPTIONAL_BACKENDS", "BackendProbe",
     "module_status", "backend_status", "build_status", "counts_from_junit",
     "render_markdown", "main",
 ]
@@ -46,11 +56,45 @@ MODULES = (
     "validate", "infer", "report", "interpret",
 )
 
+@dataclass(frozen=True)
+class BackendProbe:
+    """An executable check that a backend can do what this package needs of it.
+
+    `capability` is the claim a `VERIFIED` makes, in a reader's terms -- it is
+    rendered into the status document, so nobody has to open the source to learn
+    what green covers. `run` performs it and returns the evidence; raising is how
+    it fails, and every exception type is a failure, including the ones nobody
+    predicted. A probe that swallowed an unexpected exception would be reporting
+    a backend as working on the strength of not having crashed loudly enough.
+    """
+
+    module: str
+    capability: str
+    run: Callable[[], str]
+
+
+def _finemo_roundtrip_probe() -> str:
+    from motifmultiverse.compile import probe_backend
+
+    return probe_backend()
+
+
 #: Optional backends and what would prove each one works. `None` marks a backend
 #: whose check is not implemented -- reported as `UNVERIFIED` with that reason,
 #: never quietly omitted, since an unlisted backend reads as one that passed.
-OPTIONAL_BACKENDS = {
-    "finemo": "finemo",
+#:
+#: `tomtom` and `homer` stay `None` deliberately. Both adapters read *precomputed*
+#: output rather than invoking the tool (see `annotate/README.md`), so there is no
+#: installed binary here whose capability could be probed, and inventing a check
+#: that passes by reading a fixture would be a `VERIFIED` that verifies nothing --
+#: the same defect as the import check this file has just stopped making.
+OPTIONAL_BACKENDS: dict[str, BackendProbe | None] = {
+    "finemo": BackendProbe(
+        module="finemo",
+        capability=("a lexicon compiled by this package is read back by the real "
+                    "hit-caller loader, in the order its manifest records"),
+        run=_finemo_roundtrip_probe,
+    ),
     "tomtom": None,
     "homer": None,
 }
@@ -85,21 +129,37 @@ def module_status(name: str) -> dict[str, str]:
     return {"status": "IMPLEMENTED", "detail": f"cli.{qualname}"}
 
 
-def backend_status(name: str, module: str | None) -> dict[str, str]:
-    """`VERIFIED` only if the backend imports here. Everything else is UNVERIFIED.
+def backend_status(name: str, probe: BackendProbe | None) -> dict[str, str]:
+    """`VERIFIED` only if a capability probe ran here and passed. Everything else is UNVERIFIED.
 
     Deliberately two-valued. "Probably fine", "verified previously" and "not
     checked" are all the same thing to a reader deciding whether to trust an
     artifact, and collapsing them into one honest value is the point.
+
+    Three distinct situations now land on `UNVERIFIED`, and each says which it
+    is: no probe exists for this backend; the backend is not installed; the
+    backend is installed and the probe failed. The third is the one that used to
+    be reported as `VERIFIED`, and it is the state an incompatible backend
+    release puts a machine in -- installed, importable, and unable to read a
+    single lexicon back.
     """
-    if module is None:
+    if probe is None:
         return {"status": "UNVERIFIED",
                 "detail": "no executable check exists for this backend in this release"}
     try:
-        import_module(module)
+        import_module(probe.module)
     except ImportError as exc:
-        return {"status": "UNVERIFIED", "detail": f"{module} is not installed ({exc})"}
-    return {"status": "VERIFIED", "detail": f"{module} imported successfully"}
+        return {"status": "UNVERIFIED",
+                "detail": f"{probe.module} is not installed ({exc}); "
+                          f"UNVERIFIED: {probe.capability}"}
+    try:
+        evidence = probe.run()
+    except BaseException as exc:  # noqa: BLE001 - see BackendProbe: any failure is a failure
+        return {"status": "UNVERIFIED",
+                "detail": (f"{probe.module} imports but the capability check failed "
+                           f"({type(exc).__name__}: {exc}). Importable is not usable; "
+                           f"UNVERIFIED: {probe.capability}")}
+    return {"status": "VERIFIED", "detail": f"{probe.capability} -- {evidence}"}
 
 
 def build_status(*, passed: int | None = None, skipped: int | None = None,
@@ -133,8 +193,8 @@ def build_status(*, passed: int | None = None, skipped: int | None = None,
         "package_version": __version__,
         "modules": {name: module_status(name) for name in MODULES},
         "optional_backends": {
-            name: backend_status(name, module)
-            for name, module in sorted(OPTIONAL_BACKENDS.items())
+            name: backend_status(name, probe)
+            for name, probe in sorted(OPTIONAL_BACKENDS.items())
         },
         "tests": tests,
     }

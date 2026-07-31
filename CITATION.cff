@@ -3,10 +3,14 @@ message: "If you use this software, please cite it as below."
 title: motifmultiverse
 abstract: >-
   Bias-aware harmonization and robust inference of attribution-derived
-  regulatory motifs across models and methods. An attribution lexicon compiler:
-  it turns several local TF-MoDISco outputs into one shared lexicon that is safe
-  to compare across models, and records the merge, naming and admission
-  decisions with their evidence rather than leaving them implicit.
+  regulatory motifs across models and methods. An auditable attribution lexicon
+  compiler: it turns several local TF-MoDISco outputs into one shared lexicon
+  that is safe to compare across models, and records the merge, naming and
+  admission decisions with their evidence rather than leaving them implicit.
+  This pre-alpha implements one specification per inference run, not the
+  specification multiverse the name anticipates, and its shipped adjudication
+  criteria deliberately defer duplicate and fragment collapse rather than
+  applying a merge policy no frozen document defines.
 type: software
 authors:
   - family-names: Wang

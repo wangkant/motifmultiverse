@@ -75,7 +75,8 @@ from motifmultiverse.schema import SchemaError
 
 __all__ = [
     "ReportError", "NOT_RECORDED", "NOT_COMPUTED", "BIAS_AXIS_IDS",
-    "BIAS_LEDGER_COLUMNS", "read_bias_ledger", "render_markdown", "run",
+    "BIAS_LEDGER_COLUMNS", "BIAS_LEDGER_RESOURCE", "packaged_bias_ledger_path",
+    "read_bias_ledger", "render_markdown", "run",
 ]
 
 #: A field no artifact in this package carries. Printed as a token, never as a
@@ -88,13 +89,23 @@ NOT_RECORDED = "NOT RECORDED"
 #: column that was not applicable.
 NOT_COMPUTED = "NOT COMPUTED"
 
-#: ``docs/bias_ledger.tsv`` is the authoritative twin of ``docs/BIAS_LEDGER.md``
-#: (that file says so itself, where its English gloss differs), and the rule in
-#: this directory's README names the TSV. Its shape is asserted rather than
-#: trusted: a ledger that silently lost an axis still reads as a complete
-#: accounting of biases.
+#: ``bias_ledger.tsv`` is the authoritative twin of ``docs/BIAS_LEDGER.md`` (that
+#: file says so itself, where its English gloss differs), and the rule in this
+#: directory's README names the TSV. Its shape is asserted rather than trusted: a
+#: ledger that silently lost an axis still reads as a complete accounting of
+#: biases.
 BIAS_LEDGER_COLUMNS = ("axis_id", "bias", "mechanism", "control")
 BIAS_AXIS_IDS = tuple(f"BA-{i:02d}" for i in range(1, 21))
+
+#: The ledger ships *inside* this module, beside the code that reads it, and is
+#: listed in ``[tool.setuptools.package-data]``. It used to live in ``docs/`` and
+#: be resolved by walking up from ``__file__``, which is the same defect
+#: ``adjudicate.packaged_criteria_path`` was written for: the path resolved under
+#: an editable install and pointed above ``site-packages`` under a wheel, so
+#: ``motifmultiverse report`` -- whose default this is -- refused on every plain
+#: ``pip install``. Rendering the report needs the ledger, so the ledger is part
+#: of the distribution rather than of the repository around it.
+BIAS_LEDGER_RESOURCE = "bias_ledger.tsv"
 
 
 class ReportError(SchemaError):
@@ -145,6 +156,27 @@ def _cell(value: Any) -> str:
     return _s(value).replace("|", r"\|")
 
 
+def _load_json(path: Path, role: str) -> Any:
+    """Read one recorded artifact, or refuse naming it.
+
+    Both of this stage's inputs are JSON written by another stage, and both can
+    arrive truncated: a run killed mid-write, a file edited by hand, a directory
+    assembled by a pipeline that copied only part of it. That is a refusal --
+    exit 4, the message naming the file and the rule -- and not the traceback and
+    undocumented exit 1 that an unwrapped ``JSONDecodeError`` produced, because a
+    caller distinguishing "the tool declined" from "the tool broke" reads the exit
+    code. ``compile`` already wraps its decisions payload for the same reason.
+    """
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReportError(
+            f"{str(path)!r} is not readable {role} JSON ({exc}). This report renders recorded "
+            "fields and reconstructs none of them, so a record it cannot parse is a report it "
+            "cannot render."
+        ) from exc
+
+
 def _find_anywhere(node: Any, key: str) -> list[Any]:
     """Every value recorded under ``key``, at any nesting depth.
 
@@ -166,19 +198,20 @@ def _find_anywhere(node: Any, key: str) -> list[Any]:
 
 
 def read_bias_ledger(path: str | os.PathLike[str]) -> list[list[str]]:
-    """Read ``docs/bias_ledger.tsv`` verbatim, or refuse.
+    """Read the bias ledger TSV verbatim, or refuse.
 
-    Verbatim includes its language: the text is Chinese and is not translated
-    here, because ``docs/BIAS_LEDGER.md`` records that the TSV is authoritative
-    where its own English gloss differs. The "enforced here" column of that
-    Markdown file is this repository's annotation about itself, not ledger
-    content; it is not in the TSV and so is not in the report.
+    Verbatim: the cells reach the report as the TSV spells them, and nothing on
+    this path rewrites, translates or reflows them -- ``docs/BIAS_LEDGER.md``
+    records that the TSV is authoritative wherever that file's own prose differs
+    from it. The "enforced here" column of that Markdown file is this
+    repository's annotation about itself, not ledger content; it is not in the
+    TSV and so is not in the report.
     """
     p = Path(path)
     if not p.is_file():
         raise ReportError(
             f"bias ledger {str(p)!r} is absent. The rule in src/motifmultiverse/report/README.md "
-            "names docs/bias_ledger.tsv as the source of section 9; a report rendered without it "
+            "names the bias ledger TSV as the source of section 9; a report rendered without it "
             "would present an unaccounted analysis as an accounted one."
         )
     with p.open(newline="", encoding="utf-8") as fh:
@@ -205,16 +238,29 @@ def read_bias_ledger(path: str | os.PathLike[str]) -> list[list[str]]:
     return body
 
 
-def _default_bias_ledger() -> Path:
-    """``docs/bias_ledger.tsv`` in the source tree this package was installed from.
+def packaged_bias_ledger_path() -> Path:
+    """Locate the bias ledger that ships with the package.
 
-    The ledger is documentation, not package data (``pyproject.toml`` ships only
-    ``*/README.md`` and the criteria YAML), so this resolves under an editable
-    install and does not under a wheel. That is deliberate: :func:`read_bias_ledger`
-    then refuses by name, instead of the report quietly rendering with its bias
-    accounting missing.
+    This is ``report``'s default and therefore the CLI's default, so it has to
+    resolve wherever the package is installed. It used to be
+    ``Path(__file__).parents[3] / "docs" / "bias_ledger.tsv"`` -- the repository
+    layout -- which meant ``motifmultiverse report interpretation/`` worked from a
+    checkout and refused from a wheel, for a file the wheel had never contained.
+    That refusal was correct about the file being absent and wrong about whose
+    fault that was: a rendering rule the distribution cannot satisfy is a
+    packaging defect, not an honest refusal, and
+    ``adjudicate.packaged_criteria_path`` records the same failure for the
+    criterion registry.
+
+    :func:`read_bias_ledger`'s refusal still stands for a ledger the *caller*
+    named with ``--bias-ledger`` and that is absent or malformed. What no longer
+    happens is the default refusing on a correctly installed package.
     """
-    return Path(__file__).resolve().parents[3] / "docs" / "bias_ledger.tsv"
+    from importlib.resources import as_file, files
+
+    resource = files(__package__).joinpath(BIAS_LEDGER_RESOURCE)
+    with as_file(resource) as concrete:
+        return Path(concrete)
 
 
 # --------------------------------------------------------------------------- #
@@ -869,6 +915,11 @@ def run(project: str | os.PathLike[str],
     denominator and no ``baseline_population`` field". No artifact in this
     package records ``baseline_population``, so the refusal is the rule working
     rather than a gap in it.
+
+    ``bias_ledger`` defaults to :func:`packaged_bias_ledger_path`, the ledger
+    shipped inside this package, so the default resolves wherever the package is
+    installed. Passing one explicitly overrides it and is checked exactly as
+    strictly.
     """
     for flag, enabled in (("--html", html), ("--docx", docx)):
         if enabled:
@@ -891,8 +942,8 @@ def run(project: str | os.PathLike[str],
             f"{str(prov_path)!r} is absent. Every number rendered carries its provenance; a report "
             "without the append-log would present figures whose inputs are unnamed."
         )
-    interpretation = json.loads(interp_path.read_text(encoding="utf-8"))
-    provenance = json.loads(prov_path.read_text(encoding="utf-8"))
+    interpretation = _load_json(interp_path, "interpretation")
+    provenance = _load_json(prov_path, "provenance")
 
     if figures and not (_find_anywhere(interpretation, "baseline_population")
                         + _find_anywhere(provenance, "baseline_population")):
@@ -904,7 +955,8 @@ def run(project: str | os.PathLike[str],
             "falsified'."
         )
 
-    ledger_source = Path(bias_ledger) if bias_ledger is not None else _default_bias_ledger()
+    ledger_source = (Path(bias_ledger) if bias_ledger is not None
+                     else packaged_bias_ledger_path())
     rows = read_bias_ledger(ledger_source)
 
     out = Path(out_dir)

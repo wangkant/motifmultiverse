@@ -10,7 +10,7 @@ The same data supported both `replicates exactly` and `4x stronger, prediction f
 
 ## How to check it
 
-The renderer refuses a figure with no denominator and no `baseline_population` field; the bias ledger is rendered from `docs/bias_ledger.tsv`.
+The renderer refuses a figure with no denominator and no `baseline_population` field; the bias ledger is rendered from the `bias_ledger.tsv` packaged beside this module (`report.packaged_bias_ledger_path`).
 
 ---
 
@@ -18,7 +18,7 @@ The renderer refuses a figure with no denominator and no `baseline_population` f
 
 `motifmultiverse report <interpretation>/ --out report/` renders one markdown document
 from the artifacts a stage actually wrote — the `interpretation.json` in that directory
-and the `provenance.json` log beside it — plus `docs/bias_ledger.tsv`. Section order
+and the `provenance.json` log beside it — plus the packaged `bias_ledger.tsv`. Section order
 comes from the interpretation's own `emitted_order`, not from a list the renderer holds.
 
 **What it renders.** Every number is `str()` of a recorded field, printed beside the

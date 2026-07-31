@@ -1,16 +1,25 @@
 # Bias ledger
 
 **Twenty axes.** Each is a way a number in this domain can be right-looking and wrong.
-The machine-readable twin is [`bias_ledger.tsv`](bias_ledger.tsv), which the `report`
-module renders (T-14). Every axis is referenced by its `axis_id` (`BA-01` … `BA-20`) so
-that this file and the table can be cross-checked line by line.
+The machine-readable twin is
+[`src/motifmultiverse/report/bias_ledger.tsv`](../src/motifmultiverse/report/bias_ledger.tsv),
+which the `report` module renders (T-14). Every axis is referenced by its `axis_id`
+(`BA-01` … `BA-20`) so that this file and the table can be cross-checked line by line.
 
-> **Provenance.** These axes are **transcribed from design report v0.8**; the table was
-> supplied as a TSV and its `bias` / `mechanism` / `control` text is verbatim (Chinese).
-> The English wording in the table below is a **gloss for readers of this repository**,
-> not part of the report — where gloss and TSV differ, the TSV is right. The
-> `enforced here` column is this repository's own annotation and does not appear in the
-> report.
+It lives **inside the package**, not in this directory, because `report` reads it at
+run time and a wheel carries package data rather than the repository around it: while it
+sat here, `motifmultiverse report interpretation/` refused on every non-editable install,
+naming a file the distribution had never contained. There is exactly one copy — a second
+one kept in `docs/` for convenience is the drift this file's "the TSV is authoritative"
+rule exists to prevent, and `tests/test_packaging.py` fails if one appears.
+
+> **Provenance.** These axes are **transcribed from design report v0.8**, which supplied
+> the table as a TSV in Chinese; the TSV's `bias` / `mechanism` / `control` text has
+> since been rendered into English, structure-preserving — same four columns, same
+> twenty `axis_id`s, no axis added or dropped. It remains the authoritative twin: where
+> the prose in the table below differs from the TSV, **the TSV is right**, and `report`
+> renders the TSV rather than this file. The `enforced here` column is this repository's
+> own annotation, is not in the TSV, and does not appear in the report.
 
 ## The twenty axes
 

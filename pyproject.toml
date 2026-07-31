@@ -9,6 +9,10 @@ description = "Bias-aware harmonization and robust inference of attribution-deri
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+# No e-mail address: `tests/test_status.py::test_no_published_file_carries_a_local_
+# path_or_identity` scans every tracked file for one, and PyPI would publish it.
+# `CITATION.cff` carries the ORCID, which is the durable identifier anyway.
+authors = [{ name = "Qiankang Wang" }]
 keywords = ["regulatory-genomics", "motifs", "attribution", "tf-modisco", "multiverse-analysis"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
@@ -52,13 +56,33 @@ dev = ["pytest>=7.4", "ruff>=0.5"]
 motifmultiverse = "motifmultiverse.cli:main"
 
 [project.urls]
-Documentation = "./docs/"
+# Absolute, because these are rendered on a package index and nowhere near the
+# repository. `Documentation = "./docs/"` resolved against pypi.org, where it
+# means nothing at all.
+Homepage = "https://github.com/wangkant/motifmultiverse"
+Repository = "https://github.com/wangkant/motifmultiverse"
+Documentation = "https://github.com/wangkant/motifmultiverse/tree/main/docs"
+Issues = "https://github.com/wangkant/motifmultiverse/issues"
+Changelog = "https://github.com/wangkant/motifmultiverse/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Data the CODE reads, and therefore data the wheel must contain. Every entry
+# here is checked by `tests/test_packaging.py`, which resolves each one through
+# `importlib.resources` -- the way the code reaches it -- rather than by looking
+# for a file in the source tree, where it is present whether or not it ships.
+#
+# `report/bias_ledger.tsv` is the one that was missing: the ledger lived in
+# `docs/`, `report`'s default pointed at it by walking up from `__file__`, and so
+# `motifmultiverse report interpretation/` refused on every non-editable install
+# for a file the wheel had never been asked to carry.
 [tool.setuptools.package-data]
-motifmultiverse = ["*/README.md", "adjudicate/criteria.v1.yaml"]
+motifmultiverse = [
+  "*/README.md",
+  "adjudicate/criteria.v1.yaml",
+  "report/bias_ledger.tsv",
+]
 
 [tool.ruff]
 line-length = 100

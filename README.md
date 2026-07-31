@@ -7,10 +7,18 @@ motifs across models and methods.**
 ![version: 0.1.0.dev0](https://img.shields.io/badge/version-0.1.0.dev0-blue)
 ![API: unstable](https://img.shields.io/badge/API-unstable-red)
 
-> **Pre-alpha.** All nine analysis modules are implemented — `report` was the last
-> skeleton — and no subcommand raises `NotImplementedError` any more. Implemented
-> is not complete: `infer` estimates one specification rather than a multiverse,
-> and `report` renders markdown only and prints `NOT RECORDED` for the fields no
+> **Pre-alpha.** What this is today, stated as precisely as the code supports: an
+> **auditable motif lexicon compiler**, and a **single-specification inference
+> reference implementation**. All nine analysis modules are implemented — `report`
+> was the last skeleton — and no subcommand raises `NotImplementedError` any more.
+> Implemented is not complete, and two gaps matter before the name misleads you:
+> the specification **multiverse** does not exist — `infer` estimates ONE
+> specification and says so on every run — and the adjudication criteria this
+> package ships leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH` undefined, so the
+> default pipeline defers every duplicate and compiles an **undeduplicated**
+> lexicon by design. The collapse path is implemented and tested; what is missing
+> is a validated merge policy, which is a scientific decision nobody has frozen.
+> `report` renders markdown only and prints `NOT RECORDED` for the fields no
 > artifact carries. The API is unstable and the per-module table in
 > [Implementation status](#implementation-status) is generated from the CLI
 > dispatch table rather than maintained by hand, because it was wrong twice before
@@ -155,6 +163,22 @@ designed outcome: an undeclared peak set, a missing baseline, a health floor tha
 did not clear. It is deliberately distinct from `3`, which means nobody has written
 the code yet.
 
+### The exit code is also written into the output directory
+
+By the time anyone opens a results folder the exit code is gone, so every run that
+names an `--out` leaves a **`run_status.json`** there: `SUCCESS` / `REFUSED` /
+`UNIMPLEMENTED` / `INPUT_MISSING` / `CRASHED`, the exit code, and — for a refusal —
+the sentence that refused. Its `artifacts_are_from` field names the last run that
+actually succeeded in that directory, so a refusal that ran into a directory holding
+an earlier result **labels** that result instead of deleting it: destroying a real
+result to prevent a misreading of it is the worse trade. Provenance is still written
+*before* the body runs, because a record that arrives only on success is a record the
+runs you most want to explain never get; this file is the other half, written when the
+outcome is known.
+
+**A downstream reader's rule is one line: trust the artifacts only when
+`status == "SUCCESS"`.**
+
 ### What individual modules guarantee
 
 Running any subcommand writes a provenance record — input checksums, command line,
@@ -185,8 +209,9 @@ effect size does. Undeclared provenance is a recorded state (`DECLARATION_MISSIN
 that costs the query its inference, and never resolves to the permissive grade.
 
 **`report`** renders one markdown audit report from what a stage recorded — an
-`interpretation.json` and the `provenance.json` log beside it — plus
-`docs/bias_ledger.tsv`. Every number printed is the recorded field itself, beside the
+`interpretation.json` and the `provenance.json` log beside it — plus the
+`bias_ledger.tsv` that ships **inside the package**, so the default resolves from an
+installed wheel and not only from a checkout. Every number printed is the recorded field itself, beside the
 denominator the stage recorded and *named* (`n_submitted = 8277`); nothing is
 recomputed here, because a renderer that recomputes is a second implementation of the
 statistics that can disagree with the first. Nothing absent is defaulted: a withheld
@@ -275,6 +300,25 @@ failed, never summed) are per-run facts, not repository facts: see
 `implementation_status.json`, which CI regenerates and uploads on every run.
 <!-- END GENERATED STATUS -->
 
+### What CI verifies, and what a `VERIFIED` backend means
+
+Three jobs, because "the tests passed" is three different claims and it used to be
+one. **`core`** runs lint and the suite on Python 3.11 *and* 3.12 — the classifiers
+claimed 3.12 and nothing ran it. **`roundtrip`** installs `.[dev,finemo]` and runs
+the suite under `MOTIFMULTIVERSE_REQUIRE_FINEMO=1`, so the one check that proves what
+`compile` exists to guarantee fails when the backend is missing instead of skipping;
+it had skipped in every CI run this repository has ever had. **`wheel`** builds the
+distribution, installs it into a clean environment, and runs the CLI from a directory
+that is not a checkout — which is how a `report` default that resolved only from a
+source tree stayed invisible.
+
+In `implementation_status.json`, a backend is `VERIFIED` only when a **capability
+probe** ran on that machine: `compile.probe_backend()` compiles a one-motif lexicon
+and reads it back with the real loader, comparing the order with the same guard
+`verify_roundtrip` uses. Importable is not usable — finemo 0.40 renamed an argument,
+and every installation of it imported cleanly and could not read a lexicon back. An
+installed-but-incapable backend is `UNVERIFIED`, with the reason.
+
 ### What does not run
 
 The specification *multiverse* inside `infer`: `infer` estimates ONE specification
@@ -286,9 +330,17 @@ The implemented middle path persists alignment evidence, retains competing annot
 candidates, records collapse/refusal/deferred adjudications, and validates a merge on
 the affected subset of frozen standardized hit tables. An all-peak delta remains only
 a dilution diagnostic: fewer than 30 affected peaks are recorded as
-`LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim. Undefined
-scientific thresholds remain explicitly deferred, so a run may intentionally compile
-an undeduplicated lexicon rather than guess a merge.
+`LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim.
+
+Undefined scientific thresholds remain explicitly deferred, and this is the second
+thing to know before the name misleads you: the criteria this package **ships**
+(`adjudicate/criteria.v1.yaml`) leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH` at
+`CRITERION_NOT_YET_DEFINED`, so the **default** run defers every duplicate and every
+fragment and compiles an undeduplicated lexicon rather than guess a merge. The
+collapse path is implemented and exercised end to end, but against thresholds the
+caller supplies. That makes this release a strict **adjudication framework**, not a
+harmonizer with a validated merge policy — an accurate description of where the
+science is, not a gap in the code.
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) states milestones M0–M5 by completion criteria
 rather than dates.
@@ -360,7 +412,7 @@ run the checks.
 | [`docs/CONCEPT.md`](docs/CONCEPT.md) | what the tool is for and why, self-contained |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | seven layers, nine modules, two architecture-level constraints |
 | [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) | node / edge schema and the four rules from real failures |
-| [`docs/BIAS_LEDGER.md`](docs/BIAS_LEDGER.md) | 20 bias axes `BA-01`…`BA-20`, mechanism and control (+ `bias_ledger.tsv`) |
+| [`docs/BIAS_LEDGER.md`](docs/BIAS_LEDGER.md) | 20 bias axes `BA-01`…`BA-20`, mechanism and control; the authoritative TSV `report` renders ships in the package, at `src/motifmultiverse/report/bias_ledger.tsv` |
 | [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) | 25 principles `FP-01`…`FP-25`, honest enforcement status, criterion drafts |
 | [`docs/LESSONS.md`](docs/LESSONS.md) | every architecture constraint, indexed back to the failure that produced it |
 | [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) | stop-condition handoff protocol — the most portable file here |

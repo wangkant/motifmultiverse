@@ -4,12 +4,13 @@ The **twenty-five frozen design principles** (`FP-01` … `FP-25`), each labelle
 far enforcement in *this repository* actually goes (T-18). The machine-readable twin is
 [`constraints.tsv`](constraints.tsv), which carries the principle text verbatim.
 
-> **Provenance.** The principles are **transcribed from design report v0.8**; the table
-> was supplied as a TSV and the `frozen_principle` text is verbatim (Chinese). The
-> English wording below is a **gloss for readers of this repository**, not report text —
-> where gloss and TSV differ, the TSV is right. The `enforcement`, `enforced_by` and
-> `criterion_draft` columns are **this repository's own annotation and are not in the
-> report**.
+> **Provenance.** The principles are **transcribed from design report v0.8**, which
+> supplied the table as a TSV in Chinese; the `frozen_principle` text has since been
+> rendered into English, structure-preserving — same six columns, same twenty-five
+> `FP` ids, no principle added, dropped or reworded in substance. The TSV remains the
+> authoritative twin: where the prose below differs from it, **the TSV is right**. The
+> `enforcement`, `enforced_by` and `criterion_draft` columns are **this repository's own
+> annotation and are not in the report**.
 
 **Status tally: `ENFORCED` 2 · `PARTIAL` 15 · `DOC_ONLY` 8, of 25.**
 

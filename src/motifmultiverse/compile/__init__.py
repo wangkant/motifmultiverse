@@ -60,7 +60,7 @@ from motifmultiverse.schema import (
 
 __all__ = [
     "CompileError", "BackendMissing", "BackendIncompatible", "TIERS",
-    "compile_lexicons", "lexicon_semantic_hash", "load_back",
+    "compile_lexicons", "lexicon_semantic_hash", "load_back", "probe_backend",
     "validate_compiled_lexicon", "verify_roundtrip",
 ]
 
@@ -982,6 +982,71 @@ def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3,
     )
     _motifs_df, _cwms, _trim_masks, names = load_modisco_motifs(str(h5_path), **kwargs)
     return [str(n) for n in names]
+
+
+#: The one motif the capability probe compiles. Deterministic, tiny, and shaped
+#: like a real motif rather than noise: a flat or random array can trim to nothing
+#: under the loader's own trimming, and a probe that failed because its input was
+#: degenerate would report a working backend as broken.
+_PROBE_MOTIF_LENGTH = 20
+_PROBE_CORE = slice(8, 12)
+
+
+def probe_backend(trim_threshold: float = 0.3, motif_type: str = "cwm",
+                  include_rc: bool = False,
+                  loader_parameters: dict[str, Any] | None = None) -> str:
+    """Compile one lexicon and read it back. Returns what that proved, in a sentence.
+
+    This is the capability behind a ``VERIFIED`` backend in
+    :mod:`motifmultiverse.status`, and it exists because *importable* and *usable*
+    are different claims about this backend specifically. :func:`load_back`
+    already separates them at call time -- :class:`BackendMissing` when the import
+    fails, :class:`BackendIncompatible` when it imports but will not accept the
+    call this package makes, which is not hypothetical: finemo 0.40 renamed the
+    trim-threshold argument, and every installed-and-imported backend of that
+    release raised ``TypeError`` from inside :func:`compile_lexicons`. A status
+    line that said ``VERIFIED`` because ``import finemo`` returned would have been
+    reporting green on exactly those machines.
+
+    So the probe performs the smallest complete instance of the thing being
+    claimed: write an H5 with this module's own writer, hand it to the real
+    loader, and compare the names that come back with
+    ``guards.index_order_matches_loader`` -- the same comparison
+    :func:`verify_roundtrip` makes on a real lexicon. It raises
+    :class:`BackendMissing` / :class:`BackendIncompatible` when the backend cannot
+    do it, and :class:`CompileError` when it can be called but returns something
+    other than the lexicon it was given.
+    """
+    import tempfile
+
+    import numpy as np
+
+    cwm = np.zeros((_PROBE_MOTIF_LENGTH, 4), dtype=float)
+    cwm[_PROBE_CORE, 0] = 1.0
+    ppm = np.full((_PROBE_MOTIF_LENGTH, 4), 0.25, dtype=float)
+    ppm[_PROBE_CORE] = [0.85, 0.05, 0.05, 0.05]
+    arrays = {"probe_node": {"cwm": cwm, "hypothetical_cwm": cwm, "ppm": ppm}}
+    ordered = [("pos_patterns", "pattern_0", {"node_id": "probe_node"})]
+    expected = ["pos_patterns.pattern_0"]
+
+    with tempfile.TemporaryDirectory(prefix="motifmultiverse-probe-") as tmp:
+        h5_path = Path(tmp) / "probe.h5"
+        # This module's real writer, not an H5 hand-rolled for the probe: a probe
+        # that writes its own file format verifies the backend against something
+        # this package does not actually produce.
+        _write_h5(h5_path, ordered, arrays)
+        names = load_back(h5_path, trim_threshold=trim_threshold, motif_type=motif_type,
+                          include_rc=include_rc, loader_parameters=loader_parameters)
+    result = guards.index_order_matches_loader(expected, names)
+    if not result.passed:
+        raise CompileError(
+            f"the installed loader read a one-motif lexicon back as {names}, not {expected} "
+            f"({result.detail}). It is callable, so this is not a version-binding failure: "
+            "what it returns does not correspond to what this package writes, and no lexicon "
+            "compiled here could be verified against it."
+        )
+    return (f"compiled a one-motif lexicon and read it back with the real loader; "
+            f"the loader returned {names}, matching the order the manifest records")
 
 
 def verify_roundtrip(h5_path: str | os.PathLike[str],

@@ -7,8 +7,9 @@ Milestones have **definitions of done**, not dates.
 *Done when:* a subset query over one frozen hit table produces three health numbers
 before any effect, dispatches its output mode from the declared selection provenance,
 and suppresses the reading when a pre-registered floor fails. **`interpret` does this**
-(`src/motifmultiverse/interpret/`). Remaining: BCa intervals and the wild cluster
-bootstrap-*t* required by `FP-15`.
+(`src/motifmultiverse/interpret/`). The BCa interval and wild cluster bootstrap-*t*
+`FP-15` requires were listed here as remaining and are now implemented; they have their
+own milestone below (**M4a**), and this paragraph is not a second, staler account of it.
 
 `annotate` now implements the deliberately narrow candidate-evidence contract:
 database matches and confidence flags survive as competing rows for adjudication;
@@ -95,8 +96,8 @@ implementation landing.
 
 `report` is implemented (`src/motifmultiverse/report/`), and it was the last skeleton
 body in the package. It renders one markdown document from an `interpretation.json`,
-the `provenance.json` log beside it and `docs/bias_ledger.tsv`: every number is the
-recorded field printed beside the denominator the producing stage recorded and named,
+the `provenance.json` log beside it and the packaged `bias_ledger.tsv`: every number is
+the recorded field printed beside the denominator the producing stage recorded and named,
 nothing is recomputed, and the bias ledger is rendered from the TSV the module's rule
 names.
 

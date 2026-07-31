@@ -3,9 +3,18 @@
 All notable changes to this project are documented here.
 Format follows Keep a Changelog; this project uses semantic versioning once it reaches 0.1.0.
 
+Nothing has been released yet, so the section below describes the **net state** of the
+unreleased tree rather than the order in which it was reached. A file added, removed and
+added again is not three entries; the specific accidents live in the commit messages and
+in `docs/LESSONS.md`, which is where a reader looking for them expects to find them.
+
 ## [0.1.0.dev0] - unreleased
 
-**Pre-alpha. The API is not stable, and no module produces a lexicon yet.**
+**Pre-alpha. The API is not stable.** All nine modules are implemented and `compile`
+produces tiered lexicons; what is *not* implemented is the specification multiverse the
+name promises — `infer` estimates one specification and says so. Read this as an
+auditable lexicon compiler plus a single-specification inference reference
+implementation.
 
 ### Added
 - Package skeleton for nine modules (ingest, align, annotate, adjudicate, compile,
@@ -190,9 +199,57 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   into **stderr** lines, at most one every two seconds. Nothing new is written to
   stdout, which callers parse for the counts and the `written:` paths.
 
-### Removed
-- `CITATION.cff`. A citation file with placeholder authors renders as a claim that the
-  project is ready to be cited; it goes in at publication, with real names.
+- **The distribution carries the data its code reads.** `docs/bias_ledger.tsv` moved to
+  `src/motifmultiverse/report/bias_ledger.tsv` and is declared package data, and
+  `report.packaged_bias_ledger_path()` resolves it through `importlib.resources` the way
+  `adjudicate.packaged_criteria_path()` already resolved the criterion registry.
+  `report --bias-ledger` now defaults to the packaged ledger rather than to
+  `docs/bias_ledger.tsv`: that default resolved from a checkout and not from a wheel, so
+  `pip install motifmultiverse && motifmultiverse report interpretation/` refused, naming
+  a file the distribution had never contained — a packaging defect wearing a refusal's
+  clothes. `tests/test_packaging.py` checks every declared resource through the accessor
+  the code calls, in both directions, and CI's `wheel` job installs the built wheel into
+  a clean environment and renders a report from a directory with no repository in it.
+- **Every run records its outcome where the run wrote**
+  (`motifmultiverse.run_status`, `run_status.json`). A refusal used to append its
+  provenance record and produce nothing else, so an output directory could hold an
+  earlier run's result, a later run's refusal record, and nothing relating the two; this
+  was documented in `cli`'s docstring as a known limitation whose advice was "read the
+  exit code, not the directory". The exit code is gone by the time anyone opens the
+  folder. `run_status.json` states `SUCCESS` / `REFUSED` / `UNIMPLEMENTED` /
+  `INPUT_MISSING` / `CRASHED` with the exit code and the refusal's own sentence, and
+  `artifacts_are_from` carries the last successful run forward across later failures, so
+  a stale result is labelled rather than removed. Nothing is deleted: destroying a real
+  result to prevent a misreading of it was never the repair. A run refused before it
+  writes anything still creates no output directory.
+- **`report` refuses an unparseable input instead of raising through the CLI.** Both
+  `interpretation.json` and `provenance.json` were read with a bare `json.loads`, so a
+  truncated or hand-edited record escaped as a `JSONDecodeError`: a traceback and exit 1,
+  a code this CLI's contract does not define. It is now a `ReportError` — exit 4, naming
+  the file — as `compile` already did for its decisions payload.
+- **`status` verifies a backend by using it, not by importing it.**
+  `status.BackendProbe` carries the capability a `VERIFIED` claims and an executable
+  check of it; `compile.probe_backend()` compiles a one-motif lexicon and reads it back
+  with the real loader, comparing the order with the same guard `verify_roundtrip` uses.
+  `backend_status` reported `VERIFIED` as soon as `import_module` returned, which this
+  package's own code contradicts — `BackendMissing` and `BackendIncompatible` exist
+  because finemo 0.40 renamed an argument and every importable installation of it could
+  not read a lexicon back. An installed-but-incapable backend is now `UNVERIFIED` with
+  the reason. Still two-valued; there is still no third, comfortable value.
+- **CI is three jobs, and one of them is the round trip.** `core` runs lint and the suite
+  on Python 3.11 **and 3.12** (the classifiers claimed 3.12 and nothing ran it);
+  `roundtrip` installs `.[dev,finemo]`, requires the capability probe to pass, and runs
+  the suite with `MOTIFMULTIVERSE_REQUIRE_FINEMO=1` so a missing backend fails rather
+  than skips — that check had skipped in every CI run this repository has ever had;
+  `wheel` builds the distribution, installs it into a clean environment and runs the CLI
+  from a directory that is not a checkout.
+- Release metadata in `pyproject.toml`: an author, and absolute `Homepage` /
+  `Repository` / `Documentation` / `Issues` / `Changelog` URLs. The single previous entry
+  was `Documentation = "./docs/"`, a relative path resolved against pypi.org.
+- `CITATION.cff`, with a real author and ORCID and deliberately **no DOI**: a placeholder
+  DOI resolves to nothing while rendering as a citable record. Two tests keep it honest —
+  its version must equal `motifmultiverse.__version__`, and its licence must match
+  `LICENSE`.
 
 ### Known gaps
 - Every module body is now implemented and nothing exits `3`; the exit-3 path and
@@ -205,16 +262,18 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   emits neither `selection_rule` nor `selection_feature_names` — so a report over a real
   run states those as unknown rather than as checked, and `docs/ROADMAP.md` M4 does not
   close until the producing stages carry them.
-- The shipped `config/criteria.v1.yaml` leaves `TRUE_DUPLICATE` and `FRAGMENT_MATCH`
-  `CRITERION_NOT_YET_DEFINED`, so the shipped pipeline **defers every duplicate and
-  every fragment** and `compile` emits an undeduplicated lexicon by design. That is a
+- The packaged `adjudicate/criteria.v1.yaml` leaves `TRUE_DUPLICATE` and `FRAGMENT_MATCH`
+  `CRITERION_NOT_YET_DEFINED`, so the **default** pipeline defers every duplicate and
+  every fragment and `compile` emits an undeduplicated lexicon by design. That is a
   statement about the science -- no frozen document says how much reconstruction loss a
-  collapse may cost -- not about the code: the collapse path is implemented and
-  exercised end to end against a criteria file supplied by the caller.
-- `compile`'s round-trip verification is **skipped, not passed**, when the `finemo`
-  backend is absent — which includes CI. Verified manually against a real TF-MoDISco
-  output; `compile.load_back` itself has never been executed, because the environment
-  that has the backend runs Python 3.10 and this package requires 3.11.
+  collapse may cost -- not about the code: the collapse path is implemented and exercised
+  end to end, but against thresholds a caller supplies, so this release is a strict
+  adjudication framework rather than a harmonizer with a validated merge policy.
+- `compile`'s round-trip verification is **skipped, not passed**, wherever the `finemo`
+  backend is absent, and a skipped test is unverified. It is no longer absent in CI: the
+  `roundtrip` job installs the backend, requires `status`'s capability probe to pass, and
+  runs the suite under `MOTIFMULTIVERSE_REQUIRE_FINEMO=1`, so a missing backend fails
+  that job instead of shrinking it.
 - What earns each `MergeConfidence` grade is undecided (`CRITERION_NOT_YET_DEFINED`),
   so `compile` dispatches on a declared grade and never assigns one.
 - `MotifNode` holds one `family_id`, so two analyses disagreeing about a motif's
