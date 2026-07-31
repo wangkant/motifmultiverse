@@ -73,7 +73,9 @@ Each is reported with its denominator.
 
 `n_blocks` is a health number because for a clustered peak set the **effective**
 sample size is the block count, not the peak count. The default of 30 is the same
-floor `guards.estimability_floor` applies to N.
+number `guards.estimability_floor` uses as its N floor -- but that guard has **no
+call site** in this release (`guards.GUARDS_AWAITING_INPUT`), so the floor that
+actually runs is this one, and it runs before any effect rather than on the effect.
 
 Floors are arguments (`--floor-coverage`, `--floor-blocks`, `--floor-explained`),
 declared before the run and recorded in the result. A floor chosen after the

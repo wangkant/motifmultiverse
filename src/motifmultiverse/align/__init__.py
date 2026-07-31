@@ -48,6 +48,36 @@ sequences at one fixed alignment", not "how surprising is it to find SOME
 alignment this good" -- a different, easier question that inflates every
 p-value computed against it.
 
+**Parallelism buys wall-clock and nothing else.** `workers` splits the pair loop
+across processes; it is the one speed lever that does not weaken the null, and
+it is admissible only because it cannot reach the arithmetic. Each pair's null
+generator is constructed inside `calibrate_pair_null` from the run seed alone,
+per call, so a pair's null scores are a pure function of that seed and that
+pair's own two matrices -- no generator, cache or accumulator is carried from
+one pair to the next, and a worker therefore cannot see how many other workers
+ran or in what order pairs were scheduled. Outcomes are reassembled by each
+pair's position in `combinations(nodes, 2)` rather than by completion time, so
+the row order of `alignment_edges.parquet` is a property of the registry and not
+of the scheduling. The equality is the point, not the speed: `tests/test_align.py`
+runs a whole registry at two worker counts and compares the written files byte
+for byte, and pins the per-pair null against an independent recomputation from
+the seed, so a future shared-state "optimisation" fails there rather than
+shipping a table whose p-values depend on a `--workers` value nobody recorded.
+That is also why `workers` is NOT carried on the edges the way `seed` and
+`null_shuffles` are: those two change the measurement, and a reader must be able
+to see them; the worker count cannot, and recording it on every row would imply
+it could.
+
+RECORDED, not fixed: the null generator is seeded from the run seed only, so two
+pairs whose targets have the same trimmed-core length draw the *same* sequence
+of row permutations. Their nulls are positively dependent, which matters to any
+later procedure that treats these p-values as independent tests. Seeding per
+pair instead would decorrelate them -- and would change every p-value this rule
+version has ever produced, which is a decision about the null and not about
+scheduling. Parallelism neither causes this nor is blocked by it (both worker
+counts reproduce the same correlated draws exactly), so it is written down here
+rather than quietly changed under cover of a performance patch.
+
 BASE_ORDER documents a convention this module needs but nothing upstream
 declares: PPM/CWM columns are `(A, C, G, T)`. This is a numeric axis
 convention (needed only to build a reverse complement), not a parsed
@@ -58,6 +88,8 @@ from __future__ import annotations
 import csv
 import math
 import os
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 from numbers import Integral, Real
@@ -69,6 +101,7 @@ __all__ = [
     "register_pair", "calibrate_pair_null", "align_registry", "run",
     "BASE_ORDER", "REGISTRATION_RULE_VERSION",
     "DEFAULT_MIN_OVERLAP_BP", "DEFAULT_MIN_OVERLAP_FRAC", "DEFAULT_NULL_SHUFFLES",
+    "DEFAULT_WORKERS",
 ]
 
 #: PPM/CWM column convention. See module docstring.
@@ -90,6 +123,13 @@ DEFAULT_MIN_OVERLAP_BP = 6
 DEFAULT_MIN_OVERLAP_FRAC = 0.5
 
 DEFAULT_NULL_SHUFFLES = 1000
+
+#: Worker processes for the pair loop. ONE by default, deliberately: adding a
+#: parameter must not change what any existing invocation does, and a stage that
+#: silently started using every core on a shared machine would be doing exactly
+#: that. Raising it is safe for the *result* -- see the module docstring -- but
+#: it is the caller's decision, not this module's.
+DEFAULT_WORKERS = 1
 
 
 class AlignmentError(ValueError):
@@ -193,7 +233,16 @@ class AlignmentEvidence:
 
 @dataclass
 class AlignmentRunSummary:
-    """What one `align_registry` call did, independent of any one edge."""
+    """What one `align_registry` call did, independent of any one edge.
+
+    `workers` records the scheduling this run used. It sits here and NOT on
+    `AlignmentEvidence` because of what the two places mean: a field on an edge
+    is part of the measurement that edge reports, and `seed` / `null_shuffles`
+    are exactly that -- change either and the p-value changes. The worker count
+    cannot change any number in the table, so putting it on every row would tell
+    a reader to consider it when comparing rows. Here it answers "what did this
+    run do", which is a fair question about a job that can take hours.
+    """
 
     n_nodes: int
     n_pairs_considered: int
@@ -204,6 +253,7 @@ class AlignmentRunSummary:
     registration_rule_version: str
     edges_path: str
     null_summary_path: str
+    workers: int = DEFAULT_WORKERS
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -521,10 +571,150 @@ def _write_null_summary(out: Path, rows: list[dict[str, Any]]) -> Path:
     return dest
 
 
+#: One pair's outcome: its position in the pair order, the edge it produced (or
+#: None if it was excluded), and the null-summary row that goes with the edge.
+_PairOutcome = tuple[int, "AlignmentEvidence | None", "dict[str, Any] | None"]
+
+
+def _register_and_calibrate(
+    index: int, source_node_id: str, target_node_id: str,
+    source_ppm: Any, source_cwm: Any | None, target_ppm: Any, target_cwm: Any | None,
+    *, null_shuffles: int, seed: int, min_overlap_bp: int, min_overlap_frac: float,
+) -> _PairOutcome:
+    """Everything one pair needs, from registration to its two output rows.
+
+    This is the unit `workers` distributes, and it is the only place the per-pair
+    work is written down: the sequential path calls it directly and each worker
+    process calls it through `_worker_pair`, so there is no second copy that an
+    edit could leave behind. It takes its matrices as arguments, returns plain
+    data, and keeps nothing between calls -- which is precisely what makes the
+    result independent of how the calls were scheduled. A cache or a shared
+    generator added here would be invisible in a serial run and would change the
+    answer in a parallel one.
+
+    `index` is carried through untouched so the caller can restore pair order
+    from it; a worker never needs to know what it means.
+    """
+    try:
+        evidence = register_pair(
+            source_ppm, target_ppm, source_cwm=source_cwm, target_cwm=target_cwm,
+            min_overlap_bp=min_overlap_bp, min_overlap_frac=min_overlap_frac,
+        )
+    except AlignmentError:
+        return index, None, None
+    p_value, null_scores = calibrate_pair_null(
+        source_ppm, target_ppm, null_shuffles=null_shuffles, seed=seed,
+        min_overlap_bp=min_overlap_bp, min_overlap_frac=min_overlap_frac,
+    )
+    evidence = replace(
+        evidence, source_node_id=source_node_id, target_node_id=target_node_id,
+        empirical_p_value=p_value, null_shuffles=null_shuffles, seed=seed,
+    )
+    null_row = {
+        "source_node_id": source_node_id, "target_node_id": target_node_id,
+        "null_shuffles": null_shuffles, "seed": seed,
+        "empirical_p_value": p_value,
+        "null_mean": sum(null_scores) / len(null_scores),
+        "null_min": min(null_scores), "null_max": max(null_scores),
+        "observed_ppm_similarity": evidence.ppm_similarity,
+        "registration_rule_version": evidence.registration_rule_version,
+    }
+    return index, evidence, null_row
+
+
+#: Filled once per worker process by `_worker_init`, and never written to again.
+#: The trimmed matrices are read-only inputs that every pair a worker handles
+#: draws from, so they are sent once per process rather than once per job: a
+#: 240-node registry has ~28,000 pairs and would otherwise pickle the same
+#: 30x4 arrays thousands of times over. It is not shared state in the sense that
+#: matters here -- nothing accumulates in it, so two workers holding it compute
+#: exactly what one worker holding it would.
+_WORKER_MATRICES: dict[str, tuple[Any, Any | None]] = {}
+
+
+def _worker_init(matrices: dict[str, tuple[Any, Any | None]]) -> None:
+    global _WORKER_MATRICES
+    _WORKER_MATRICES = matrices
+
+
+def _worker_pair(job: tuple[int, str, str, dict[str, Any]]) -> _PairOutcome:
+    """Look this pair's matrices up in the worker, then do the ordinary work.
+
+    Deliberately holds no logic of its own: everything below the lookup is the
+    same call the sequential path makes, so "what a worker computes" and "what a
+    serial run computes" cannot drift apart.
+    """
+    index, source_node_id, target_node_id, params = job
+    source_ppm, source_cwm = _WORKER_MATRICES[source_node_id]
+    target_ppm, target_cwm = _WORKER_MATRICES[target_node_id]
+    return _register_and_calibrate(
+        index, source_node_id, target_node_id,
+        source_ppm, source_cwm, target_ppm, target_cwm, **params,
+    )
+
+
+def _run_pairs(jobs: list[tuple[int, str, str, dict[str, Any]]],
+               matrices: dict[str, tuple[Any, Any | None]],
+               *, workers: int,
+               progress: Callable[[int, int], None] | None) -> list[_PairOutcome]:
+    """Run every pair job and return the outcomes in JOB order, not finish order.
+
+    Row order is part of what "byte-identical at every worker count" means: a
+    table ordered by whichever worker finished first would differ run to run on
+    the same machine with every number in it unchanged, and nothing in the file
+    would say why the bytes moved. Two things keep that from happening, and the
+    redundancy is deliberate -- `Executor.map` yields in submission order, and
+    the returned list is *also* indexed by the position each job carries. The
+    second survives a switch to `as_completed`, which is a plausible future edit
+    for tighter progress reporting.
+
+    `progress` is called with (completed, total) and is the only reporting this
+    module does -- it writes to no stream itself, so a caller parsing stdout
+    cannot be polluted by a progress line it did not ask for. In the parallel
+    path it counts outcomes as they are *collected*, which is a lower bound on
+    the work actually finished: a chunk that is still running holds back the
+    count of the chunks behind it. It is a progress report, not a scheduler
+    trace, and understating progress is the safe direction for one.
+    """
+    total = len(jobs)
+    outcomes: list[_PairOutcome | None] = [None] * total
+
+    def note(done: int) -> None:
+        if progress is not None:
+            progress(done, total)
+
+    if workers == 1 or total <= 1:
+        for done, (index, source_node_id, target_node_id, params) in enumerate(jobs, start=1):
+            source_ppm, source_cwm = matrices[source_node_id]
+            target_ppm, target_cwm = matrices[target_node_id]
+            outcomes[index] = _register_and_calibrate(
+                index, source_node_id, target_node_id,
+                source_ppm, source_cwm, target_ppm, target_cwm, **params,
+            )
+            note(done)
+        return [outcome for outcome in outcomes if outcome is not None]
+
+    # Small chunks on purpose. Pair cost varies several-fold with core length, so
+    # a chunk per worker would leave most of them idle behind whichever one drew
+    # the long motifs; the pickling this saves is per-job overhead measured in
+    # microseconds against a job that runs for ~0.1s at the default shuffles.
+    chunksize = max(1, total // (workers * 8))
+    with ProcessPoolExecutor(max_workers=workers, initializer=_worker_init,
+                             initargs=(matrices,)) as pool:
+        for done, outcome in enumerate(
+            pool.map(_worker_pair, jobs, chunksize=chunksize), start=1,
+        ):
+            outcomes[outcome[0]] = outcome
+            note(done)
+    return [outcome for outcome in outcomes if outcome is not None]
+
+
 def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathLike[str],
                    *, null_shuffles: int = DEFAULT_NULL_SHUFFLES, seed: int = 0,
                    min_overlap_bp: int = DEFAULT_MIN_OVERLAP_BP,
                    min_overlap_frac: float = DEFAULT_MIN_OVERLAP_FRAC,
+                   workers: int = DEFAULT_WORKERS,
+                   progress: Callable[[int, int], None] | None = None,
                    ) -> tuple[AlignmentRunSummary, list[AlignmentEvidence]]:
     """Register every pair of motifs in a registry, calibrate a null for each,
     and write both the edge table and the null summary.
@@ -538,6 +728,12 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     `null_shuffles` and `seed` are threaded through as the provenance the
     non-negotiable constraints require: every emitted edge carries both
     (`AlignmentEvidence.null_shuffles` / `.seed`), not just the run as a whole.
+
+    `workers` splits the pair loop across processes and changes nothing else; see
+    the module docstring for why that is safe here and what is tested to keep it
+    so. `progress` is called with (completed_pairs, total_pairs) after each pair
+    finishes; this function writes to no stream of its own, so what a caller sees
+    on stdout is exactly what it saw before.
     """
     from motifmultiverse import guards
     from motifmultiverse.ingest import load_registry
@@ -548,6 +744,14 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
         # writing anything: every pair would otherwise hit this same refusal
         # one at a time inside the loop below (see calibrate_pair_null).
         raise AlignmentError(f"--null-shuffles must be >= 1; got {null_shuffles}")
+    if isinstance(workers, bool) or not isinstance(workers, Integral) or workers < 1:
+        # Same reason, one level up: a bad worker count must not be discovered
+        # after the provenance record and the pair list already exist. `True`
+        # is rejected explicitly because `bool` is an `Integral` and `workers=True`
+        # would otherwise mean "one worker", reading as "yes, parallelise".
+        raise AlignmentError(
+            f"workers must be an integer >= 1; got {workers!r}"
+        )
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -560,66 +764,67 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
 
     meta, nodes, arrays = load_registry(registry_dir)
     try:
-        edges: list[AlignmentEvidence] = []
-        null_rows: list[dict[str, Any]] = []
-        n_excluded = 0
-        n_considered = 0
-        for a, b in combinations(nodes, 2):
-            a_id, b_id = a["node_id"], b["node_id"]
-            a_arrays, b_arrays = arrays[a_id], arrays[b_id]
-            n_considered += 1
-            if "ppm" not in a_arrays or "ppm" not in b_arrays:
+        # Read and trim every node's matrices ONCE, then let go of the file. Two
+        # reasons, and only one of them is that the old per-pair read re-read the
+        # same node's arrays n-1 times. The other is that an open HDF5 handle
+        # must not still be live when worker processes are created: a forked
+        # child inherits the parent's file descriptor and HDF5's own cached
+        # state, and concurrent reads through that shared handle are exactly the
+        # use h5py documents as unsupported. Closing here means the workers never
+        # touch the file at all -- they get plain arrays.
+        matrices: dict[str, tuple[Any, Any | None]] = {}
+        for node in nodes:
+            node_id = node["node_id"]
+            node_arrays = arrays[node_id]
+            if "ppm" not in node_arrays:
                 # Never averaged, never guessed: a node with no PPM at all has
-                # no unsigned content to register on, so the pair is excluded
+                # no unsigned content to register on, so its pairs are excluded
                 # rather than silently registered on CWM alone.
-                n_excluded += 1
                 continue
-            a_ppm, b_ppm = a_arrays["ppm"][:], b_arrays["ppm"][:]
-            a_cwm = a_arrays["cwm"][:] if "cwm" in a_arrays else None
-            b_cwm = b_arrays["cwm"][:] if "cwm" in b_arrays else None
+            ppm = node_arrays["ppm"][:]
             # Trim to the declared core before anything is scored. Both matrices
             # of a node take the same window, because `register_pair` measures
             # the signed CWM at the registration the PPM chose and the two would
             # otherwise no longer describe the same positions.
-            a_core = _declared_core(a, a_ppm.shape[0])
-            b_core = _declared_core(b, b_ppm.shape[0])
-            if a_core is None or b_core is None:
-                n_excluded += 1
+            core = _declared_core(node, ppm.shape[0])
+            if core is None:
                 continue
-            a_ppm = a_ppm[a_core[0]:a_core[1]]
-            b_ppm = b_ppm[b_core[0]:b_core[1]]
-            if a_cwm is not None:
-                a_cwm = a_cwm[a_core[0]:a_core[1]]
-            if b_cwm is not None:
-                b_cwm = b_cwm[b_core[0]:b_core[1]]
-            try:
-                evidence = register_pair(
-                    a_ppm, b_ppm, source_cwm=a_cwm, target_cwm=b_cwm,
-                    min_overlap_bp=min_overlap_bp, min_overlap_frac=min_overlap_frac,
-                )
-            except AlignmentError:
-                n_excluded += 1
-                continue
-            p_value, null_scores = calibrate_pair_null(
-                a_ppm, b_ppm, null_shuffles=null_shuffles, seed=seed,
-                min_overlap_bp=min_overlap_bp, min_overlap_frac=min_overlap_frac,
+            cwm = node_arrays["cwm"][:] if "cwm" in node_arrays else None
+            matrices[node_id] = (
+                ppm[core[0]:core[1]],
+                None if cwm is None else cwm[core[0]:core[1]],
             )
-            evidence = replace(
-                evidence, source_node_id=a_id, target_node_id=b_id,
-                empirical_p_value=p_value, null_shuffles=null_shuffles, seed=seed,
-            )
-            edges.append(evidence)
-            null_rows.append({
-                "source_node_id": a_id, "target_node_id": b_id,
-                "null_shuffles": null_shuffles, "seed": seed,
-                "empirical_p_value": p_value,
-                "null_mean": sum(null_scores) / len(null_scores),
-                "null_min": min(null_scores), "null_max": max(null_scores),
-                "observed_ppm_similarity": evidence.ppm_similarity,
-                "registration_rule_version": evidence.registration_rule_version,
-            })
     finally:
         arrays.close()
+
+    params = {"null_shuffles": null_shuffles, "seed": seed,
+              "min_overlap_bp": min_overlap_bp, "min_overlap_frac": min_overlap_frac}
+    jobs: list[tuple[int, str, str, dict[str, Any]]] = []
+    n_considered = 0
+    n_excluded = 0
+    for a, b in combinations(nodes, 2):
+        a_id, b_id = a["node_id"], b["node_id"]
+        n_considered += 1
+        if a_id not in matrices or b_id not in matrices:
+            # No PPM, or no declared trimmed core: excluded above, counted here,
+            # never registered on padding or on CWM alone.
+            n_excluded += 1
+            continue
+        # The index IS the pair's position among the jobs, which is
+        # `combinations` order; `_run_pairs` restores that order from it.
+        jobs.append((len(jobs), a_id, b_id, params))
+
+    edges: list[AlignmentEvidence] = []
+    null_rows: list[dict[str, Any]] = []
+    for _index, evidence, null_row in _run_pairs(
+        jobs, matrices, workers=workers, progress=progress,
+    ):
+        if evidence is None or null_row is None:
+            # No offset met the bilateral overlap requirement for this pair.
+            n_excluded += 1
+            continue
+        edges.append(evidence)
+        null_rows.append(null_row)
 
     guards.sign_alignment([e.to_dict() for e in edges]).raise_if_failed()
 
@@ -636,6 +841,7 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
         registration_rule_version=REGISTRATION_RULE_VERSION,
         edges_path=str(edges_path),
         null_summary_path=str(null_summary_path),
+        workers=workers,
     )
     return summary, edges
 

@@ -10,9 +10,12 @@ Two things this file deliberately does NOT do:
 
 * It does not count a skipped optional-backend check as a pass. The `finemo`
   round trip is the only way to prove a compiled lexicon loads in the tool that
-  will consume it, and it is not installed here; the test asserts the *structure*
-  of the H5 and separately asserts that the round trip is reported UNVERIFIED.
-  A green run of this file is not evidence that a lexicon loads.
+  will consume it. Three separate tests keep those claims apart: one asserts the
+  *structure* of the H5 (necessary, not sufficient); one asserts that with no
+  backend the round trip refuses rather than returning an empty pass; and one
+  actually loads the reference run's lexicon, which is the only assertion in this
+  file that depends on software outside the package. Where the backend is absent
+  the last one skips, and a green run is then not evidence that a lexicon loads.
 * It does not use the shipped `config/criteria.v1.yaml` to demonstrate a
   collapse. Two of that file's four criteria are `CRITERION_NOT_YET_DEFINED` on
   purpose, so the shipped pipeline defers every duplicate and every fragment.
@@ -30,6 +33,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from conftest import require_finemo_backend
 from motifmultiverse.cli import main
 from motifmultiverse.schema import HIT_TABLE_COLUMNS, build_peak_split_manifest
 from motifmultiverse.validate import DecisionSplitArtifact, ValidationSplitArtifact
@@ -385,18 +389,45 @@ def test_the_compiled_lexicon_is_structurally_loadable(reference_run):
     assert len(lengths) == 1
 
 
-def test_the_real_loader_round_trip_is_reported_unverified_not_passed(reference_run, capsys):
-    """A skipped backend check is unverified. It is never a pass, and this run
-    must say which of the two it was rather than leaving a green suite to imply
-    the stronger claim."""
+def test_the_real_loader_round_trip_is_reported_unverified_not_passed(
+        reference_run, no_finemo_backend):
+    """With no backend, `load_back` refuses; it never returns an empty pass.
+
+    The silent failure this rules out is a `load_back` that, finding nothing to
+    call, returns `[]` -- which compares equal to an empty manifest order and
+    reports the round trip as verified. It must raise, and the message must name
+    the backend so the reader knows which claim went unmade.
+
+    Blanking the import rather than skipping when finemo is present is the point:
+    this assertion is about the no-backend path, and a test that runs only on
+    machines lacking the backend stops running the moment the backend becomes
+    installable -- which is exactly when its sibling round-trip test starts.
+    """
     from motifmultiverse import compile as compile_mod
 
-    try:
+    with pytest.raises(compile_mod.BackendMissing, match="finemo"):
         compile_mod.load_back(reference_run / "lexicons" / "core.h5")
-    except compile_mod.BackendMissing as exc:
-        assert "finemo" in str(exc)
-        return
-    pytest.skip("the finemo backend IS installed here; the round trip is verified elsewhere")
+
+
+def test_the_real_loader_reads_the_reference_run_lexicon_back_in_manifest_order(reference_run):
+    """The end of the reference path, checked with the tool that consumes it.
+
+    Its companion above asserts the *structure* of the H5 -- the necessary half.
+    This is the sufficient half, and it is the only assertion in this file that
+    depends on software outside the package: the loader opens the lexicon the
+    reference run actually produced and returns the motifs in the order its
+    manifest promises.
+    """
+    require_finemo_backend()
+    from motifmultiverse import compile as compile_mod
+
+    manifest = json.loads((reference_run / "lexicons" / "core.manifest.json").read_text())
+    names = compile_mod.load_back(
+        reference_run / "lexicons" / "core.h5",
+        trim_threshold=manifest["trim_threshold"], motif_type=manifest["motif_type"],
+        include_rc=manifest["include_rc"], loader_parameters=manifest["loader_parameters"],
+    )
+    assert names == manifest["pattern_order"]
 
 
 def test_the_sign_flipped_representation_aligns_at_the_same_registration(reference_run):

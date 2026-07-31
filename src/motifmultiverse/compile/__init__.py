@@ -32,11 +32,13 @@ the motif loader (CWM / hypothetical CWM / PPM).
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
@@ -57,7 +59,7 @@ from motifmultiverse.schema import (
 )
 
 __all__ = [
-    "CompileError", "BackendMissing", "TIERS",
+    "CompileError", "BackendMissing", "BackendIncompatible", "TIERS",
     "compile_lexicons", "lexicon_semantic_hash", "load_back",
     "validate_compiled_lexicon", "verify_roundtrip",
 ]
@@ -70,7 +72,34 @@ class CompileError(ValueError):
 
 
 class BackendMissing(RuntimeError):
-    """A backend needed for verification is not installed."""
+    """No usable backend is available to perform verification.
+
+    Raised when the backend cannot be imported at all, and -- via
+    :class:`BackendIncompatible` -- when it imports but cannot be called. Both
+    mean the same thing to a reader of the artifact: *no round trip happened*.
+    Keeping them one catchable type is what lets ``--verify-roundtrip auto``
+    treat them alike (write the lexicon, claim nothing) while ``require`` refuses
+    for either reason.
+    """
+
+
+class BackendIncompatible(BackendMissing):
+    """The backend is installed but does not accept the call this package makes.
+
+    Distinct from a missing backend because the diagnosis is different -- the fix
+    is a version, not an install -- but a subclass because the *consequence* is
+    identical: nothing read the lexicon back.
+
+    The failure this exists to prevent: ``load_back`` passed the loader's
+    arguments by keyword inside a ``try`` that caught only ``ImportError``, so
+    when the backend renamed one of them the call raised a bare ``TypeError``
+    from the middle of ``compile_lexicons``. Under ``--verify-roundtrip auto``,
+    which is the default and is documented as "verify if a backend is there,
+    otherwise carry on", that aborted the whole compile: the lexicon was not
+    written at all, for a reason no message connected to the backend. Naming the
+    condition keeps the diagnosis in the message and keeps ``auto`` doing what it
+    says.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -832,6 +861,101 @@ def _resolve_loader_parameters(loader_parameters: dict[str, Any] | None) -> dict
 # --------------------------------------------------------------------------- #
 # Reading back, with the real loader
 # --------------------------------------------------------------------------- #
+#: What the backend has called "the trim threshold applied to every motif that
+#: names no override of its own", newest spelling first. finemo 0.30 called it
+#: ``trim_threshold``; 0.40 renamed it to ``trim_threshold_default`` and added the
+#: per-motif ``trim_coords`` / ``trim_thresholds`` this package never sets.
+#:
+#: Resolved from the installed signature rather than assumed, because assuming it
+#: is how the rename reached users as a bare ``TypeError``: the two spellings are
+#: one letter apart, both plausible, and nothing at the call site could tell them
+#: apart until the call itself failed.
+_LOADER_TRIM_THRESHOLD_ALIASES = ("trim_threshold_default", "trim_threshold")
+
+#: Loader parameters this package deliberately leaves unset, because a compiled
+#: lexicon declares no *per-motif* overrides: every motif in it is read under the
+#: single manifest-recorded configuration. They carry no default in the backend's
+#: signature, so "leave unset" has to be spelled as an explicit ``None`` -- and
+#: only for the ones the installed backend actually has, since the set has grown
+#: across releases.
+_LOADER_UNSET_PARAMETERS = (
+    "trim_coords", "trim_thresholds", "motifs_include", "motif_name_map",
+    "motif_lambdas",
+)
+
+
+def _loader_call_kwargs(loader: Callable[..., Any], *, trim_threshold: float,
+                        motif_type: str, include_rc: bool,
+                        extra: dict[str, Any]) -> dict[str, Any]:
+    """Bind this package's loader settings to the *installed* backend's signature.
+
+    Two things must never happen quietly here, and each gets its own refusal.
+
+    A setting we mean to pass may not exist under that name any more (the
+    ``trim_threshold`` -> ``trim_threshold_default`` rename). Passing it anyway
+    raises ``TypeError`` from inside the backend, which reads as a bug in this
+    package rather than as a version mismatch.
+
+    A parameter the backend *requires* may be one this package has never heard
+    of. That one is worse: the tempting repair is to let the backend default it,
+    but these parameters have no defaults precisely because they change what the
+    loader returns, and a round trip that verified an order produced under
+    settings the manifest does not record has verified the wrong lexicon. So an
+    unrecognised required parameter is a refusal, naming it, not a guess.
+    """
+    try:
+        params = inspect.signature(loader).parameters
+    except (TypeError, ValueError) as exc:                      # pragma: no cover
+        raise BackendIncompatible(
+            f"the installed loader {loader!r} has no inspectable signature ({exc}), so the "
+            "settings this lexicon's manifest records cannot be bound to it"
+        ) from exc
+    accepts_var_keyword = any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    threshold_param = next(
+        (name for name in _LOADER_TRIM_THRESHOLD_ALIASES if name in params), None)
+    if threshold_param is None:
+        raise BackendIncompatible(
+            "the installed loader takes no trim-threshold argument under any name this "
+            f"package knows ({', '.join(_LOADER_TRIM_THRESHOLD_ALIASES)}); its parameters "
+            f"are {list(params)}. The manifest records a trim_threshold, so reading back "
+            "without passing it would verify a lexicon nobody compiled."
+        )
+    kwargs: dict[str, Any] = {
+        threshold_param: trim_threshold,
+        "motif_type": motif_type,
+        "include_rc": include_rc,
+        **extra,
+    }
+    kwargs.update({name: None for name in _LOADER_UNSET_PARAMETERS if name in params})
+    if not accepts_var_keyword:
+        unknown = sorted(name for name in kwargs if name not in params)
+        if unknown:
+            raise BackendIncompatible(
+                f"the installed loader does not accept {unknown}, which this lexicon's "
+                f"manifest records as loader settings; its parameters are {list(params)}"
+            )
+    # The first parameter is the path, which is passed positionally; everything
+    # else without a default has to come from `kwargs` or we do not know what the
+    # backend would do with it.
+    positional = list(params)[:1]
+    unsatisfied = sorted(
+        name for name, p in params.items()
+        if p.default is inspect.Parameter.empty
+        and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                       inspect.Parameter.KEYWORD_ONLY)
+        and name not in kwargs and name not in positional
+    )
+    if unsatisfied:
+        raise BackendIncompatible(
+            f"the installed loader requires {unsatisfied}, which this package does not "
+            "set and whose effect on the returned motif order is unknown to it. Letting "
+            "the backend choose would make the round trip verify an order the manifest "
+            "does not describe."
+        )
+    return kwargs
+
+
 def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3,
              motif_type: str = "cwm", include_rc: bool = False,
              loader_parameters: dict[str, Any] | None = None) -> list[str]:
@@ -848,15 +972,15 @@ def load_back(h5_path: str | os.PathLike[str], trim_threshold: float = 0.3,
         from finemo.data_io import load_modisco_motifs
     except ImportError as exc:
         raise BackendMissing(
-            "round-trip verification needs the finemo backend (pip install finemo-gpu). "
+            "round-trip verification needs the finemo backend (pip install finemo). "
             "Without it the H5 is written but never read back by anything but this package."
         ) from exc
     extra = _resolve_loader_parameters(loader_parameters)
-    _motifs_df, _cwms, _trim_masks, names = load_modisco_motifs(
-        str(h5_path), trim_threshold=trim_threshold, motif_type=motif_type,
-        motifs_include=None, motif_name_map=None, motif_lambdas=None,
-        include_rc=include_rc, **extra,
+    kwargs = _loader_call_kwargs(
+        load_modisco_motifs, trim_threshold=trim_threshold, motif_type=motif_type,
+        include_rc=include_rc, extra=extra,
     )
+    _motifs_df, _cwms, _trim_masks, names = load_modisco_motifs(str(h5_path), **kwargs)
     return [str(n) for n in names]
 
 

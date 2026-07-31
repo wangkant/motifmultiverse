@@ -696,12 +696,33 @@ def test_every_guard_is_called_or_declared_pending():
 
 
 def test_guards_awaiting_input_each_say_what_they_wait_for():
-    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    """Every pending entry says all three things, not just that it is pending.
+
+    The previous version of this test accepted any string over forty characters,
+    which "waiting for the right input from a future stage" satisfies while telling
+    a reader nothing. An entry now has to name the artifact that comes closest, the
+    failure that wiring it there would cause, and the thing whose existence closes
+    it -- the three parts of `PendingGuardInput` -- and each has to be a sentence.
+    """
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT, PendingGuardInput
 
     assert GUARDS_AWAITING_INPUT, "the pending registry should not be silently emptied"
-    for name, reason in GUARDS_AWAITING_INPUT.items():
+    for name, entry in GUARDS_AWAITING_INPUT.items():
         assert name in guards.__all__, f"{name} is not a guard"
-        assert len(reason) > 40, f"{name}: a one-word reason is not a reason"
+        assert isinstance(entry, PendingGuardInput), (
+            f"{name}: a pending entry is a PendingGuardInput, not a bare string; the "
+            "three parts exist so the entry can be checked rather than graded"
+        )
+        assert "." in entry.nearest_artifact, (
+            f"{name}: nearest_artifact must be a dotted name of something this release "
+            f"emits, got {entry.nearest_artifact!r}"
+        )
+        for field in ("why_not_a_call_site", "closes_when"):
+            assert len(getattr(entry, field)) > 40, f"{name}.{field}: a phrase is not a reason"
+        assert entry.nearest_artifact in str(entry), (
+            f"{name}: str() must still render one readable sentence for a reader that "
+            "printed the old string value"
+        )
 
 
 def test_run_all_can_actually_run_every_guard():
@@ -792,3 +813,233 @@ def test_run_all_refuses_a_multi_argument_guard_given_a_bare_value():
 
     with pytest.raises(TypeError, match="index_names, loader_names"):
         run_all({"index_order_matches_loader": ["pos-1", "neg-1"]})
+
+
+def test_every_pending_entry_names_a_real_artifact():
+    """`nearest_artifact` has to resolve, or the entry is pointing at a memory.
+
+    A pending entry outlives the code it describes -- that is what makes it a
+    pending entry -- so the one part of it that CAN be checked mechanically is
+    checked: every dotted name resolves from the package. When a rename or a
+    deletion makes an entry stale, this fails instead of the entry quietly
+    becoming fiction that nobody can act on.
+    """
+    import importlib
+
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    unresolved = []
+    for name, entry in GUARDS_AWAITING_INPUT.items():
+        target: Any = importlib.import_module("motifmultiverse")
+        for part in entry.nearest_artifact.split("."):
+            try:
+                target = getattr(target, part)
+            except AttributeError:
+                try:
+                    target = importlib.import_module(f"{target.__name__}.{part}")
+                except (ImportError, AttributeError):
+                    unresolved.append(f"{name} -> {entry.nearest_artifact}")
+                    break
+    assert not unresolved, (
+        "pending entries naming an artifact that does not exist: " + ", ".join(unresolved)
+    )
+
+
+# --- the executable half of each pending entry --------------------------------
+# Each test below asserts the fact its registry entry rests on, and FAILS when the
+# awaited input arrives. That direction is deliberate: a pending entry that only a
+# human re-reads stays pending forever, and the one thing worse than an unwired
+# guard is an unwired guard whose reason stopped being true without anyone noticing.
+
+def test_four_state_missingness_still_has_no_independently_claimed_coverage():
+    """The manifest states a total and nothing else; health_report states all three.
+
+    So the only artifact that could put a CLAIM in front of a recomputation carries
+    one third of the claim, and the artifact that carries all three computes them in
+    the same expression it would be checked against.
+    """
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    from motifmultiverse.schema.substrate import HitSubstrateManifest
+
+    entry = GUARDS_AWAITING_INPUT["four_state_missingness"]
+    assert entry.nearest_artifact == "schema.substrate.HitSubstrateManifest"
+    fields = set(HitSubstrateManifest.__dataclass_fields__)
+    assert "n_regions" in fields, "the one independently claimed count is gone"
+    claimed = {f for f in fields
+               if any(word in f for word in ("defined", "coverage", "searched", "used"))}
+    assert not claimed, (
+        f"the substrate manifest now claims {sorted(claimed)} independently of the hit "
+        "rows: four_state_missingness has the input it was waiting for. Wire it into "
+        "interpret.read_hit_table / verify_against_manifest and delete its "
+        "GUARDS_AWAITING_INPUT entry."
+    )
+
+
+def test_estimability_floor_still_has_no_interval_and_no_reference_to_read_it_against():
+    """`affected_interval` has a schema slot, a validator, and no writer.
+
+    `evaluate_stability` is its only producer. Until it fills the slot, the guard's
+    CI clause has nothing to read; the N clause is meanwhile an invariant of
+    `StabilityResult` itself, so a guard there could only fail on an object the
+    constructor already refuses to build.
+    """
+    import pandas as pd
+
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    from motifmultiverse.validate import (
+        MIN_AFFECTED_PEAKS,
+        StabilityResult,
+        ValidationError,
+        evaluate_stability,
+    )
+
+    entry = GUARDS_AWAITING_INPUT["estimability_floor"]
+    assert entry.nearest_artifact == "validate.StabilityResult"
+
+    def table(*, affected: int, total: int, merged: bool) -> pd.DataFrame:
+        return pd.DataFrame([
+            {"peak_id": f"peak-{i:03d}",
+             "hit_id": "family-merged" if (merged and i < affected) else "family-original",
+             "coefficient": 2.0 if (merged and i < affected) else 1.0,
+             "reconstruction": 1.0 if (merged and i < affected) else 0.0}
+            for i in range(total)
+        ])
+
+    result = evaluate_stability(
+        "decision:estimability",
+        table(affected=40, total=200, merged=False),
+        table(affected=40, total=200, merged=True),
+    )
+    assert result.n_affected_peaks == 40 > MIN_AFFECTED_PEAKS
+    assert result.paired_delta_reconstruction_all is not None    # the reference exists
+    assert result.affected_interval is None, (
+        "a stability result now carries the interval estimability_floor's CI clause "
+        "needs, and the reference it is read against is already there. Wire the guard "
+        "at validate.evaluate_stability and delete its GUARDS_AWAITING_INPUT entry."
+    )
+
+    # The N clause, meanwhile, is the record's own invariant: below the floor the
+    # constructor refuses before any guard could look.
+    with pytest.raises(ValidationError):
+        StabilityResult(
+            decision_id="d", n_affected_peaks=MIN_AFFECTED_PEAKS - 1, n_affected_hits=1,
+            family_coefficient_share=0.5, paired_delta_reconstruction_affected=1.0,
+            paired_delta_reconstruction_all=0.0, hit_jaccard=None,
+            coefficient_conservation=None, status="CHANGED_AFFECTED_SUBSET",
+            power_statement="descriptive",
+        )
+
+
+def test_estimability_floor_would_be_vacuous_on_the_effects_table():
+    """The other candidate call site, and why the number there cannot be under the floor.
+
+    `health_report` floors the query's block count against the run's pre-registered
+    floor before any effect is computed, and the effect frame's blocks are the union
+    of the two sides' -- so an emitted effect's N is at least the declared floor, by
+    construction rather than by luck. A guard wired at that floor cannot fail; one
+    wired at a hard-coded 30 would override a floor the run itself declared.
+    """
+    from motifmultiverse import interpret
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    from motifmultiverse.schema import HealthFloors, HitRecord, Missingness, PeakSetQuery
+
+    assert "interpret.FamilyEffect" in GUARDS_AWAITING_INPUT["estimability_floor"].why_not_a_call_site
+
+    assert not {"reference", "status", "estimability"} & set(
+        interpret.FamilyEffect.__dataclass_fields__), (
+        "FamilyEffect now carries a reference or an estimability state; re-read "
+        "GUARDS_AWAITING_INPUT['estimability_floor'] -- its second clause may now have "
+        "something to read."
+    )
+
+    hits = []
+    for block in range(8):
+        for side in (0, 1):
+            start = block * 1_000_000 + side * 1_000
+            hits.append(HitRecord(
+                region_id=f"r{block}_{side}", chrom="chr1", start=start, end=start + 500,
+                missingness=Missingness.USED, input_scale=16, lexicon_id="lex",
+                substrate_id="e" * 64, variant_id=f"UA_FAM_{side}", family_id="FAM",
+                hit_coefficient=1.0 if side == 0 else 0.2,
+            ))
+    floors = HealthFloors(min_intersection_coverage=0.9, min_blocks=8,
+                          min_explained_fraction=0.9)
+    result = interpret.interpret_query(
+        hits,
+        PeakSetQuery(query_id="q", region_ids=[h.region_id for h in hits if h.region_id.endswith("_0")],
+                     comparator_region_ids=[h.region_id for h in hits if h.region_id.endswith("_1")],
+                     comparator_id="odd", selection_provenance="EXTERNAL"),
+        floors=floors, n_bootstrap=50, seed=1,
+    )
+    assert result.effects, "the fixture must actually reach the effects stage"
+    for effect in result.effects:
+        assert effect["n_blocks"] >= floors.min_blocks
+
+
+def test_single_family_layer_names_a_share_that_really_does_come_out_one():
+    """The failure the guard describes is live under BUDGET_FRACTION.
+
+    A peak whose only family with mass is this one has a budget share of exactly
+    1.0, so it clears any threshold in (0, 1] and BUDGET_FRACTION collapses into
+    ANY_HIT there -- the same family with the same absolute mass in a peak that has
+    other families is correctly not used. That is why the entry names this artifact
+    and not `FamilyComposition.peak_share`, whose denominator is peaks.
+    """
+    from motifmultiverse import infer
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    entry = GUARDS_AWAITING_INPUT["single_family_layer"]
+    assert entry.nearest_artifact == "infer.UsageDefinition.BUDGET_FRACTION"
+    assert "families" not in " ".join(infer.PeakUsage.__dataclass_fields__), (
+        "PeakUsage now carries a family count, so 'this peak has one family' is "
+        "observable where the share is computed; re-read "
+        "GUARDS_AWAITING_INPUT['single_family_layer'] -- only the scientific decision "
+        "it names is still outstanding."
+    )
+
+    sole = infer.PeakUsage(searched=True, hit_count=1, coefficient_sum=0.01,
+                           abs_coefficient_sum=0.01, peak_abs_coefficient_sum=0.01)
+    crowded = infer.PeakUsage(searched=True, hit_count=1, coefficient_sum=0.01,
+                              abs_coefficient_sum=0.01, peak_abs_coefficient_sum=1.0)
+    threshold = infer.UsageThreshold(value=0.90, null_source="test: a deliberately steep cut")
+    effect = infer.two_part_summary(
+        [sole], [crowded], family_id="FAM",
+        usage_definition=infer.UsageDefinition.BUDGET_FRACTION,
+        usage_threshold=threshold,
+    )
+    assert effect.n_used_query == 1 and effect.n_used_comparator == 0
+    assert effect.probability_effect == 1.0, (
+        "the single-family peak counts as fully used at a 0.90 budget threshold on a "
+        "share of 1.0 that nothing else could have diluted"
+    )
+
+
+def test_the_three_guards_with_no_producing_stage_have_none():
+    """`no_cross_model_cwm_avg`, `interaction_required`, `stratum_parity`.
+
+    Each waits on a stage that does not exist, and "does not exist" is checkable:
+    no record type carries the field the guard reads. When one appears, this fails
+    and says which entry to re-read -- which beats discovering it by grepping, the
+    way the seven unwired guards were found in the first place.
+    """
+    from motifmultiverse import align, compile, infer, interpret
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    assert GUARDS_AWAITING_INPUT["no_cross_model_cwm_avg"].nearest_artifact == (
+        "compile.compile_lexicons")
+    combining = [n for n in (*align.__all__, *compile.__all__)
+                 if any(word in n.lower() for word in ("average", "mean_cwm", "operations_log"))]
+    assert not combining, (
+        f"a stage that can combine CWMs now exists ({combining}); it must log each "
+        "combination with the axes it held fixed, and no_cross_model_cwm_avg reads "
+        "that log"
+    )
+
+    records = (interpret.FamilyEffect, interpret.FamilyComposition, infer.TwoPartEffect)
+    fields = {f for record in records for f in record.__dataclass_fields__}
+    assert not {"is_specificity_claim", "interaction_ci"} & fields, (
+        "an emitted record now claims specificity; wire interaction_required"
+    )
+    assert not {"stratum_rules", "stratum_id"} & fields, (
+        "an emitted record now names a stratum; wire stratum_parity"
+    )

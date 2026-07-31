@@ -109,12 +109,16 @@ failed, never summed) are per-run facts, not repository facts: see
 **What actually runs today:**
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,finemo]"      # the finemo extra is what makes the compile
+                                    # round trip run instead of skip
 
 motifmultiverse --help              # 9 subcommands with real arguments
 
 # a minimal path from discovery output through adjudication to a frozen lexicon:
 motifmultiverse ingest project.yaml --out registry/
+# align is quadratic in the registry and re-registers the full pipeline 1000 times per
+# pair. --workers N spreads the pairs over N processes; the written tables are
+# byte-identical at every worker count, and progress goes to stderr, not stdout.
 motifmultiverse align registry/ --out evidence/
 # --tomtom reads PRECOMPUTED TomTom output named by --databases; it does not run
 # TomTom. config/db.yaml is site-specific and not shipped -- copy the shape from
@@ -141,13 +145,15 @@ ruff check src tests
 pytest
 ```
 
-**That one skip matters.** The `compile` round-trip test calls the real hit-caller
-loader and skips wherever the `finemo` backend is absent — including in CI. *A
+**The round trip runs.** The `compile` round-trip test calls the real hit-caller
+loader; install it with `pip install -e ".[dev,finemo]"`. It used to skip wherever the
+backend was absent — including in CI, where the extra named a distribution that does
+not exist on PyPI, so the documented way to stop it skipping could not be run. *A
 skipped test is unverified, not verified*, and this is the same shape as a guard that
-can never fail, so it is written here instead of being left to a green check mark. It
-has been verified manually against a real TF-MoDISco output; see
-[`compile/README.md`](src/motifmultiverse/compile/README.md) for the evidence and for
-what exactly was and was not exercised.
+can never fail. Set `MOTIFMULTIVERSE_REQUIRE_FINEMO=1` and a missing backend fails the
+run rather than shrinking it. See
+[`compile/README.md`](src/motifmultiverse/compile/README.md) for what the round trip
+proves on a real TF-MoDISco lexicon, and for the incompatibility the skip was hiding.
 
 | exit | meaning |
 |---|---|
@@ -215,11 +221,22 @@ test **and a falsification test that must make it fail** — the direct answer t
 finding 4 above. A meta-test walks the guard registry and fails if any guard ships
 without one.
 
-`single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness` ·
-`no_cross_model_cwm_avg` · `sign_alignment` · `interaction_required` ·
-`estimability_floor` · `stratum_parity` · `short_motif_flag` · `single_family_layer` ·
+`single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness`† ·
+`no_cross_model_cwm_avg`† · `sign_alignment` · `interaction_required`† ·
+`estimability_floor`† · `stratum_parity`† · `short_motif_flag` · `single_family_layer`† ·
 `selection_provenance_declared` · `health_before_effect` · `comparator_declared` ·
 `index_order_matches_loader`
+
+† **No call site in this release.** Six of the fifteen are defined and
+falsification-tested but have never been put in front of an artifact, because this
+release emits nothing that carries the thing they check. Counting them as protection
+is the same error the guards exist to prevent, so they are marked here rather than
+left for a reader to discover by grepping. `guards.GUARDS_AWAITING_INPUT` records for
+each one the artifact that comes closest, what would go wrong if the guard were
+pointed at it anyway — self-corroboration, vacuity, or overriding a decision nobody
+has made — and what would have to exist. A test accompanies each entry and **fails
+when that thing appears**, so the list shortens by wiring a guard, never by
+relabelling one.
 
 [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) lists the 25 frozen design principles,
 each labelled `ENFORCED` / `PARTIAL` / `DOC_ONLY` with the current tally — which is

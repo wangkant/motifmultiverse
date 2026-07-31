@@ -24,16 +24,51 @@ what may gate a collapse. Consequence to expect: connectivity proposes large
 components, because registrability rather than evidence is what joins nodes.
 
 **The null costs one full registration per shuffle per pair**, and the pair
-count is quadratic in the registry — single-threaded, with no progress output.
-Measured on 29 real ChromBPNet patterns (406 pairs), one registration of a
-4–30bp core costs about 135 µs, so at the default 1000 shuffles a twelve-run,
-240-node registry extrapolates to roughly half a CPU-hour; on the untrimmed
-windows this stage used to register it was about ten times that. Nothing is
-cached across pairs and nothing is rescored at a remembered offset, because
-every cheaper null on offer answers the easier question (see the module
-docstring). `tests/test_align.py` pins the registration count so a later
-"optimisation" cannot quietly buy speed with a weaker null; parallelising across
-pairs is the one lever that would not, and it is not taken here.
+count is quadratic in the registry. Measured on 29 real ChromBPNet patterns (406
+pairs, 194 of them registrable), one registration of a 4–30bp core costs about
+128 µs; the whole stage at the default 1000 shuffles takes 24.9 s on that
+registry single-threaded, so a twelve-run, 240-node registry extrapolates to
+roughly half a CPU-hour, and on the untrimmed windows this stage used to
+register it was about ten times that. Nothing is cached across pairs and nothing
+is rescored at a remembered offset, because every cheaper null on offer answers
+the easier question (see the module docstring). `tests/test_align.py` pins the
+registration count so a later "optimisation" cannot quietly buy speed with a
+weaker null.
+
+**Parallelism across pairs is the one lever that does not weaken the null**, and
+it is now taken: `--workers` / `workers=` runs the pair loop in that many
+processes, defaulting to 1 so no existing invocation changes. It is admissible
+only because it cannot reach the arithmetic — each pair's null generator is
+built from the run seed alone inside `calibrate_pair_null`, nothing is carried
+between pairs, and outcomes are reassembled by pair order rather than by finish
+time. Measured on the same 29-pattern registry at 1000 shuffles, two runs of the
+sweep: 24.9–25.3 s at 1 worker, 13.1–13.2 s at 2 (1.9×), 6.8–7.5 s at 4
+(3.4–3.7×), 3.7 s at 8 (6.7–6.8×) — with
+`alignment_edges.parquet` and `alignment_null_summary.tsv` byte-for-byte
+identical at all four worker counts, and identical to what this stage wrote for
+the same registry before the parameter existed. The equality is the point, not
+the speed, so it is a test rather than a claim:
+`test_align_registry_writes_byte_identical_tables_at_every_worker_count`
+compares the written bytes, and
+`test_align_null_is_a_pure_function_of_the_seed_and_the_pair` pins the mechanism
+against an independent recomputation from the seed — introducing a generator
+shared between pairs fails both.
+
+Progress goes to **stderr**, never to stdout, which carries the counts and the
+`written:` paths a caller parses. `align_registry` itself writes to no stream at
+all: it calls a `progress(completed, total)` callback once per registrable pair,
+and the CLI is what decides that those become stderr lines — at most one every
+two seconds, with the first and last pair always printed, so a run that takes
+hours says where it is and a run that takes a second still says what it did.
+
+**RECORDED, not fixed: the null generator is seeded per run, not per pair.** Two
+pairs whose targets have the same trimmed-core length therefore draw the same
+sequence of row permutations, and their nulls are positively dependent — which
+matters to any later procedure that treats these p-values as independent tests.
+Seeding per pair would decorrelate them and would change every p-value this rule
+version has produced; that is a decision about the null, not about scheduling,
+so it is written down here rather than made under cover of a performance change.
+Parallelism reproduces the existing correlated draws exactly.
 
 ---
 

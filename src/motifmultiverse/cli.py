@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from motifmultiverse import __version__
-from motifmultiverse.align import DEFAULT_NULL_SHUFFLES, AlignmentError
+from motifmultiverse.align import DEFAULT_NULL_SHUFFLES, DEFAULT_WORKERS, AlignmentError
 from motifmultiverse.annotate import AnnotationError
 from motifmultiverse.compile import TIERS as COMPILE_TIERS
 from motifmultiverse.compile import BackendMissing, CompileError
@@ -161,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--seed", type=int, default=0,
                    help="random seed for the null shuffles; required provenance on "
                         "every emitted edge (default: 0)")
+    a.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                   help=f"worker processes for the pair loop (default: {DEFAULT_WORKERS}). "
+                        "Each pair's null is drawn from the run seed alone, so the written "
+                        "tables are byte-identical at every worker count; only wall-clock "
+                        "changes. Progress is reported on stderr, never on stdout.")
     a.set_defaults(func=_run_align)
 
     a = sub.add_parser("annotate", help="retain database-label candidates for later adjudication")
@@ -216,8 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"comma-separated tiers (default: {','.join(COMPILE_TIERS)})")
     a.add_argument("--verify-roundtrip", choices=["auto", "require", "skip"], default="auto",
                    help="read each lexicon back with the real loader: 'auto' verifies when "
-                        "the finemo backend is installed and says so when it is not, "
-                        "'require' fails without it, 'skip' never verifies")
+                        "the finemo backend is installed and callable and says so when it "
+                        "is not, 'require' fails without it, 'skip' never verifies")
     a.add_argument("--seed", type=int, default=None, help="random seed, recorded in provenance")
     a.add_argument("--out", default="lexicons/", help="output lexicon directory")
     a.set_defaults(func=_run_compile)
@@ -378,16 +383,59 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _align_progress(min_interval: float = 2.0):
+    """A progress callback for `align`, writing to STDERR and nowhere else.
+
+    `align` prints its counts and the paths it wrote to stdout and callers parse
+    that; a progress line interleaved into it would corrupt what they read. The
+    alternative is not silence -- the stage is quadratic in the registry with a
+    thousand re-registrations per pair, and a job that says nothing for an hour
+    is indistinguishable from one that has hung. So the lines go to the other
+    stream, where a pipeline reading stdout never sees them and a human watching
+    the terminal does.
+
+    Throttled to one line per `min_interval` seconds, because a 28,000-pair run
+    would otherwise put 28,000 lines in a log; the first and last pair always
+    print, so even a run that finishes instantly reports what it did, and the
+    first line carries the pair total so a reader knows what they are waiting
+    for. Plain lines rather than a carriage-returned bar: this stream is as often
+    a log file as a terminal.
+    """
+    import time
+
+    last_emitted = 0.0
+
+    def report(completed: int, total: int) -> None:
+        nonlocal last_emitted
+        now = time.monotonic()
+        if completed in (1, total) or now - last_emitted >= min_interval:
+            last_emitted = now
+            percent = 100.0 * completed / total if total else 100.0
+            # "candidate pairs processed", not "edges": a pair whose best offset
+            # misses the bilateral overlap floor is finished work but not an
+            # edge, and a progress line that counted edges would appear to stall
+            # on a registry full of them.
+            print(f"align: {completed}/{total} candidate pairs processed ({percent:.0f}%)",
+                  file=sys.stderr, flush=True)
+
+    return report
+
+
 def _run_align(ns: argparse.Namespace) -> int:
     from motifmultiverse import align as align_mod
 
     summary, edges = align_mod.run(
-        ns.registry, ns.out, null_shuffles=ns.null_shuffles, seed=ns.seed)
+        ns.registry, ns.out, null_shuffles=ns.null_shuffles, seed=ns.seed,
+        workers=ns.workers, progress=_align_progress())
     print(f"align: {summary.n_nodes} motif nodes, {summary.n_pairs_considered} candidate pairs, "
           f"{summary.n_edges} alignment edges ({summary.n_pairs_excluded} excluded: no PPM or "
           "no offset met the bilateral overlap floor)")
     print(f"  null_shuffles={summary.null_shuffles} seed={summary.seed} "
           f"registered_on=unsigned_ppm registration_rule_version={summary.registration_rule_version}")
+    # Reported, but as scheduling rather than provenance: the tables above are
+    # byte-identical at every worker count, so this line explains the wall-clock
+    # and nothing about the numbers.
+    print(f"  workers={summary.workers} (scheduling only; the written tables do not depend on it)")
     for e in edges[:5]:
         print(f"  {e.source_node_id} <-> {e.target_node_id}: orientation={e.orientation} "
               f"offset={e.offset} overlap_bp={e.overlap_bp} ppm_similarity={e.ppm_similarity:.3f} "

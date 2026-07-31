@@ -730,12 +730,19 @@ def test_align_null_re_registers_from_scratch_for_every_shuffle(tmp_path):
     instead of "how surprising is it to find SOME alignment this good", and
     would inflate every p-value in the table.
 
-    The price is quadratic in the registry and single-threaded, with no progress
-    output: measured on 29 real ChromBPNet patterns, one registration of a
-    4-30bp core costs about 135 microseconds, so a twelve-run 240-node registry
-    at the default 1000 shuffles extrapolates to roughly half a CPU-hour. That
-    is recorded rather than traded away, because every cheaper null on offer is
-    a weaker one.
+    The price is quadratic in the registry: measured on 29 real ChromBPNet
+    patterns, one registration of a 4-30bp core costs about 128 microseconds, so
+    a twelve-run 240-node registry at the default 1000 shuffles extrapolates to
+    roughly half a CPU-hour of registrations. That total is recorded rather than
+    traded away, because every cheaper null on offer is a weaker one.
+
+    Counted here on the default single worker, because this counter is a
+    monkeypatch in THIS process and a worker process would never see it. That is
+    a limit of the counting, not a gap in the pin: what shows the parallel path
+    does the same registrations is
+    `test_align_registry_writes_byte_identical_tables_at_every_worker_count` --
+    a null of 25 re-registrations per pair cannot come out bit-identical from a
+    process that skipped or cached any of them.
     """
     import motifmultiverse.align as align_module
 
@@ -767,3 +774,277 @@ def test_align_null_re_registers_from_scratch_for_every_shuffle(tmp_path):
     # 3 observed registrations in align_registry, then per registered pair one
     # more observed registration inside calibrate_pair_null plus one per shuffle.
     assert len(calls) == 3 + 3 * (1 + 7)
+
+
+# --------------------------------------------- parallelism must not be arithmetic
+def _parallel_registry(tmp_path, n_nodes: int = 8):
+    """A registry with enough registrable pairs to spread over several workers.
+
+    Every core is the same width, so no pair is excluded by the overlap floor and
+    every worker has real work; the cores themselves are unrelated, so the
+    p-values are spread rather than all pinned at the floor.
+    """
+    windows = {f"n{i}": _padded_pattern(_informative_core(i + 1, 12), 14, 14, 100 + i)
+               for i in range(n_nodes)}
+    return _registry_arrays_h5(
+        tmp_path,
+        {node_id: {"ppm": window, "cwm": (window - 0.25) * 3.0}
+         for node_id, window in windows.items()},
+        cores={node_id: [14, 26] for node_id in windows},
+    )
+
+
+def test_align_null_is_a_pure_function_of_the_seed_and_the_pair(tmp_path):
+    """The property that makes parallelising this stage admissible at all.
+
+    A pair's null must depend on the run seed and on that pair's own matrices,
+    and on nothing else -- not on how many pairs were calibrated before it, and
+    not on which worker happened to take it. Two things are checked, because
+    either alone is weak: the same pair calibrated in two different call orders
+    must give the identical null, AND the null scores must be reproducible from
+    `default_rng(seed)` by an independent loop that permutes and re-registers
+    here in the test. The second is what actually pins the mechanism: if the
+    generator were ever hoisted to module level or shared between pairs, the
+    draws would depend on how many pairs preceded this one and this
+    recomputation -- which starts its stream from the seed alone -- would stop
+    matching. That failure would be invisible in a serial run and would make
+    `--workers` change the p-value table.
+    """
+    from motifmultiverse.align import calibrate_pair_null, register_pair
+
+    a = _informative_core(11, 12)
+    b = _informative_core(12, 12)
+    c = _informative_core(13, 12)
+    seed, shuffles = 5, 12
+
+    forward = [calibrate_pair_null(x, y, null_shuffles=shuffles, seed=seed)
+               for x, y in ((a, b), (a, c), (b, c))]
+    backward = [calibrate_pair_null(x, y, null_shuffles=shuffles, seed=seed)
+                for x, y in ((b, c), (a, c), (a, b))][::-1]
+    assert forward == backward, (
+        "a pair's null changed with the order the pairs were calibrated in; "
+        "some state is being carried between pairs"
+    )
+
+    for (source, target), (_p_value, null_scores) in zip(
+        ((a, b), (a, c), (b, c)), forward, strict=True,
+    ):
+        rng = np.random.default_rng(seed)
+        independent = [
+            register_pair(source, target[rng.permutation(target.shape[0])]).ppm_similarity
+            for _ in range(shuffles)
+        ]
+        assert independent == null_scores, (
+            "this pair's null is not reproducible from default_rng(seed) alone, so "
+            "it depends on something other than the seed and the pair itself"
+        )
+
+
+def test_align_registry_writes_byte_identical_tables_at_every_worker_count(tmp_path):
+    """The point of `workers` is that it changes nothing but wall-clock.
+
+    Not "the same p-values to some tolerance" -- the same bytes. Row order is
+    part of that: outcomes are reassembled by each pair's position in the pair
+    order, so a table ordered by whichever worker finished first would fail here
+    with every number in it correct, which is exactly the kind of difference that
+    is impossible to explain to a reader six months later.
+
+    A real ProcessPoolExecutor runs, so this also exercises the pickling path:
+    the matrices reach the workers through the pool initialiser, and anything
+    that failed to survive that round trip would change the numbers rather than
+    raise.
+    """
+    serial_out = tmp_path / "serial"
+    parallel_out = tmp_path / "parallel"
+    registry = _parallel_registry(tmp_path)
+
+    serial_summary, serial_edges = align_registry(
+        registry, serial_out, null_shuffles=25, seed=3, workers=1)
+    parallel_summary, parallel_edges = align_registry(
+        registry, parallel_out, null_shuffles=25, seed=3, workers=3)
+
+    assert serial_summary.n_edges == parallel_summary.n_edges == len(serial_edges)
+    assert serial_summary.n_edges > 1, "fixture registers too few pairs to distribute"
+    assert serial_edges == parallel_edges
+    for name in ("alignment_edges.parquet", "alignment_null_summary.tsv"):
+        assert (serial_out / name).read_bytes() == (parallel_out / name).read_bytes(), (
+            f"{name} differs between worker counts"
+        )
+    assert serial_summary.workers == 1 and parallel_summary.workers == 3
+
+
+def test_align_registry_really_runs_a_pool_at_the_requested_worker_count(tmp_path):
+    """`workers` must not be a parameter that is accepted and ignored.
+
+    The byte-identity test above passes trivially if `workers=3` quietly runs
+    everything in this process -- identical output, no speedup, and a
+    documented-but-absent feature. So the executor is recorded here: constructed
+    once, with max_workers=3, and asked to run the jobs.
+    """
+    import motifmultiverse.align as align_module
+
+    constructed = []
+    real_executor = align_module.ProcessPoolExecutor
+
+    def recording_executor(*args, **kwargs):
+        constructed.append(kwargs.get("max_workers"))
+        return real_executor(*args, **kwargs)
+
+    registry = _parallel_registry(tmp_path, n_nodes=5)
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(align_module, "ProcessPoolExecutor", recording_executor)
+    try:
+        summary, edges = align_registry(
+            registry, tmp_path / "evidence", null_shuffles=5, seed=3, workers=3)
+    finally:
+        monkey.undo()
+
+    assert constructed == [3], (
+        "no process pool was created for workers=3, so the pair loop ran in this "
+        "process and --workers is decorative"
+    )
+    assert len(edges) == summary.n_edges > 1
+
+
+@pytest.mark.parametrize("workers", [0, -1, 1.5, "4", None, True])
+def test_align_registry_refuses_a_worker_count_that_is_not_a_positive_integer(
+    tmp_path, workers,
+):
+    """Refused before the output directory exists, like `null_shuffles`.
+
+    `True` is in the list deliberately: `bool` is a subclass of `int`, so
+    `workers=True` would otherwise be silently read as "one worker" -- i.e. as
+    "no, serial" -- by a caller who wrote it meaning "yes, parallelise". A
+    parameter that quietly means the opposite of what it was written to mean is
+    worse than one that refuses.
+    """
+    registry = _parallel_registry(tmp_path, n_nodes=3)
+    out = tmp_path / "evidence"
+    with pytest.raises(AlignmentError, match="workers"):
+        align_registry(registry, out, null_shuffles=3, seed=1, workers=workers)
+    assert not out.exists(), (
+        "the worker-count guard fired after the run had already started writing"
+    )
+
+
+def test_align_registry_is_byte_identical_under_the_spawn_start_method(tmp_path):
+    """The same equality under the start method that pickles everything.
+
+    `fork` hands a worker the parent's memory, so the matrices reach it without
+    ever being serialised; `spawn` and `forkserver` pickle the pool's initargs
+    and re-import this module in a fresh interpreter. Linux defaults to `fork`
+    today and CPython is moving off it -- 3.14 makes `forkserver` the default --
+    and macOS has been `spawn` for years, so the pickling path is not exotic: it
+    is what most callers will get next. A float array that survived fork but
+    round-tripped imprecisely, or a module that behaved differently on re-import,
+    would move the p-values on those platforms only.
+
+    Run in a subprocess because the start method is process-global state and
+    forcing it here would leak into every other test in the session.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    registry = _parallel_registry(tmp_path, n_nodes=5)
+    serial_out = tmp_path / "serial"
+    spawned_out = tmp_path / "spawned"
+    align_registry(registry, serial_out, null_shuffles=5, seed=3, workers=1)
+
+    script = textwrap.dedent(
+        """
+        import multiprocessing, sys
+
+        def main():
+            multiprocessing.set_start_method("spawn", force=True)
+            from motifmultiverse.align import align_registry
+            align_registry(sys.argv[1], sys.argv[2], null_shuffles=5, seed=3, workers=2)
+
+        if __name__ == "__main__":
+            main()
+        """
+    )
+    script_path = tmp_path / "spawn_align.py"
+    script_path.write_text(script)
+    completed = subprocess.run(
+        [sys.executable, str(script_path), str(registry), str(spawned_out)],
+        capture_output=True, text=True, timeout=600,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    for name in ("alignment_edges.parquet", "alignment_null_summary.tsv"):
+        assert (serial_out / name).read_bytes() == (spawned_out / name).read_bytes(), (
+            f"{name} differs between an in-process serial run and a spawn-method "
+            "parallel run"
+        )
+
+
+def test_align_registry_reports_progress_and_prints_nothing_itself(tmp_path, capsys):
+    """A multi-hour stage that says nothing is its own defect -- and a library
+    that prints is a different one.
+
+    `align_registry` reports through a callback and writes to no stream at all,
+    so a caller parsing its stdout cannot be polluted by progress it did not ask
+    for; the CLI is what decides that the lines go to stderr. The callback fires
+    once per registrable pair, in order, with a running count and a fixed total,
+    so a reader can tell a slow run from a hung one.
+    """
+    registry = _parallel_registry(tmp_path, n_nodes=4)
+    seen: list[tuple[int, int]] = []
+
+    summary, _edges = align_registry(
+        registry, tmp_path / "evidence", null_shuffles=3, seed=1,
+        progress=lambda done, total: seen.append((done, total)),
+    )
+
+    total = summary.n_pairs_considered - summary.n_pairs_excluded
+    assert seen == [(i, total) for i in range(1, total + 1)]
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "", (
+        "align_registry wrote to a stream of its own; stdout is a caller's to parse"
+    )
+
+
+def test_align_registry_reports_progress_from_workers_too(tmp_path):
+    """The parallel path must report as it goes, not in one burst at the end.
+
+    Progress exists for the run that takes hours, and that is the run someone
+    will use `--workers` for. The counts must still arrive one per pair and in
+    order, because the callback is a count of finished work, not of scheduled
+    work.
+    """
+    registry = _parallel_registry(tmp_path, n_nodes=5)
+    seen: list[tuple[int, int]] = []
+
+    summary, _edges = align_registry(
+        registry, tmp_path / "evidence", null_shuffles=3, seed=1, workers=2,
+        progress=lambda done, total: seen.append((done, total)),
+    )
+
+    total = summary.n_pairs_considered - summary.n_pairs_excluded
+    assert seen == [(i, total) for i in range(1, total + 1)]
+
+
+def test_cli_align_workers_progress_goes_to_stderr_not_stdout(tmp_path, capsys):
+    """The CLI's own stdout is parsed -- `written: <path>` lines and counts -- so
+    progress goes to the other stream.
+
+    Checked as an absence on stdout as well as a presence on stderr: a progress
+    line that also appeared on stdout would satisfy "there is progress output"
+    while breaking the caller it was supposed not to disturb.
+    """
+    from motifmultiverse.cli import main
+
+    registry = _parallel_registry(tmp_path, n_nodes=4)
+    out = tmp_path / "evidence"
+    rc = main(["align", str(registry), "--null-shuffles", "3", "--seed", "1",
+               "--workers", "2", "--out", str(out)])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    assert "candidate pairs processed" in captured.err, "the stage ran silently"
+    assert "candidate pairs processed" not in captured.out, (
+        "progress reached stdout, where a caller parsing the result lines will read it"
+    )
+    assert "written:" in captured.out and "workers=2" in captured.out
+    assert len(pd.read_parquet(out / "alignment_edges.parquet")) > 1

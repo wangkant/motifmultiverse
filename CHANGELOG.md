@@ -139,6 +139,27 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
   `{"motif_lambda_default": 0.7}`) are resolved to one canonical form before hashing
   so they still address identically.
 
+- **`align` runs its pair loop in parallel on request**: `align_registry(..., workers=N)`
+  and `motifmultiverse align --workers N`, **defaulting to 1**, so no existing
+  invocation changes. The null is untouched — still one full re-registration per
+  shuffle per pair, still pinned by `test_align_null_re_registers_from_scratch_for_every_shuffle`
+  — because parallelism is the one speed lever that does not answer an easier question.
+  It is admissible only because it cannot reach the arithmetic: each pair's null
+  generator is built from the run seed alone inside `calibrate_pair_null`, nothing is
+  carried between pairs, and outcomes are reassembled by pair order rather than by
+  finish time. Measured on the 29-pattern ChromBPNet registry at 1000 shuffles (two runs
+  of the sweep): 24.9–25.3 s at 1 worker, 13.1–13.2 s at 2, 6.8–7.5 s at 4, 3.7 s at 8,
+  with `alignment_edges.parquet` and
+  `alignment_null_summary.tsv` byte-identical at every worker count and identical to
+  what the stage wrote before the parameter existed. That equality is a test, not a
+  claim (`test_align_registry_writes_byte_identical_tables_at_every_worker_count`), and
+  `test_align_null_is_a_pure_function_of_the_seed_and_the_pair` pins the mechanism it
+  rests on against an independent recomputation from the seed.
+- `align` reports progress: `align_registry` calls a `progress(completed, total)`
+  callback once per registrable pair and writes to no stream itself; the CLI turns that
+  into **stderr** lines, at most one every two seconds. Nothing new is written to
+  stdout, which callers parse for the counts and the `written:` paths.
+
 ### Removed
 - `CITATION.cff`. A citation file with placeholder authors renders as a claim that the
   project is ready to be cited; it goes in at publication, with real names.
@@ -164,6 +185,14 @@ Format follows Keep a Changelog; this project uses semantic versioning once it r
 - `align` is prose-only by inheritance; `annotate` was **never specified** at all, which
   is a different position on the roadmap — it is waiting for a design, not an
   implementation.
+- `align`'s null generator is seeded **per run, not per pair**, so two pairs whose
+  targets have the same trimmed-core length draw the same sequence of row permutations
+  and their nulls are positively dependent. Anything later that treats these p-values
+  as independent tests inherits that. Seeding per pair would decorrelate them and would
+  change every p-value this registration rule version has produced — a decision about
+  the null, which is not one to make inside a performance change, so it is recorded
+  here instead. Parallelism reproduces the existing draws exactly and neither causes
+  nor is blocked by this.
 - `interpret`'s **default** intervals are percentile block bootstrap and carry no *p*
   or *q* value. `FP-15`'s BCa interval and wild cluster bootstrap-*t* now exist behind
   `--estimator bca-wild-cluster`; the cross-model effect-then-meta-analysis half of

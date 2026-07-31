@@ -63,9 +63,14 @@ what you conclude. Collapsing the two gates back into one restores exactly that.
 
 **The constraint.** `not_searched`, `no_sequence_match`, `hit_below_floor` and
 `used` are distinct; an undefined value takes an explicit sentinel and never `0`;
-coverage is computed **before** any fill. `guards.four_state_missingness` and
-`schema.HitRecord` both refuse a zero standing in for an undefined value.
-(`FP-22`, `BA-10`, `BA-17`)
+coverage is computed **before** any fill. `schema.HitRecord` refuses a zero
+standing in for an undefined value on every row that is read.
+`guards.four_state_missingness` refuses one too -- and would also catch the
+coverage figure itself -- but it has **no call site** in this release
+(`guards.GUARDS_AWAITING_INPUT`): no artifact here claims a coverage
+independently of the code that would recompute it, and a guard that checks a
+claim against the code that produced it corroborates itself, which is this very
+failure. (`FP-22`, `BA-10`, `BA-17`)
 
 **The failure.** The four-state encoding had already been specified — in prose. A
 `pivot_table(aggfunc="sum")` silently returned **`0.0`** for a group in which every

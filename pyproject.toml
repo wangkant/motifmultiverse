@@ -29,7 +29,21 @@ dependencies = [
 [project.optional-dependencies]
 # Adapter backends. Deliberately NOT core dependencies: a missing backend must
 # produce a clear "backend not installed" error, never an ImportError traceback.
-finemo = ["finemo-gpu>=0.30"]
+#
+# The distribution is `finemo`, not `finemo-gpu`. `finemo-gpu` is the GitHub
+# project's name (kundajelab/Fi-NeMo, formerly austintwang/finemo_gpu) and is not
+# a PyPI distribution at all -- `pip install finemo-gpu` fails with "No matching
+# distribution found" -- so this extra could not be installed, the round-trip test
+# skipped everywhere including CI, and the one thing `compile` exists to
+# guarantee went unchecked. `tests/test_ingest_compile.py::
+# test_the_declared_finemo_extra_names_the_distribution_that_provides_the_backend`
+# holds the name to the distribution that actually supplies the import.
+#
+# No upper pin: 0.30 and 0.41 spell the loader's trim-threshold argument
+# differently, and `compile._loader_call_kwargs` binds to whichever is installed
+# and refuses a signature it does not recognise, which is a better failure than a
+# pin that goes stale unread.
+finemo = ["finemo>=0.30"]
 fimo = []       # MEME suite is an external binary; see docs/ARCHITECTURE.md
 viz = ["matplotlib>=3.7", "logomaker>=0.8"]
 dev = ["pytest>=7.4", "ruff>=0.5"]

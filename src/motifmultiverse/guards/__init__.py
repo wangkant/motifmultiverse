@@ -26,7 +26,8 @@ from typing import Any
 from motifmultiverse.schema import Missingness
 
 __all__ = [
-    "GuardResult", "GuardError", "ALL_GUARDS", "GUARDS_AWAITING_INPUT", "run_all",
+    "GuardResult", "GuardError", "PendingGuardInput", "ALL_GUARDS",
+    "GUARDS_AWAITING_INPUT", "run_all",
     "single_scale", "variant_id_unique", "no_key_parsing", "four_state_missingness",
     "no_cross_model_cwm_avg", "sign_alignment", "interaction_required",
     "estimability_floor", "stratum_parity", "short_motif_flag", "single_family_layer",
@@ -136,6 +137,50 @@ def no_key_parsing(source: str) -> GuardResult:
     return _ok(gid, "heuristic scan passed")
 
 
+@dataclass(frozen=True)
+class PendingGuardInput:
+    """Why one guard has no call site, in the three parts a reader can check.
+
+    A prose note saying a guard is "waiting for the right input" is unfalsifiable:
+    it never becomes wrong, so nobody ever revisits it. The entries below used to
+    be exactly that, and two of them were vague enough to be re-derived from
+    scratch by anyone who wanted to know whether the moment had arrived. Splitting
+    the note into three fields fixes both halves of that:
+
+    ``nearest_artifact``
+        The dotted name of the thing this release DOES emit that comes closest to
+        the guard's input. It is a real symbol: the test
+        ``test_every_pending_entry_names_a_real_artifact`` resolves every one of
+        them, so an entry cannot point at something that was renamed away or
+        never existed.
+    ``why_not_a_call_site``
+        The failure that pointing the guard at that artifact would cause. There are
+        only three kinds in this project and naming which one applies is the whole
+        content of the entry: the guard would **corroborate itself** (the claim and
+        the recomputation are the same code), it would be **vacuous** (it cannot
+        fail on any input the artifact can produce), or it would **override a
+        decision nobody has made** (the only passing state is one the record has no
+        way to express).
+    ``closes_when``
+        The concrete thing whose existence closes the entry, stated so that a
+        future reader recognises the moment instead of re-deriving this analysis.
+        Where a scientific decision is still owed, it says so and names it, because
+        an entry that lists only the missing field invites someone to add the field
+        and wire a guard whose semantics are still undecided.
+
+    ``__str__`` renders the three as one sentence, so a reader (or a report) that
+    printed the old string value still gets a sentence rather than a repr.
+    """
+
+    nearest_artifact: str
+    why_not_a_call_site: str
+    closes_when: str
+
+    def __str__(self) -> str:
+        return (f"nearest artifact in this release: {self.nearest_artifact}. "
+                f"{self.why_not_a_call_site} Closes when: {self.closes_when}")
+
+
 #: Guards with no call site in this release, and the input each is waiting for.
 #:
 #: A guard that is defined, exported and never invoked reads as protection. Seven
@@ -145,33 +190,174 @@ def no_key_parsing(source: str) -> GuardResult:
 #: has to discover by grepping. `test_every_guard_is_called_or_declared_pending`
 #: fails if a guard is neither invoked in `src/` nor listed below, so a new orphan
 #: cannot appear quietly and a wired-up guard cannot stay on this list.
-GUARDS_AWAITING_INPUT: dict[str, str] = {
-    "four_state_missingness": (
-        "needs an artifact that CLAIMS a coverage/defined/total, independently of "
-        "the rows it is recomputed from. interpret.health_report is not that: there "
-        "the claim and the recomputation are the same code, so the guard would "
-        "corroborate itself -- which is the failure mode it exists to catch."
+#:
+#: One test in `tests/test_guards.py` accompanies each entry and asserts the
+#: executable half of its claim -- that the interval nobody writes is still not
+#: written, that the manifest still states no defined count, that a single-family
+#: budget share still comes out 1.0. Those tests FAIL when the awaited input
+#: arrives, which is the point: the registry announces the moment instead of
+#: waiting to be re-read.
+GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
+    "four_state_missingness": PendingGuardInput(
+        nearest_artifact="schema.substrate.HitSubstrateManifest",
+        why_not_a_call_site=(
+            "The guard needs a coverage/defined/total CLAIMED by something other than "
+            "the code that recomputes it. Exactly one artifact here states a count "
+            "independently of the rows -- the substrate manifest's n_regions, written "
+            "when the run was frozen -- and `interpret.verify_against_manifest` already "
+            "puts it in front of a recomputation from the hit rows, which is this "
+            "guard's shape at one third of its width. The manifest states no defined "
+            "count and no coverage, and the only place those exist is "
+            "`interpret.health_report`, where the claim and the recomputation are the "
+            "same expression: the guard would corroborate itself, which is the failure "
+            "mode it exists to catch."
+        ),
+        closes_when=(
+            "the manifest -- or a ledger written by the program that froze the run, "
+            "not by this package -- records how many (region, variant) opportunities "
+            "were searched and how many were retained. The real K562 substrate is "
+            "materialised from an upstream opportunity table that knows both numbers "
+            "and does not carry them across, so closing this is a matter of the caller "
+            "writing down two integers it already has, not of new science. Once they "
+            "are there, `read_hit_table` compares them against a recomputation from "
+            "the missingness column and the guard has an author it is not."
+        ),
     ),
-    "no_cross_model_cwm_avg": (
-        "needs an operations log naming each CWM combination performed. No stage "
-        "records one; the prohibition is currently structural (align never averages) "
-        "rather than checked."
+    "no_cross_model_cwm_avg": PendingGuardInput(
+        nearest_artifact="compile.compile_lexicons",
+        why_not_a_call_site=(
+            "No stage in this release combines CWMs at all. `align.register_pair` "
+            "scores a signed CWM cosine at an offset the unsigned PPM already chose "
+            "and never averages; `compile.compile_lexicons` names an observed member "
+            "as a collapse's representative and refuses one that is absent from its "
+            "own tier. An operations log emitted by those two would therefore hold "
+            "only medoid-shaped entries, and this guard inspects nothing but "
+            "`op in {mean, average}` -- it would pass an input that cannot contain a "
+            "violation, which is vacuity, not enforcement."
+        ),
+        closes_when=(
+            "a stage exists that can produce a CWM by combining others -- a "
+            "constructed representative, a meta-analysed CWM across models -- and "
+            "records each combination with the axes it held fixed. Note what stays "
+            "open even then, because the guard does not cover it and "
+            "`docs/CONSTRAINTS.md` FP-05 says so: a representative averaged WITHIN one "
+            "model holds model, readout and metacluster fixed and passes this guard."
+        ),
     ),
-    "interaction_required": (
-        "needs emitted specificity claims carrying an interaction CI. This release "
-        "emits per-family effects, not interactions."
+    "interaction_required": PendingGuardInput(
+        nearest_artifact="interpret.FamilyEffect",
+        why_not_a_call_site=(
+            "This release estimates one family's effect against one comparator, never "
+            "an interaction. `FamilyEffect` has no `is_specificity_claim` and no "
+            "`interaction_ci`, and the guard skips every record that does not claim "
+            "specificity -- so handed the effects table it would iterate over rows it "
+            "never inspects and pass. What that leaves open is worth stating plainly, "
+            "because it is the failure the guard was written for and this release does "
+            "not prevent it: two per-family effects sitting side by side in one table "
+            "are exactly the material a reader assembles a specificity claim from by "
+            "differencing two significance statuses."
+        ),
+        closes_when=(
+            "a stage emits a claim carrying an interaction estimate -- one family's "
+            "effect in cell A minus its effect in cell B, with an interval on that "
+            "difference rather than on either half -- and marks it "
+            "`is_specificity_claim`. A record that merely gains the two fields while "
+            "the interval is still computed on one cell at a time does not close this: "
+            "the guard would then read an interval that answers a different question."
+        ),
     ),
-    "estimability_floor": (
-        "needs stratified cells with N and a CI against a reference. Same missing "
-        "stratified-interaction stage as interaction_required."
+    "estimability_floor": PendingGuardInput(
+        nearest_artifact="validate.StabilityResult",
+        why_not_a_call_site=(
+            "`StabilityResult` is the only record in the project with all three of the "
+            "guard's parts in one place: an N (`n_affected_peaks`), an interval "
+            "(`affected_interval`), and a quantity that N-limited interval would be "
+            "read against (`paired_delta_reconstruction_all`, the all-peak median "
+            "delta). Two things stop it being a call site. Nothing ever writes the "
+            "interval -- `validate.evaluate_stability` is its only producer and leaves "
+            "it None -- so the CI clause has no data. And the N clause is already an "
+            "invariant of the record itself: `StabilityResult.__post_init__` refuses a "
+            "result under `MIN_AFFECTED_PEAKS` that is not LOW_RISK_RARE_NOT_VALIDATED, "
+            "so the guard could only fail on an object the constructor had already "
+            "refused to build.\n"
+            "`interpret.FamilyEffect` is the other candidate and fails differently. Its "
+            "N is the block count, and `interpret.health_report` floors that against "
+            "the run's pre-registered `HealthFloors.min_blocks` BEFORE any effect is "
+            "computed, over a block set the effect frame can only add to -- so at the "
+            "run's own floor the guard cannot fail, and at a hard-coded 30 it would "
+            "override a floor the run declared, which is the opposite of "
+            "pre-registration. `n_bootstrap_valid` is not an alternative N: it is a "
+            "replicate count, and 2,000 replicates drawn from two blocks would clear "
+            "any floor placed on it. There is also no reference -- the comparator is "
+            "already differenced out, so the interval is read against zero alone and "
+            "'contains zero AND the reference' has no second quantity to name."
+        ),
+        closes_when=(
+            "either producer starts emitting the part it is missing: "
+            "`evaluate_stability` computes `affected_interval` (at which point the "
+            "reference is already there and the guard's CI clause becomes live), or "
+            "effects are emitted per stratified cell, each with its own N and an "
+            "interval read against a NAMED second estimate. One decision is owed "
+            "before wiring either, and this entry is not closed without it: whether an "
+            "under-powered cell is emitted carrying NOT_ESTIMABLE_UNDERPOWERED and no "
+            "direction (`docs/CONSTRAINTS.md` FP-12's wording) or refused outright, the "
+            "way `infer.bca_paired_block_interval` refuses below "
+            "`infer.MIN_ESTIMABLE_BLOCKS`. The guard accepts either; the records above "
+            "can express only the second."
+        ),
     ),
-    "stratum_parity": (
-        "needs the stratifying rule recorded per cell; no stage emits strata yet."
+    "stratum_parity": PendingGuardInput(
+        nearest_artifact="interpret.FamilyComposition",
+        why_not_a_call_site=(
+            "Nothing in this release stratifies. `interpret.compose` and "
+            "`interpret.estimate_effects` partition by family, and a family is an "
+            "identity read off the frozen lexicon, not a variable produced by a "
+            "stratifying RULE -- which is what the guard compares. Passing family_id "
+            "as a stratum variable would hand every cell the same single rule and make "
+            "the guard incapable of failing, since two rules for one variable is the "
+            "only thing it can detect."
+        ),
+        closes_when=(
+            "cells are cut by a variable this pipeline COMPUTES -- a promoter/distal "
+            "call, a GC bin, an accessibility tertile -- and each cell records the rule "
+            "that produced each such variable, so two cells whose 'promoter' came from "
+            "different definitions can be caught. `docs/CONSTRAINTS.md` FP-24 records "
+            "that the ordering clause of the same principle (the cross-tabulation comes "
+            "before any effect is visible) is a separate check this guard does not make."
+        ),
     ),
-    "single_family_layer": (
-        "needs a composition that carries an estimability status. FamilyComposition "
-        "has no status field, and adding one to satisfy a guard would be inventing "
-        "the semantics the guard is meant to check."
+    "single_family_layer": PendingGuardInput(
+        nearest_artifact="infer.UsageDefinition.BUDGET_FRACTION",
+        why_not_a_call_site=(
+            "`interpret.FamilyComposition.peak_share` is not the share this guard is "
+            "about: its denominator is searched PEAKS, so 1.0 in a single-family "
+            "composition is a defined statement -- every searched peak carries that "
+            "family -- and giving FamilyComposition a status field to mark it "
+            "NOT_ESTIMABLE would invent an estimability semantics for a quantity that "
+            "is not undefined.\n"
+            "The share the guard IS about -- a family's share of its peak's own family "
+            "layer -- does exist, in `infer._usage_predicate` under BUDGET_FRACTION: "
+            "`abs_coefficient_sum / peak_abs_coefficient_sum`. On a peak whose only "
+            "family with mass is that one, the ratio is exactly 1.0 and clears every "
+            "threshold in (0, 1], so BUDGET_FRACTION degenerates to ANY_HIT there and "
+            "the occupancy margin of `infer.two_part_summary` is inflated by peaks "
+            "whose share was forced by there being nothing else to hold mass. That is "
+            "this guard's failure, live, in an artifact this release emits. It still "
+            "cannot be wired: `infer.PeakUsage` carries no count of families with mass, "
+            "so 'one family' is not observable where the share is computed, and there "
+            "is no per-peak estimability state to set -- the guard's only passing state "
+            "for a single-family stratum is a NOT_ESTIMABLE the record cannot express, "
+            "so wiring it today would refuse every BUDGET_FRACTION run outright."
+        ),
+        closes_when=(
+            "`PeakUsage` carries the number of families with mass in its peak (or the "
+            "share is computed in `interpret._peak_usage`, where that number is "
+            "already known), AND a decision has been made about what a single-family "
+            "peak does to a BUDGET_FRACTION denominator: dropped from it as "
+            "NOT_ESTIMABLE, or kept with its share recorded as undefined rather than "
+            "1.0. The field alone is not enough -- it would let the guard fire on every "
+            "real substrate with no state in which the run could legitimately proceed."
+        ),
     ),
 }
 

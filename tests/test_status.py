@@ -382,3 +382,136 @@ def test_no_enforced_row_rests_only_on_a_guard_with_no_call_site():
         "ENFORCED rows whose only named enforcement has no call site:\n  "
         + "\n  ".join(vacuous)
     )
+
+
+def test_no_row_claims_enforcement_from_a_guard_with_no_call_site_without_saying_so():
+    """The correction applied to two `ENFORCED` rows had left four others alone.
+
+    `test_no_enforced_row_rests_only_on_a_guard_with_no_call_site` looks at
+    `ENFORCED` rows only, and at whether the row rests *solely* on a pending guard.
+    Underneath it, `FP-02` said `guards.no_cross_model_cwm_avg` "enforces the
+    cross-model prohibition", `FP-19` said `guards.single_family_layer` "enforces
+    the NOT_ESTIMABLE share", `FP-22` listed `guards.four_state_missingness` among
+    the mechanisms of an `ENFORCED` row, and `FP-24` credited
+    `guards.stratum_parity` with the one-rule clause -- all four of guards the
+    registry itself records as never having met an artifact. A reader deciding how
+    much of this table to trust cannot tell those citations from the wired ones.
+
+    So the rule is not about the label: ANY row that cites a pending guard has to
+    say, in the same cell, that it has no call site. Prose is graded by one literal
+    phrase on purpose -- a checkable claim beats a well-phrased one.
+    """
+    import csv
+    import re
+
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    root = _repo_root()
+    tsv = root / "docs" / "constraints.tsv"
+    if not tsv.exists():                       # installed without docs/
+        import pytest
+        pytest.skip("docs/ not present in this installation")
+
+    cited = re.compile(r"\bguards\.([A-Za-z_][A-Za-z0-9_]*)")
+    undisclosed = []
+    for row in csv.DictReader(tsv.open(encoding="utf-8"), delimiter="\t"):
+        pending = sorted({name for name in cited.findall(row["enforced_by"])
+                          if name in GUARDS_AWAITING_INPUT})
+        if pending and "no call site" not in row["enforced_by"].lower():
+            undisclosed.append(f"{row['principle_id']} cites {', '.join(pending)}")
+    assert not undisclosed, (
+        "rows citing a guard that never meets an artifact, without saying so:\n  "
+        + "\n  ".join(undisclosed)
+    )
+
+
+def _prose_units(text: str):
+    """The unit a claim is made in: one table row, or one paragraph.
+
+    A markdown table is a single blank-line-delimited block, so checking blocks
+    would let one honest row excuse every other row in the same table. Rows are
+    therefore split out and the rest is read a paragraph at a time, which is the
+    span a qualifying clause can plausibly reach across.
+    """
+    for block in text.split("\n\n"):
+        rows = [line for line in block.splitlines() if line.lstrip().startswith("|")]
+        if rows:
+            yield from rows
+            yield "\n".join(line for line in block.splitlines() if line not in rows)
+        else:
+            yield block
+
+
+def test_no_shipped_document_cites_a_guard_with_no_call_site_as_a_check():
+    """Six guards, cited as mechanisms in nine places, none of which ran.
+
+    `docs/BIAS_LEDGER.md` listed `guards.estimability_floor` as what handles the
+    estimability-floor bias; `infer/README.md` answered "how to check it" with three
+    guards that check nothing here; `interpret/README.md` said 30 was "the floor
+    `guards.estimability_floor` applies to N", which it applies to nothing. Each
+    sentence is true about the guard and false about this release, and the reader it
+    misleads is the one budgeting how much to trust the tool.
+
+    A citation counts as disclosed if its unit says "no call site" or marks the name
+    with the README's dagger. Both are literal strings on purpose: a claim a test can
+    check is worth more than a claim that reads well. `CHANGELOG.md` is exempt --
+    it records what was true when it was written, and editing it would be a different
+    kind of dishonesty.
+    """
+    import re
+
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    root = _repo_root()
+    if not (root / "docs").exists():           # installed without docs/
+        import pytest
+        pytest.skip("docs/ not present in this installation")
+
+    documents = [root / "README.md", *sorted((root / "docs").glob("*.md")),
+                 *sorted((root / "src" / "motifmultiverse").rglob("README.md"))]
+    assert len(documents) > 5, "the document set collapsed; this test would pass vacuously"
+
+    offenders = []
+    for path in documents:
+        text = path.read_text()
+        for unit in _prose_units(text):
+            named = [name for name in GUARDS_AWAITING_INPUT
+                     if re.search(rf"(?<![\w.]){re.escape(name)}\b", unit)]
+            if not named or "no call site" in unit.lower():
+                continue
+            undaggered = [n for n in named if f"`{n}`†" not in unit]
+            if undaggered:
+                offenders.append(
+                    f"{path.relative_to(root)}: {', '.join(undaggered)} cited as a check "
+                    f"in -- {unit.strip()[:90]}..."
+                )
+    assert not offenders, (
+        "documents citing a guard that has never met an artifact, without saying so:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_readme_marks_exactly_the_guards_that_have_no_call_site():
+    """The guard list is the most-read place where an unwired guard reads as protection.
+
+    Fifteen names in a row, nothing distinguishing the six that have never been
+    handed an artifact. The dagger set is derived from `GUARDS_AWAITING_INPUT` here
+    rather than typed, so wiring a guard without unmarking it -- or marking one that
+    is wired -- fails instead of shipping, and the README cannot drift into
+    flattering the code the way the constraint tally once did.
+    """
+    import re
+
+    from motifmultiverse.guards import ALL_GUARDS, GUARDS_AWAITING_INPUT
+
+    readme = (_repo_root() / "README.md").read_text()
+    marked = set(re.findall(r"`([a-z_]+)`†", readme))
+    assert marked == set(GUARDS_AWAITING_INPUT), (
+        "README daggers disagree with guards.GUARDS_AWAITING_INPUT: "
+        f"only in README={sorted(marked - set(GUARDS_AWAITING_INPUT))}, "
+        f"only in registry={sorted(set(GUARDS_AWAITING_INPUT) - marked)}"
+    )
+    listed = set(re.findall(r"`([a-z_]+)`", readme))
+    assert set(ALL_GUARDS) <= listed, (
+        "README no longer lists every guard: " + ", ".join(sorted(set(ALL_GUARDS) - listed))
+    )

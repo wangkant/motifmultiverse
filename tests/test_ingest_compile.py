@@ -3,16 +3,27 @@
 The round-trip test is behavioural. Asserting that the written HDF5 contains the
 groups we just wrote would prove only that this package can read its own output;
 the question is whether the *hit caller* can, and in which order it hands the
-motifs back. That test needs the finemo backend and skips without it -- a skip
-that must be read as "unverified here", not as "verified".
+motifs back.
+
+It needs the finemo backend, which `pip install -e ".[finemo]"` supplies. Where
+the backend is absent it still skips, and the skip must be read as "unverified
+here", not as "verified" -- `MOTIFMULTIVERSE_REQUIRE_FINEMO=1` turns it into a
+failure for runs that are not allowed to make that trade. The tests asserting the
+*no-backend* path no longer skip at all: they blank the import (see
+`conftest.no_finemo_backend`) rather than waiting for a machine that lacks it,
+because a pair of tests that skip under opposite conditions is a pair that is
+never both verified.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import re
+import sys
 
 import pytest
 
+from conftest import require_finemo_backend
 from motifmultiverse import compile as compile_mod
 from motifmultiverse import guards, ingest
 from motifmultiverse.schema import (
@@ -679,7 +690,7 @@ def test_compile_refuses_a_motif_type_whose_loader_dataset_is_missing(tmp_path):
 # ------------------------------------------------- the real loader, or a skip
 def test_roundtrip_against_the_real_loader(tmp_path):
     """Behavioural, not structural: the hit caller reads it, in this order."""
-    pytest.importorskip("finemo", reason="round-trip needs the finemo backend")
+    require_finemo_backend()
     manifests = compile_mod.compile_lexicons(_registry(tmp_path), tmp_path / "lex",
                                              verify="require")
     names = compile_mod.load_back(tmp_path / "lex" / "core.h5")
@@ -687,19 +698,184 @@ def test_roundtrip_against_the_real_loader(tmp_path):
     assert guards.index_order_matches_loader(manifests["core"].pattern_order, names).passed
 
 
-def test_verify_require_fails_loudly_when_the_backend_is_absent(tmp_path):
-    import importlib.util
-    if importlib.util.find_spec("finemo") is not None:
-        pytest.skip("finemo is installed; this asserts the no-backend path")
+def test_verify_require_fails_loudly_when_the_backend_is_absent(tmp_path, no_finemo_backend):
+    """The absent-backend refusal, verified on a machine that HAS the backend.
+
+    This used to skip wherever finemo was installed, which made it the exact
+    mirror of the skip it was written to compensate for: the round trip was
+    unverified without the backend, the refusal was unverified with it, and no
+    environment ran both. `no_finemo_backend` blanks the import instead, so the
+    two halves are no longer in competition for the same machine.
+    """
     with pytest.raises(compile_mod.BackendMissing, match="finemo"):
         compile_mod.compile_lexicons(_registry(tmp_path), tmp_path / "lex", verify="require")
 
 
-def test_auto_verification_still_writes_but_claims_nothing(tmp_path):
+# --- regression: the loader's argument names are not ours to assume -----------
+# `load_back` passed the loader's settings by keyword inside a `try` that caught
+# only ImportError. finemo 0.40 renamed `trim_threshold` to
+# `trim_threshold_default` and added `trim_coords` / `trim_thresholds`, so on any
+# machine with a current backend every call raised
+#   TypeError: load_modisco_motifs() got an unexpected keyword argument 'trim_threshold'
+# from inside `compile_lexicons`. Because `--verify-roundtrip auto` is the default
+# and only catches BackendMissing, that aborted the compile outright: 31 tests in
+# this suite failed, and no lexicon was written at all. The skip hid it -- nothing
+# in CI had the backend, so nothing ever made the call.
+#
+# These signatures are copied from the two real releases. `_loader_call_kwargs`
+# must bind to whichever one is installed, and refuse -- loudly, by name -- rather
+# than guess when it recognises neither.
+def _loader_signature_0_30(modisco_h5_path, trim_threshold, motif_type, motifs_include,
+                           motif_name_map, motif_lambdas, motif_lambda_default,
+                           include_rc):        # pragma: no cover - inspected, not called
+    ...
+
+
+def _loader_signature_0_41(modisco_h5_path, trim_coords, trim_thresholds,
+                           trim_threshold_default, motif_type, motifs_include,
+                           motif_name_map, motif_lambdas, motif_lambda_default,
+                           include_rc):        # pragma: no cover - inspected, not called
+    ...
+
+
+@pytest.mark.parametrize("loader,threshold_param", [
+    (_loader_signature_0_30, "trim_threshold"),
+    (_loader_signature_0_41, "trim_threshold_default"),
+])
+def test_loader_settings_bind_to_whichever_backend_release_is_installed(loader,
+                                                                       threshold_param):
+    kwargs = compile_mod._loader_call_kwargs(
+        loader, trim_threshold=0.3, motif_type="cwm", include_rc=False,
+        extra={"motif_lambda_default": 0.7})
+    assert kwargs[threshold_param] == 0.3
+    assert kwargs["motif_type"] == "cwm" and kwargs["include_rc"] is False
+    assert kwargs["motif_lambda_default"] == 0.7
+    # The call must be complete: nothing without a default may be left to the
+    # backend, because those are the arguments that change what comes back.
+    import inspect as _inspect
+    required = [name for name, p in _inspect.signature(loader).parameters.items()
+                if p.default is _inspect.Parameter.empty][1:]
+    assert sorted(kwargs) == sorted(required)
+
+
+def test_a_backend_whose_trim_threshold_is_renamed_again_is_refused_not_guessed():
+    """A third spelling must stop the round trip, not be silently dropped.
+
+    Dropping it would let the backend apply its own trimming default while the
+    manifest still recorded ours -- a round trip that passes against a lexicon
+    nobody compiled.
+    """
+    def renamed(modisco_h5_path, trimming_cutoff, motif_type, motifs_include,
+                motif_name_map, motif_lambdas, motif_lambda_default, include_rc):
+        ...  # pragma: no cover - inspected, not called
+
+    with pytest.raises(compile_mod.BackendIncompatible, match="trim"):
+        compile_mod._loader_call_kwargs(renamed, trim_threshold=0.3, motif_type="cwm",
+                                        include_rc=False, extra={})
+
+
+def test_a_backend_requiring_an_argument_this_package_does_not_know_is_refused():
+    def with_a_new_required_knob(modisco_h5_path, trim_threshold_default, motif_type,
+                                 motifs_include, motif_name_map, motif_lambdas,
+                                 motif_lambda_default, include_rc, score_transform):
+        ...  # pragma: no cover - inspected, not called
+
+    with pytest.raises(compile_mod.BackendIncompatible, match="score_transform"):
+        compile_mod._loader_call_kwargs(with_a_new_required_knob, trim_threshold=0.3,
+                                        motif_type="cwm", include_rc=False, extra={})
+
+
+def test_a_manifest_setting_the_backend_no_longer_accepts_is_refused():
+    """`loader_parameters` is manifest content; a backend that dropped one of them
+    cannot reproduce the lexicon's declared configuration."""
+    def without_lambda(modisco_h5_path, trim_threshold_default, motif_type,
+                       motifs_include, motif_name_map, motif_lambdas, include_rc):
+        ...  # pragma: no cover - inspected, not called
+
+    with pytest.raises(compile_mod.BackendIncompatible, match="motif_lambda_default"):
+        compile_mod._loader_call_kwargs(without_lambda, trim_threshold=0.3,
+                                        motif_type="cwm", include_rc=False,
+                                        extra={"motif_lambda_default": 0.7})
+
+
+def _install_fake_backend(monkeypatch, loader):
+    """Put a `finemo.data_io.load_modisco_motifs` on the import path for one test."""
+    import types
+    package = types.ModuleType("finemo")
+    data_io = types.ModuleType("finemo.data_io")
+    data_io.load_modisco_motifs = loader
+    package.data_io = data_io
+    monkeypatch.setitem(sys.modules, "finemo", package)
+    monkeypatch.setitem(sys.modules, "finemo.data_io", data_io)
+
+
+def test_an_uncallable_backend_leaves_auto_writing_and_require_refusing(tmp_path,
+                                                                       monkeypatch):
+    """An installed-but-uncallable backend must behave like an absent one.
+
+    Not like a crash: `auto` promises to verify if it can and carry on if it
+    cannot, and a TypeError escaping from the middle of the compile broke that
+    promise in the worst direction -- the lexicon was not written at all, for a
+    reason whose message never mentioned the backend.
+    """
+    def wrong_signature(modisco_h5_path, trimming_cutoff, motif_type, motifs_include,
+                        motif_name_map, motif_lambdas, motif_lambda_default, include_rc):
+        ...  # pragma: no cover - never reached; the binding refuses first
+
+    _install_fake_backend(monkeypatch, wrong_signature)
+    registry = _registry(tmp_path)
+
+    compile_mod.compile_lexicons(registry, tmp_path / "auto", verify="auto")
+    assert (tmp_path / "auto" / "core.h5").exists()
+
+    with pytest.raises(compile_mod.BackendMissing, match="trim"):
+        compile_mod.compile_lexicons(registry, tmp_path / "require", verify="require")
+
+
+def test_the_declared_finemo_extra_names_the_distribution_that_provides_the_backend():
+    """`pip install -e ".[finemo]"` has to actually install the backend.
+
+    The extra named `finemo-gpu`, which is the GitHub project's name and is not a
+    distribution on PyPI at all -- `pip install finemo-gpu` fails with "No
+    matching distribution found". So the documented way to make the round trip
+    runnable could not be followed, and the test that needed it skipped
+    everywhere, including CI. Read from pyproject rather than trusted, because
+    the failure is invisible to anyone who already has the backend.
+    """
+    import tomllib
+    from importlib.metadata import PackageNotFoundError, distribution
+    from pathlib import Path
+
+    # Only the machines that HAVE the backend can say which distribution supplied
+    # it, so this rides the same gate as the round trip: skipped where the backend
+    # is absent, failed where the run declared it must be present.
+    require_finemo_backend()
+    root = Path(__file__).resolve().parents[1]
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("source tree not present in this installation")
+    declared = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]
+    requirements = declared["finemo"]
+    assert requirements, "the finemo extra installs nothing"
+    names = [re.split(r"[<>=!~\[; ]", req, maxsplit=1)[0] for req in requirements]
+    for name in names:
+        try:
+            distribution(name)
+        except PackageNotFoundError:
+            pytest.fail(
+                f"the finemo extra requires the distribution {name!r}, which is not "
+                f"installed here even though the backend is: declared {requirements}"
+            )
+
+
+def test_auto_verification_still_writes_but_claims_nothing(tmp_path, no_finemo_backend):
     """Without a backend the lexicon is written and simply not verified.
 
     `auto` must neither fail nor pretend: the file exists, and nothing in the
-    manifest asserts a round trip that did not happen.
+    manifest asserts a round trip that did not happen. The backend is blanked
+    rather than assumed absent, so this states the no-backend behaviour on every
+    machine instead of only on the ones that happen to lack finemo -- where it
+    was passing for the wrong reason once the backend became installable.
     """
     manifests = compile_mod.compile_lexicons(_registry(tmp_path), tmp_path / "lex",
                                              verify="auto")
@@ -899,12 +1075,14 @@ def test_lexicon_identity_refuses_a_pattern_that_names_no_variant_id():
 
 
 # --- regression: motif_type is the loader's vocabulary, not ours ---------------
-# `motif_type` is handed verbatim to the backend named by `loader_backend`.
-# finemo's `load_modisco_motifs` dispatches on cwm / hcwm / pfm / pfm_softmax and
-# has no else-branch, so an unknown value leaves its motif locals unbound and
-# raises `UnboundLocalError` from inside the backend. Verified against the real
-# loader (finemo 0.x, python 3.10) on a compiled lexicon:
-#   cwm -> 5 motifs;  ppm -> UnboundLocalError 'motif_norm';  pfm -> 5 motifs.
+# `motif_type` is handed verbatim to the backend named by `loader_backend`, which
+# dispatches on cwm / hcwm / pfm / pfm_softmax. How it rejects anything else has
+# changed across releases -- finemo 0.30 had no else-branch, so an unknown value
+# left its motif locals unbound and raised `UnboundLocalError: motif_norm` from
+# inside the backend; 0.41 raises `ValueError: Invalid motif_type` -- which is
+# the reason `compile` refuses the value itself rather than relying on how the
+# backend happens to complain this year. Verified against both loaders on a
+# compiled lexicon: cwm -> 5 motifs; pfm -> 5 motifs; ppm -> refused.
 def test_compile_refuses_a_motif_type_the_declared_loader_cannot_dispatch(tmp_path):
     registry = _registry(tmp_path)
     with pytest.raises(compile_mod.CompileError, match="motif_type"):

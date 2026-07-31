@@ -10,7 +10,7 @@ The hit caller is not input-scale invariant: the same regions produced different
 
 ## How to check it
 
-`guards.single_scale`, `guards.interaction_required`, `guards.estimability_floor`, `guards.stratum_parity`.
+`guards.single_scale` runs (`interpret.interpret_query` calls it on every query). `guards.interaction_required`, `guards.estimability_floor` and `guards.stratum_parity` have **no call site**: this stage estimates one family's effect against one comparator, so nothing it emits carries an interaction, a stratum, or an N-and-interval-against-a-reference for them to read. `guards.GUARDS_AWAITING_INPUT` records what each is waiting for.
 
 ---
 

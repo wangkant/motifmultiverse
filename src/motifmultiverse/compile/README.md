@@ -26,34 +26,52 @@ analysis_tier`; `guards.variant_id_unique` enforces 1:1 identity;
 loader returns, **by name**; and each manifest's `comparisons` block states whether
 the positive and negative sets differ from every other tier's.
 
-### ⚠ The loader round trip is not covered by CI
+### The loader round trip runs
 
 `tests/test_ingest_compile.py::test_roundtrip_against_the_real_loader` calls the real
-loader — and it **skips** wherever the `finemo` backend is not installed, which
-includes this repository's CI. *A skipped test is unverified, not verified.* Treating
-the two as equivalent is the same error as a guard that can never fail (`FP-25`), and
-that error is what this project exists to avoid, so it is stated here rather than
-left to be inferred from a green check mark.
+loader. It used to **skip** wherever the `finemo` backend was not installed, which
+included this repository's CI — and it skipped there for a reason nobody had checked:
+the `finemo` extra named the distribution `finemo-gpu`, which does not exist on PyPI
+(`pip install finemo-gpu` → *No matching distribution found*). The documented way to
+make the test runnable could not be run. The distribution is `finemo`; the extra now
+says so, and `test_the_declared_finemo_extra_names_the_distribution_that_provides_the_backend`
+holds it to that.
 
-What has been verified, manually, on a **real** ChromBPNet TF-MoDISco output
-(22 positive + 11 negative patterns), outside CI:
+**What the skip was hiding.** Installing the backend turned 31 tests red. finemo 0.40
+renamed the loader's `trim_threshold` argument to `trim_threshold_default` and added
+`trim_coords` / `trim_thresholds`; `load_back` passed its arguments by keyword inside
+a `try` that caught only `ImportError`, so every call raised `TypeError: unexpected
+keyword argument 'trim_threshold'` — and because `--verify-roundtrip auto` is the
+default and catches only `BackendMissing`, that aborted the compile outright and no
+lexicon was written at all. `_loader_call_kwargs` now binds this package's settings to
+the *installed* signature, and refuses with `BackendIncompatible` (a `BackendMissing`
+subclass, so `auto` writes and claims nothing while `require` fails) rather than
+guessing when it recognises neither spelling.
+
+**Verified on a real lexicon**, compiled by `ingest` + `compile` from the ChromBPNet
+TF-MoDISco outputs for two AG-2048 islands (`promoter_cl5`: 16 pos + 6 neg;
+`distal_cl8`: 4 pos + 3 neg) and read back through `compile.load_back`:
 
 ```
-loader returned 33 motifs; cwms (33, 4, 50); trim_masks (33, 50)
+ingested 29 nodes from 2 real modisco.h5 files
+compiled core: 29 patterns, hash 31833bc41a8c, motif_type=cwm, trim_threshold=0.3
+loader returned 29 motifs; cwms (29, 4, 50); trim_masks (29, 50)
 manifest == loader order: True
 9..11 : ['pos_patterns.pattern_9', 'pos_patterns.pattern_10', 'pos_patterns.pattern_11']
+index sorted lexicographically matches the loader:          False
+index sorted by metacluster ascending matches the loader:   False
 ```
 
-The middle line is the claim; the third shows it holding across the 9 → 10 boundary,
-where a lexicographic sort and the loader's numeric one diverge.
+The third line is the claim. The fourth shows it holding across the 9 → 10 boundary,
+and the last two are what make it a claim at all: on this lexicon both of the orders
+one would naturally write instead are wrong, so a passing round trip here is
+discriminating rather than vacuous.
 
-**Two things that run were not the same two things.** The verifying environment has
-`finemo` but runs Python 3.10, and this package requires 3.11 (`StrEnum`), so the
-loader was called **directly on the compiled HDF5** rather than through
-`compile.load_back`. So: *the artifact is proven loader-compatible and its order
-matches the manifest; the ten-line `load_back` wrapper has never been executed.*
-Those are different statements and merging them into "the round trip passes" would be
-the writing-a-rule-down-is-not-executing-it failure in miniature.
+Both loader generations were exercised on that same file: finemo **0.41** (PyPI,
+Python 3.13) through `compile.load_back`, and finemo **0.30** (`envs/chrombpnet_local`,
+Python 3.10 — this package needs 3.11, so the loader was called directly there with
+the arguments `_loader_call_kwargs` binds for the 0.30 signature). Both returned the
+same 29 names in the manifest's order.
 
 ---
 
@@ -87,10 +105,13 @@ loader's rule yields our order, and the manifest carries **both** the new
 compares by name. Asserting that the file contains the groups we just wrote would
 prove only that this package can read its own output.
 
-The loader lives in the `finemo` backend, which is an optional dependency. Without
-it, `auto` writes the lexicon and says plainly that no round trip was performed;
+The loader lives in the `finemo` backend, which is an optional dependency
+(`pip install -e ".[finemo]"`). Without it — or with a release whose loader this
+package cannot call, which is the same thing from the artifact's point of view —
+`auto` writes the lexicon and says plainly that no round trip was performed;
 `require` fails instead; `skip` never tries. A skipped verification means
-**unverified**, not verified.
+**unverified**, not verified. Set `MOTIFMULTIVERSE_REQUIRE_FINEMO=1` in any run that
+must not be allowed to skip it.
 
 One compatibility constraint falls out of reading that loader: it stacks every motif
 into a single array, so a lexicon whose patterns differ in length cannot be read back
