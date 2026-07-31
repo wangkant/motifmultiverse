@@ -26,7 +26,7 @@ Two different things can be missing, and they wait on different work:
 
 | state | what it is waiting for |
 |---|---|
-| unimplemented (`report`) | **implementation** — the rule and its check are written |
+| unimplemented (the specification *multiverse*, `docs/ROADMAP.md` M4) | **implementation** — the rule and its check are written |
 | never specified (family assignment inside `annotate`) | **design** — what a family assignment must satisfy has not been decided, so there is nothing to implement yet |
 
 > The per-module status is derived, not typed: `motifmultiverse --help` and

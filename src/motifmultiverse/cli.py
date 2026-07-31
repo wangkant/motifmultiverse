@@ -47,6 +47,7 @@ from motifmultiverse.interpret import (
     InterpretError,
 )
 from motifmultiverse.provenance import ProvenanceError, record
+from motifmultiverse.report import ReportError
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
     Decision,
@@ -82,7 +83,10 @@ def _status_epilog() -> str:
         tail = (f"{'; '.join(skeleton)} raise{'s' if len(skeleton) == 1 else ''} "
                 "NotImplementedError and exit 3")
     else:
-        tail = "every subcommand is implemented"
+        # Reachable since `report` landed. "every subcommand is implemented"
+        # restated the head of the sentence; what a reader needs from the empty
+        # case is the consequence -- that exit 3 is not a thing that happens now.
+        tail = "nothing is a skeleton and no subcommand exits 3"
     return (f"pre-alpha: {', '.join(done)} are implemented; {tail}. "
             "Exit 4 means the tool refused to produce a number. See docs/ROADMAP.md")
 
@@ -311,12 +315,34 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--out", default="inference/", help="output directory")
     a.set_defaults(func=_run_infer)
 
-    a = sub.add_parser("report", help="render the audit report")
-    a.add_argument("project", help="project directory")
-    a.add_argument("--html", action="store_true", help="render HTML")
-    a.add_argument("--docx", action="store_true", help="render DOCX")
+    a = sub.add_parser(
+        "report", help="render the audit report",
+        description=(
+            "Render one markdown audit report from the artifacts a stage actually "
+            "wrote: the interpretation.json in the given directory and the "
+            "provenance.json log beside it, plus the bias ledger. Every number is a "
+            "recorded field printed beside the denominator the stage recorded and "
+            "named; nothing here recomputes a number another stage already recorded, "
+            "and no absent field gets a default. Markdown is the only rendering form "
+            "in this release: --html and --docx refuse rather than emitting markdown "
+            "under another name."
+        ),
+    )
+    a.add_argument("interpretation",
+                   help="directory holding interpretation.json and the provenance.json "
+                        "log beside it, as written by `interpret --out` / `infer --out`")
+    a.add_argument("--bias-ledger", default="docs/bias_ledger.tsv",
+                   help="the bias ledger to render (default: docs/bias_ledger.tsv). The "
+                        "TSV is authoritative where docs/BIAS_LEDGER.md's English gloss "
+                        "differs from it")
+    a.add_argument("--html", action="store_true",
+                   help="NOT IMPLEMENTED: refuses (exit 4). Rendering markdown while the "
+                        "caller asked for HTML is the specified-versus-ran gap this "
+                        "package exists to close")
+    a.add_argument("--docx", action="store_true",
+                   help="NOT IMPLEMENTED: refuses (exit 4), for the same reason as --html")
     a.add_argument("--out", default="report/", help="output directory")
-    a.set_defaults(func=lambda ns: _run("report", ns))
+    a.set_defaults(func=_run_report)
 
     a = sub.add_parser(
         "interpret",
@@ -794,6 +820,52 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     return 0
 
 
+def _run_report(ns: argparse.Namespace) -> int:
+    """Render the audit report from what a stage recorded, and nothing else.
+
+    Same shape as `_run_interpret`: the provenance record is written before
+    anything is rendered, so a refused run still says what was asked for. It is
+    written before the `--html` / `--docx` refusal too -- T-09 is "every
+    subcommand records", not "every subcommand that gets as far as producing
+    something".
+
+    Only the inputs that exist are checksummed. A record naming a checksum for an
+    absent file would be a fabricated fact about the run, and the renderer's own
+    refusal names the missing file better than a synthesised digest could.
+    """
+    from motifmultiverse import report as report_mod
+
+    src = Path(ns.interpretation)
+    rec = record("report")
+    # Keyed by the ROLE each file played, as `interpret` and `infer` key theirs:
+    # `interpretation.json` and `provenance.json` are fixed basenames that several
+    # directories legitimately share.
+    for role, path in (("interpretation", src / "interpretation.json"),
+                       ("provenance", src / "provenance.json"),
+                       ("bias_ledger", Path(ns.bias_ledger))):
+        if path.is_file():
+            rec.add_input(path, key=f"{role}:{path.name}")
+    rec.write(ns.out)
+
+    requested = [flag for flag, enabled in (("--html", ns.html), ("--docx", ns.docx)) if enabled]
+    if requested:
+        # The precedent is `_run_validate` refusing `--fimo-heldout`: a flag that
+        # names an output this release cannot produce is refused, not silently
+        # downgraded to the one it can. Emitting markdown for a caller who asked
+        # for HTML is exactly the gap between what was specified and what ran.
+        raise ReportError(
+            f"{', '.join(requested)} is not a rendering backend in this release; refusing "
+            "a semantic no-op. This renderer emits markdown only."
+        )
+
+    dest = report_mod.run(src, ns.out, bias_ledger=ns.bias_ledger)
+    print(f"report: rendered from {src / 'interpretation.json'} "
+          f"and the provenance log beside it")
+    print(f"  bias ledger: {ns.bias_ledger}")
+    print(f"written: {dest}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     ns = parser.parse_args(argv)
@@ -810,7 +882,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except (GuardError, InterpretError, InferError, IngestError, CompileError,
             BackendMissing, SchemaError, AlignmentError, AnnotationError,
-            ProvenanceError) as exc:
+            ProvenanceError, ReportError) as exc:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.
         print(f"motifmultiverse: refused: {exc}", file=sys.stderr)

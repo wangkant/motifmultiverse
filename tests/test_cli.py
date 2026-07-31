@@ -16,7 +16,7 @@ from motifmultiverse.validate import (
 SUBCOMMANDS = ["ingest", "align", "annotate", "adjudicate",
                "compile", "validate", "infer", "report"]
 IMPLEMENTED = ["ingest", "compile", "interpret", "align", "annotate", "adjudicate",
-               "validate", "infer"]
+               "validate", "infer", "report"]
 
 
 def test_version_flag():
@@ -48,13 +48,44 @@ def test_all_eight_subcommands_are_registered():
     assert set(SUBCOMMANDS).issubset(registered)
 
 
-@pytest.mark.parametrize("argv", [
-    # `report` is the LAST subcommand with a skeleton body. `infer` left this
-    # list in Task 18, which wired it to the Task 15-17 estimators.
-    ["report", "project/"],
-])
-def test_unimplemented_bodies_exit_3_and_name_their_readme(argv, capsys, tmp_path):
-    rc = main(argv + ["--out", str(tmp_path / "o")])
+def test_no_subcommand_body_is_a_skeleton_any_more():
+    """`report` was the last skeleton body; nothing in this release exits 3.
+
+    This used to be a parametrized list of skeleton argv lines, and the list went
+    stale twice (`align`/`annotate`, then `infer`). It is derived from the
+    dispatch table now, so it cannot go stale in either direction: a module that
+    regressed to a skeleton would fail here, and one that was implemented without
+    this test being touched would not need touching.
+    """
+    from motifmultiverse.status import MODULES, module_status
+
+    skeletons = [name for name in MODULES if module_status(name)["status"] == "SKELETON"]
+    assert skeletons == []
+
+
+def test_a_skeleton_body_would_still_exit_3_and_name_its_readme(monkeypatch, capsys, tmp_path):
+    """The exit-3 machinery is kept rather than deleted with the last skeleton.
+
+    Asserting only that nothing is a skeleton would leave `_not_implemented` and
+    the exit-3 branch of `main` unexercised -- a mechanism nobody runs is a
+    mechanism nobody knows still works, and `docs/ROADMAP.md` has unimplemented
+    milestones left. So one subcommand is pushed back to the skeleton dispatcher
+    here and the whole path is walked: NotImplementedError, exit 3, and a message
+    naming the README that specifies the module.
+    """
+    from motifmultiverse import cli
+
+    real_build_parser = cli.build_parser
+
+    def stubbed():
+        parser = real_build_parser()
+        for action in parser._actions:
+            if getattr(action, "choices", None) and "report" in action.choices:
+                action.choices["report"].set_defaults(func=lambda ns: cli._run("report", ns))
+        return parser
+
+    monkeypatch.setattr(cli, "build_parser", stubbed)
+    rc = main(["report", "project/", "--out", str(tmp_path / "o")])
     assert rc == 3
     err = capsys.readouterr().err
     assert "src/motifmultiverse/" in err and "README.md" in err
@@ -248,16 +279,21 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
     assert not refused_out.exists()
 
 
-def test_provenance_is_written_even_though_body_is_unimplemented(tmp_path):
+def test_provenance_is_written_before_the_body_runs_and_survives_a_refusal(tmp_path):
     # "align" and "annotate" no longer belong here (Tasks 10 and 11 implement
-    # them for real); Task 12 implements adjudicate, so report is the remaining
-    # genuine skeleton exercised here. It has no --seed flag
-    # (only ingest/compile/interpret/align ever exposed one), so the recorded
-    # random_seed is the untouched default (None) rather than a value threaded
-    # in from the CLI -- the property under test is that the record exists
-    # at all before the body raises, not what value a particular field holds.
+    # them for real); Task 12 implements adjudicate, and `report` is implemented
+    # too, so what is exercised here is no longer a skeleton -- it is the same
+    # T-09 property one step further on: the record is on disk before anything is
+    # rendered, and a refusal does not take it back. `--html` is chosen because
+    # the CLI itself owns that refusal (this release renders markdown only), so
+    # the record under test does not depend on what the input directory holds.
+    # `report` has no --seed flag (only ingest/compile/interpret/align/infer ever
+    # exposed one), so the recorded random_seed is the untouched default (None)
+    # rather than a value threaded in from the CLI -- the property under test is
+    # that the record exists at all before the body runs, not what value a
+    # particular field holds.
     out = tmp_path / "o"
-    assert main(["report", "project/", "--out", str(out)]) == 3
+    assert main(["report", "project/", "--out", str(out), "--html"]) == 4
     recs = json.loads((out / "provenance.json").read_text())
     assert len(recs) == 1
     r = recs[0]
@@ -286,10 +322,29 @@ def test_cli_threads_the_seed_into_the_provenance_record(tmp_path):
     assert recs[0]["random_seed"] == 7
 
 
+def test_report_refuses_html_and_docx_rather_than_rendering_markdown_instead(tmp_path, capsys):
+    """A flag naming an output this release cannot produce is refused, not downgraded.
+
+    Same precedent as `_run_validate` refusing `--fimo-heldout`: emitting markdown
+    for a caller who asked for HTML is the gap between what was specified and what
+    ran, which is the gap this package exists to close. Exit 4, and the message
+    names the flag.
+    """
+    out = tmp_path / "o"
+    assert main(["report", "project/", "--out", str(out), "--docx"]) == 4
+    err = capsys.readouterr().err
+    assert "refused" in err and "--docx" in err
+
+
 def test_provenance_appends_rather_than_overwrites(tmp_path):
+    # Both runs are ones whose record the CLI writes before it does anything
+    # else: `align` before it opens the registry, `report` before it renders and
+    # before it refuses `--html`. The subject is the append, so neither run needs
+    # to succeed -- but the second must not depend on how the renderer treats a
+    # directory that holds no interpretation.
     out = tmp_path / "o"
     main(["align", "registry/", "--out", str(out)])
-    main(["report", "project/", "--out", str(out)])
+    main(["report", "project/", "--out", str(out), "--html"])
     assert len(json.loads((out / "provenance.json").read_text())) == 2
 
 

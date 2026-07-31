@@ -18,10 +18,12 @@ def test_module_status_is_derived_from_the_cli_not_from_a_list():
     """A module counts as implemented iff its subcommand dispatches to a runner."""
     built = status_mod.build_status()["modules"]
     assert set(built) == set(status_mod.MODULES)
-    assert built["report"]["status"] == "SKELETON"
-    assert "README.md" in built["report"]["detail"]
+    # `report` was the last SKELETON here; it is asserted by name rather than
+    # only inside the loop below because the loop would keep passing if the
+    # module vanished from MODULES entirely.
+    assert built["report"] == {"status": "IMPLEMENTED", "detail": "cli._run_report"}
     for name in ("ingest", "align", "annotate", "adjudicate", "compile",
-                 "validate", "infer", "interpret"):
+                 "validate", "infer", "interpret", "report"):
         assert built[name]["status"] == "IMPLEMENTED", name
         assert built[name]["detail"].startswith("cli._run_")
 
@@ -150,7 +152,7 @@ def test_the_generator_writes_a_parseable_document(tmp_path, capsys):
         "note": ("skipped tests are UNVERIFIED and are not included in `passed`; "
                  "5 verified, 1 unverified, 0 failing"),
     }
-    assert blob["modules"]["report"]["status"] == "SKELETON"
+    assert blob["modules"]["report"]["status"] == "IMPLEMENTED"
     assert "written:" in capsys.readouterr().out
 
 

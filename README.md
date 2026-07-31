@@ -7,8 +7,11 @@ motifs across models and methods.**
 ![version: 0.1.0.dev0](https://img.shields.io/badge/version-0.1.0.dev0-blue)
 ![API: unstable](https://img.shields.io/badge/API-unstable-red)
 
-> **This is still pre-alpha.** Eight of the nine analysis modules are
-> implemented; `report` still raises `NotImplementedError`. What else runs today
+> **This is still pre-alpha.** All nine analysis modules are implemented — `report`
+> was the last skeleton — and no subcommand raises `NotImplementedError` any more.
+> Implemented is not the same as complete: `infer` estimates one specification
+> rather than a multiverse, and `report` renders markdown only and prints
+> `NOT RECORDED` for the fields no artifact carries. What else runs today
 > is the schema, the guards, the provenance recorder, the CLI and the test suite.
 > The per-module table below is **generated from the CLI dispatch table** rather
 > than maintained by hand — it was wrong twice before it was generated. See
@@ -98,7 +101,7 @@ about the code rather than an opinion about it:
 | `compile` | IMPLEMENTED |
 | `validate` | IMPLEMENTED |
 | `infer` | IMPLEMENTED |
-| `report` | SKELETON |
+| `report` | IMPLEMENTED |
 | `interpret` | IMPLEMENTED |
 
 Optional-backend verification and the three test counts (passed / skipped /
@@ -137,9 +140,14 @@ motifmultiverse validate lexicons/ --before-hits before.parquet --after-hits aft
     --validation-artifact validation-split.json --out validation/
 
 # and a query over a frozen hit table:
-motifmultiverse interpret hits.tsv \
+motifmultiverse interpret hits.tsv --out interpretation/ \
     --peaks island_5.txt --comparator gc_matched.txt --comparator-id gc_matched \
     --selection-provenance CLUSTERED_WITH_SPLIT --held-out heldout.txt
+
+# render that interpretation and its provenance log as one markdown audit report.
+# Markdown is the only form: --html and --docx refuse (exit 4) rather than emitting
+# markdown under another name.
+motifmultiverse report interpretation/ --out report/
 
 ruff check src tests
 pytest
@@ -159,7 +167,7 @@ proves on a real TF-MoDISco lexicon, and for the incompatibility the skip was hi
 |---|---|
 | `0` | success |
 | `2` | usage error, or a named input does not exist |
-| `3` | the module is a skeleton; the message names its README |
+| `3` | the module is a skeleton; the message names its README — **no module in this release exits `3`**, and the code path is kept (and tested) against a future one |
 | `4` | **refusal** — the tool declined to produce a number, and the message says which rule declined it |
 
 `4` is part of the behaviour contract, not an implementation detail. A refusal is a
@@ -197,10 +205,24 @@ caveat next to an effect size does not travel; the effect size does.
 Undeclared provenance is a recorded state (`DECLARATION_MISSING`) that costs the
 query its inference. It never resolves to the permissive grade.
 
-**What does not run:** `report`, and the specification *multiverse* inside
+**`report`** renders one markdown audit report from what a stage recorded — an
+`interpretation.json` and the `provenance.json` log beside it — plus
+`docs/bias_ledger.tsv`. Every number printed is the recorded field itself, beside the
+denominator the stage recorded and *named* (`n_submitted = 8277`); nothing is
+recomputed here, because a renderer that recomputes is a second implementation of the
+statistics that can disagree with the first. Nothing absent is defaulted: a withheld
+*p* value prints as `WITHHELD — inference_capability = ESTIMATION_ONLY` rather than
+blank, and a field no artifact carries — `baseline_population`, the lexicon *content*
+hash, `selection_rule`, every guard outcome — prints as `NOT RECORDED` in a mandatory
+*What this report does not know* section that names the field that would have said it.
+This is the module whose founding failure was a bootstrap resolution floor printed as
+though it were a measured *p* value.
+
+**What does not run:** the specification *multiverse* inside
 `infer` — `infer` estimates ONE specification with the `FP-15` estimators and says
 so; sweeping specification axes and reporting the dropped cells with reasons is
-still M4. The implemented middle path persists
+still M4. `report` renders markdown only: `--html` and `--docx` refuse. The
+implemented middle path persists
 alignment evidence, retains competing annotation candidates, records
 collapse/refusal/deferred adjudications, and validates a merge on the affected
 subset of frozen standardized hit tables. An all-peak delta remains only a dilution

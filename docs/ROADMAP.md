@@ -91,6 +91,35 @@ change ✓ — which is why the enumeration shipped before the implementation.
 separate decision with its own changelog entry, not a side effect of the
 implementation landing.
 
+### M4b — the report that renders these claims — **renderer done; the fields are not**
+
+`report` is implemented (`src/motifmultiverse/report/`), and it was the last skeleton
+body in the package. It renders one markdown document from an `interpretation.json`,
+the `provenance.json` log beside it and `docs/bias_ledger.tsv`: every number is the
+recorded field printed beside the denominator the producing stage recorded and named,
+nothing is recomputed, and the bias ledger is rendered from the TSV the module's rule
+names.
+
+What it does **not** close is the rest of M4's *done when*. "Every claim states its
+baseline population and lexicon version" is a claim about the *artifacts*, and they do
+not yet carry it:
+
+- no record at any nesting level carries `baseline_population`;
+- `lexicon_id` is a declared string travelling on the hit rows, not
+  `LexiconManifest.lexicon_content_hash` — which is the thing `FP-11` requires a
+  family-level number to cite — and no field on `interpret.Interpretation` joins the
+  result to a compile manifest;
+- `selection_rule` and `selection_feature_names` are fields of `schema.PeakSetQuery`
+  and are not emitted on `interpret.Interpretation`, so the executable rule that
+  `PROGRAMMATIC_RULE` asserts, and the features that decide `SUBSTRATE_CIRCULAR`
+  against `INTERNAL_DECOMPOSITION`, cannot be read back off a result;
+- nothing in this package persists a `guards.GuardResult`, so no artifact records that
+  a guard ran, let alone that it passed.
+
+The report prints each of these as `NOT RECORDED` and names the field that would have
+said it. *Done when:* the producing stages carry those fields — **not** when the
+renderer stops mentioning them.
+
 ## M5 — cross-project generalisation and public release
 
 *Done when:* the tool runs on a **second dataset** that shares no code path with
