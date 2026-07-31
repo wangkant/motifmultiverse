@@ -505,11 +505,7 @@ def _run_infer(ns: argparse.Namespace) -> int:
 
     if ns.substrate_manifest:
         manifest = read_manifest(ns.substrate_manifest)
-        if hits[0].substrate_id != manifest.substrate_id:
-            raise InterpretError(
-                "hit table substrate_id does not match --substrate-manifest; "
-                "refusing to infer over a different frozen caller run"
-            )
+        interpret_mod.verify_against_manifest(hits, manifest, "infer")
     query = PeakSetQuery(
         query_id=ns.query_id,
         region_ids=interpret_mod.read_peak_set(ns.peaks),
@@ -581,11 +577,7 @@ def _run_interpret(ns: argparse.Namespace) -> int:
 
     if ns.substrate_manifest:
         manifest = read_manifest(ns.substrate_manifest)
-        if substrate_id != manifest.substrate_id:
-            raise InterpretError(
-                "hit table substrate_id does not match --substrate-manifest; "
-                "refusing to interpret a different frozen caller run"
-            )
+        interpret_mod.verify_against_manifest(hits, manifest, "interpret")
     query = PeakSetQuery(
         query_id=ns.query_id,
         region_ids=interpret_mod.read_peak_set(ns.peaks),

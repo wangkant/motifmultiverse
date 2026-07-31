@@ -184,6 +184,37 @@ def _require_hit_table_columns(present: list[str], path: Path) -> None:
         )
 
 
+def verify_against_manifest(hits: Sequence[HitRecord], manifest: Any, action: str) -> None:
+    """Refuse a hit table that is not the whole frozen run its manifest describes.
+
+    Checking ``substrate_id`` alone is not enough. The id travels with the rows, so
+    a *truncated* table keeps it: drop regions and the table still claims to be the
+    frozen run. Nothing downstream can notice, because every coverage figure is a
+    fraction of the universe that was handed in -- shrink the universe and a query
+    that the run never covered reports ``intersection_coverage = 1.0``. The manifest
+    is the only independent statement of how large the run actually was, so it has
+    to be compared against, not merely matched on identity.
+
+    ``action`` is the caller's own verb, so the two call sites cannot drift into
+    each other's message -- which is exactly what had happened: ``interpret`` said
+    "refusing to infer" and ``infer`` said "refusing to interpret".
+    """
+    if hits[0].substrate_id != manifest.substrate_id:
+        raise InterpretError(
+            "hit table substrate_id does not match --substrate-manifest; "
+            f"refusing to {action} over a different frozen caller run"
+        )
+    n_regions = len({h.region_id for h in hits})
+    if n_regions != manifest.n_regions:
+        raise InterpretError(
+            f"hit table covers {n_regions} regions but --substrate-manifest declares "
+            f"{manifest.n_regions}. A truncated substrate keeps its substrate_id and "
+            "silently shrinks the universe, so every peak set looks fully present and "
+            f"intersection_coverage reports 1.0 for regions the run never covered. "
+            f"Refusing to {action} over a partial substrate."
+        )
+
+
 def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:
     """Read a frozen hit table (``.tsv``/``.txt`` or ``.parquet``).
 

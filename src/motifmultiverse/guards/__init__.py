@@ -23,6 +23,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from motifmultiverse.schema import Missingness
+
 __all__ = [
     "GuardResult", "GuardError", "ALL_GUARDS", "run_all",
     "single_scale", "variant_id_unique", "no_key_parsing", "four_state_missingness",
@@ -139,7 +141,7 @@ def four_state_missingness(
     claimed_coverage: float,
     claimed_defined: int,
     claimed_total: int,
-    value_key: str = "statistic",
+    value_key: str,
     state_key: str = "missingness",
 ) -> GuardResult:
     """The claimed coverage/defined/total are checked, never trusted.
@@ -159,6 +161,33 @@ def four_state_missingness(
     missing_state = [i for i, r in enumerate(rows) if state_key not in r]
     if missing_state:
         return _fail(gid, f"{len(missing_state)} rows carry no missingness state")
+    # The guard is named for four states, so it has to check that there are four.
+    # It used to accept any string in the state column: a row reading
+    # `missingness: "banana"` counted as not-used and passed, which makes the
+    # recomputation below agree with a claim derived from the same nonsense.
+    legal = {m.value for m in Missingness}
+    illegal = sorted({str(r.get(state_key)) for r in rows} - legal)
+    if illegal:
+        return _fail(
+            gid,
+            f"missingness values outside the four states: {illegal[:5]} "
+            f"(legal: {sorted(legal)})",
+        )
+    # The zero-collapse check is supplementary -- see the docstring -- but it must
+    # actually run. `value_key` used to default to "statistic", which is the name
+    # this module's own test fixtures use and not a column any artifact in this
+    # project has: on real hit rows `.get` returned None, `None == 0` was False,
+    # and the check silently passed on everything. The default agreed with the
+    # tests instead of with the data, so the tests could not notice. It is now
+    # required -- the guard cannot guess which column holds the value that a fill
+    # could have written into -- and a column absent from every row fails rather
+    # than passes, because a guard that no-ops certifies rather than checks.
+    if value_key not in {k for r in rows for k in r}:
+        return _fail(
+            gid,
+            f"no row carries the value column {value_key!r}; pass value_key= naming "
+            "the column whose undefined entries could have been filled",
+        )
     bad = [i for i, r in enumerate(rows)
            if r.get(state_key) != "used" and r.get(value_key) == 0]
     if bad:

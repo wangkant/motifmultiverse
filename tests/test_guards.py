@@ -122,7 +122,7 @@ def test_four_state_missingness_passes():
     rows = [{"statistic": 1.0, "missingness": "used"},
             {"statistic": None, "missingness": "not_searched"}]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2)
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2, value_key="statistic")
     assert result.passed
 
 
@@ -130,13 +130,13 @@ def test_four_state_missingness_FALSIFIED_by_zero_collapse():
     rows = [{"statistic": 1.0, "missingness": "used"},
             {"statistic": 0, "missingness": "no_sequence_match"}]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2)
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2, value_key="statistic")
     assert not result.passed
 
 
 def test_four_state_missingness_FALSIFIED_by_absent_state():
     result = guards.four_state_missingness(
-        [{"statistic": 1.0}], claimed_coverage=1.0, claimed_defined=1, claimed_total=1)
+        [{"statistic": 1.0}], claimed_coverage=1.0, claimed_defined=1, claimed_total=1, value_key="statistic")
     assert not result.passed
 
 
@@ -154,7 +154,7 @@ def test_four_state_guard_rejects_coverage_computed_after_fill():
         {"missingness": "not_searched", "statistic": None},
     ]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=1.0, claimed_defined=2, claimed_total=2)
+        rows, claimed_coverage=1.0, claimed_defined=2, claimed_total=2, value_key="statistic")
     assert not result.passed
     assert "claimed coverage" in result.detail
 
@@ -163,7 +163,7 @@ def test_four_state_missingness_FALSIFIED_by_wrong_claimed_total():
     rows = [{"statistic": 1.0, "missingness": "used"},
             {"statistic": None, "missingness": "not_searched"}]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=3)
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=3, value_key="statistic")
     assert not result.passed
     assert "claimed coverage" in result.detail
 
@@ -181,7 +181,7 @@ def test_four_state_missingness_accepts_a_coverage_rounded_for_display():
             {"statistic": 1.0, "missingness": "used"},
             {"statistic": None, "missingness": "no_sequence_match"}]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=0.6667, claimed_defined=2, claimed_total=3)
+        rows, claimed_coverage=0.6667, claimed_defined=2, claimed_total=3, value_key="statistic")
     assert result.passed
 
 
@@ -197,7 +197,7 @@ def test_four_state_missingness_still_rejects_a_mismatch_beyond_rounding():
             {"statistic": 1.0, "missingness": "used"},
             {"statistic": None, "missingness": "no_sequence_match"}]
     result = guards.four_state_missingness(
-        rows, claimed_coverage=0.67, claimed_defined=2, claimed_total=3)
+        rows, claimed_coverage=0.67, claimed_defined=2, claimed_total=3, value_key="statistic")
     assert not result.passed
     assert "claimed coverage" in result.detail
 
@@ -610,3 +610,47 @@ def test_guards_is_a_package_and_no_shadowing_module_exists():
         "a sibling guards.py alongside the guards/ package makes which module is "
         "imported depend on path order; only one of the two may ever exist"
     )
+
+
+# --- the guard named for four states must check that there are four -----------
+def test_four_state_missingness_rejects_a_state_outside_the_four():
+    """`missingness: "banana"` used to count as not-used and pass.
+
+    A recomputation that agrees with a claim derived from the same nonsense is
+    self-corroborating, which is the failure mode this whole module exists for.
+    """
+    rows = [{"statistic": 1.0, "missingness": "used"},
+            {"statistic": None, "missingness": "banana"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2,
+        value_key="statistic")
+    assert not result.passed
+    assert "outside the four states" in result.detail
+
+
+def test_four_state_missingness_fails_when_the_value_column_is_absent():
+    """A guard that no-ops on its own project's data certifies rather than checks.
+
+    `value_key` defaulted to "statistic" -- the name used by this file's fixtures,
+    not by any artifact the project produces. On real hit rows (`hit_coefficient`)
+    `.get` returned None, `None == 0` was False, and the zero-collapse check passed
+    on everything. It is now required, and a column no row carries fails.
+    """
+    rows = [{"hit_coefficient": 1.0, "missingness": "used"},
+            {"hit_coefficient": None, "missingness": "not_searched"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2,
+        value_key="statistic")
+    assert not result.passed
+    assert "no row carries the value column" in result.detail
+
+
+def test_four_state_missingness_catches_a_fill_on_the_real_column_name():
+    """The check the default was silently skipping, on the project's own column."""
+    rows = [{"hit_coefficient": 1.0, "missingness": "used"},
+            {"hit_coefficient": 0, "missingness": "no_sequence_match"}]
+    result = guards.four_state_missingness(
+        rows, claimed_coverage=0.5, claimed_defined=1, claimed_total=2,
+        value_key="hit_coefficient")
+    assert not result.passed
+    assert "collapsed to 0" in result.detail

@@ -784,3 +784,50 @@ def test_infer_refuses_a_table_that_does_not_match_the_substrate_manifest(tmp_pa
     assert rc == 4
     assert "does not match --substrate-manifest" in capsys.readouterr().err
     assert not (out / "effect_estimates.tsv").exists()
+
+
+def test_interpret_refuses_a_substrate_truncated_below_its_manifest(tmp_path, capsys):
+    """substrate_id proves the table's origin, never its completeness.
+
+    The id is a column: truncate the run's rows and the survivors still carry it,
+    so an id-only check passes. Every coverage figure is then a fraction of the
+    universe that was handed in -- shrink the universe and a query the run never
+    covered reports intersection_coverage = 1.0, which is the tool's own founding
+    failure wearing a different hat.
+    """
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+
+    # 6 blocks x 2 peaks = 12 regions; the manifest declares that whole run.
+    hits, q, c = _tiny_substrate(tmp_path, n_blocks=6)
+    manifest = build_manifest(
+        peak_universe_hash="c" * 64,
+        n_regions=12,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.3.1", lexicon_content_hash="a" * 64,
+            parameters={"lambda": 0.7}, preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.tsv": "d" * 64}, created_at="2026-07-25T00:00:00Z",
+    )
+    manifest_path = write_manifest(manifest, tmp_path / "substrate.manifest.json")
+
+    # Re-issue the same run with the rows carrying the manifest's own id, then
+    # truncate it to 5 of the 6 blocks. Nothing about the rows says they are partial.
+    (tmp_path / "full").mkdir(exist_ok=True)
+    full, q2, c2 = _tiny_substrate(tmp_path / "full", n_blocks=6,
+                                   substrate_id=manifest.substrate_id)
+    kept = full.read_text().splitlines()
+    header, body = kept[0], [ln for ln in kept[1:] if not ln.startswith("r5_")]
+    truncated = tmp_path / "truncated.tsv"
+    truncated.write_text("\n".join([header, *body]) + "\n")
+
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(truncated), "--substrate-manifest", str(manifest_path),
+        "--peaks", str(q2), "--comparator", str(c2), "--comparator-id", "odd",
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        "--floor-blocks", "5", "--floor-coverage", "0.5", "--floor-explained", "0.5",
+    ]) == 4
+    err = capsys.readouterr().err
+    assert "10 regions" in err and "declares 12" in err
+    assert not (out / "interpretation.json").exists()
