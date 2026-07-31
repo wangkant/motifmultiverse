@@ -418,7 +418,9 @@ def test_interpret_writes_provenance_with_input_checksums(tmp_path):
     rec = json.loads((out / "provenance.json").read_text())[0]
     assert rec["subcommand"] == "interpret"
     assert rec["input_scale"] == 9999
-    assert set(rec["inputs"]) == {"hits.tsv", "q.txt", "c.txt"}
+    # keyed by the role each file played, not its basename (see
+    # test_same_named_query_and_comparator_do_not_collide)
+    assert set(rec["inputs"]) == {"hits:hits.tsv", "peaks:q.txt", "comparator:c.txt"}
     assert all(len(v) == 64 for v in rec["inputs"].values())
 
 
@@ -918,3 +920,47 @@ def test_selection_feature_is_repeatable(tmp_path):
     ]) == 0
     payload = json.loads((out / "interpretation.json").read_text())
     assert payload["claim_scope"] == "SUBSTRATE_CIRCULAR"
+
+
+def test_same_named_query_and_comparator_do_not_collide(tmp_path):
+    """Per-cluster layouts give a query and its comparator the same filename.
+
+    provenance.add_input refuses a basename collision -- correctly, since keying by
+    basename used to lose an input silently. But the CLI passed bare paths, so this
+    normal layout aborted the run with an unhandled ValueError: a traceback and
+    exit 1, not the documented exit 4 refusal, with no provenance record and no
+    output directory. Inputs are now keyed by the role they played.
+    """
+    import json
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    for name, src in (("setA", q), ("setB", c)):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "peaks.txt").write_text(src.read_text())
+
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(hits),
+        "--peaks", str(tmp_path / "setA" / "peaks.txt"),
+        "--comparator", str(tmp_path / "setB" / "peaks.txt"),
+        "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+        "--bootstrap", "20", "--out", str(out), *_floors(),
+    ]) == 0
+    rec = json.loads((out / "provenance.json").read_text())[0]
+    assert set(rec["inputs"]) == {"hits:hits.tsv", "peaks:peaks.txt", "comparator:peaks.txt"}
+    assert len(set(rec["inputs"].values())) == 3, "three distinct files, three checksums"
+
+
+def test_a_provenance_refusal_is_a_refusal_not_a_traceback(tmp_path, capsys):
+    """ProvenanceError is typed so it reaches the exit-4 contract."""
+    from motifmultiverse.provenance import ProvenanceError, record
+
+    a, b = tmp_path / "a.h5", tmp_path / "b" / "a.h5"
+    b.parent.mkdir()
+    a.write_bytes(b"one")
+    b.write_bytes(b"two")
+    rec = record("ingest")
+    rec.add_input(a)
+    with pytest.raises(ProvenanceError, match="already names a different input"):
+        rec.add_input(b)
+    assert isinstance(ProvenanceError("x"), ValueError), "stays a ValueError for old callers"

@@ -216,49 +216,56 @@ def _reverse_complement(mat: Any):
 
 
 def _cosine(a: Any, b: Any) -> float:
-    """Cosine of two motif windows.
+    """Cosine of two motif windows, on the unsigned PPM content.
 
-    Hot path: the null calibration re-registers every pair against freshly
-    shuffled data, so this runs once per (pair x shuffle x candidate window). A
-    profile of a 29-pattern registry put 110,313 calls here and 220,626 inside
-    ``np.linalg.norm``, which spends most of its time dispatching rather than
-    computing -- these vectors are a few dozen floats. ``sqrt(v @ v)`` is the same
-    quantity for a real 1-D vector, without the dispatch. The arithmetic is
-    unchanged, and test_align_cosine_matches_the_linalg_norm_formulation pins that.
+    This was briefly replaced by ``sqrt(v @ v)`` to avoid ``np.linalg.norm``'s
+    dispatch cost, on a measurement of 3.2s -> 1.83s for a 29-pattern registry.
+    That measurement was wall-clock over the whole CLI and was dominated by
+    interpreter start-up and I/O: re-measured on the inner loop alone, the
+    replacement was worth about 10%, and the ``np.errstate`` needed to make it
+    safe cost more than it saved -- the "optimised" version benchmarked *slower*
+    than this one (5.78 vs 5.26 us/call over 120,000 calls, median of 5). It is
+    reverted rather than tuned further, because the complexity it carried (an
+    underflow fallback, a suppressed warning context, a subnormal-range caveat)
+    bought nothing measurable.
+
+    What the detour did surface is a real defect, and it is not about speed.
+    ``np.linalg.norm`` rescales internally; ``np.dot`` does not. Above about
+    1e153 the numerator overflows to +/-inf while the denominator overflows too,
+    the quotient is NaN -- and ``max(-1.0, min(1.0, nan))`` silently yields
+    **+1.0**, because a NaN comparison is False and the clamp keeps its first
+    argument. Measured: two exactly anti-correlated windows at 1e155 reported
+    ``+1``. In *this* module that is the failure the docstring above is written
+    about: a sign-flipped pair reported as a perfect positive match. Below about
+    1e-165 the numerator underflows instead and the cosine comes back 0.0.
+
+    So a non-finite quotient now falls back to a scale-normalised computation,
+    which is exact at any representable magnitude. Cosine is scale-invariant, so
+    this changes no value it did not previously get wrong, and it costs one
+    ``math.isfinite`` on the path everything real takes.
     """
     import numpy as np
 
     flat_a, flat_b = a.ravel(), b.ravel()
-    with np.errstate(over="ignore", under="ignore"):
-        sq_a, sq_b = float(flat_a @ flat_a), float(flat_b @ flat_b)
-        dot = float(flat_a @ flat_b)
-    degenerate = (
-        not (math.isfinite(sq_a) and math.isfinite(sq_b) and math.isfinite(dot))
-        or (sq_a == 0.0 and flat_a.any())
-        or (sq_b == 0.0 and flat_b.any())
-    )
-    if degenerate:
-        # v @ v is exact only while every v_i^2 stays inside the float range.
-        # Measured: at a uniform 1e-200 the squares underflow to zero and the fast
-        # path answers 0.0 where the true cosine is 1.0 -- and so does the
-        # numerator, so swapping in np.linalg.norm for the norms alone does not
-        # rescue it. Cosine is scale-invariant, so divide both vectors by their
-        # own magnitude first and the whole computation comes back into range.
-        # Real PPM and CWM values are nowhere near these magnitudes, but
-        # "unreachable in our data" is a claim about the data, not the function.
-        scale_a = float(np.max(np.abs(flat_a))) or 1.0
-        scale_b = float(np.max(np.abs(flat_b))) or 1.0
-        unit_a, unit_b = flat_a / scale_a, flat_b / scale_b
-        norm_a = math.sqrt(float(unit_a @ unit_a))
-        norm_b = math.sqrt(float(unit_b @ unit_b))
-        dot = float(unit_a @ unit_b)
-    else:
-        norm_a, norm_b = math.sqrt(sq_a), math.sqrt(sq_b)
-    if norm_a == 0.0 or norm_b == 0.0:
+    norm_a, norm_b = float(np.linalg.norm(flat_a)), float(np.linalg.norm(flat_b))
+    if norm_a and norm_b:
+        value = float(np.dot(flat_a, flat_b) / (norm_a * norm_b))
+    elif not (flat_a.any() and flat_b.any()):
+        # An all-zero window has no direction. A window whose norm merely
+        # underflowed still does, so the two cannot share this exit -- and telling
+        # them apart costs a scan, which is why it happens here and not on the
+        # path every real pair takes.
         return 0.0
-    value = dot / (norm_a * norm_b)
+    else:
+        value = math.nan
+    if not math.isfinite(value):
+        scale_a, scale_b = float(np.max(np.abs(flat_a))), float(np.max(np.abs(flat_b)))
+        unit_a, unit_b = flat_a / scale_a, flat_b / scale_b
+        denominator = float(np.linalg.norm(unit_a)) * float(np.linalg.norm(unit_b))
+        value = float(np.dot(unit_a, unit_b)) / denominator if denominator else 0.0
     # Roundoff can place a mathematically bounded cosine a few ulps outside
-    # [-1, 1]; clamp the computed value before schema validation.
+    # [-1, 1]; clamp the computed value before schema validation. NaN can no
+    # longer reach here, which matters: the clamp would turn it into +1.0.
     return max(-1.0, min(1.0, value))
 
 

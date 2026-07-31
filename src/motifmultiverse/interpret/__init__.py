@@ -140,6 +140,37 @@ def _resolve_estimator(name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Reading
 # --------------------------------------------------------------------------- #
+def _text(value: Any, column: str, *, default: str | None = None) -> str:
+    """Read one text cell, treating every spelling of "no value" as absent.
+
+    ``x or SENTINEL`` does not do this, and the reason is specific: pandas returns
+    a null in an object column as float ``NaN``, and ``NaN`` is **truthy**. So the
+    fallback was skipped and ``str(nan)`` produced the literal string ``"nan"`` --
+    an identifier that is not the sentinel, so every check written against the
+    sentinel let it through. A parquet table with a null family on some rows was
+    accepted and reported a family called ``nan``, while the byte-equivalent TSV
+    was correctly refused.
+
+    ``default=None`` means the column is required: a null there is an error, not a
+    sentinel, because a peak or a chromosome named ``NA`` is a fabricated row
+    rather than a recorded absence.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        if default is None:
+            raise InterpretError(
+                f"hit table has an empty {column}; it is required on every row and "
+                "cannot be defaulted, because the default is indistinguishable from "
+                "a real value"
+            )
+        return default
+    text = str(value)
+    if text == "":
+        if default is None:
+            raise InterpretError(f"hit table has an empty {column}; it is required on every row")
+        return default
+    return text
+
+
 def _coerce_row(row: dict[str, Any]) -> HitRecord:
     """Build one HitRecord, sharing the strings that repeat down the column.
 
@@ -170,16 +201,19 @@ def _coerce_row(row: dict[str, Any]) -> HitRecord:
         # by the rule that a used hit must have a coefficient.
         coeff = None
     return HitRecord(
-        region_id=intern(str(row["region_id"])),
-        chrom=intern(str(row["chrom"])),
+        region_id=intern(_text(row["region_id"], "region_id")),
+        chrom=intern(_text(row["chrom"], "chrom")),
         start=int(row["start"]),
         end=int(row["end"]),
-        missingness=Missingness(str(row["missingness"])),
+        missingness=Missingness(_text(row["missingness"], "missingness")),
         input_scale=int(row["input_scale"]),
-        lexicon_id=intern(str(row["lexicon_id"])),
-        substrate_id=intern(str(row.get("substrate_id") or MISSING_SENTINEL)),
-        variant_id=intern(str(row.get("variant_id") or MISSING_SENTINEL)),
-        family_id=intern(str(row.get("family_id") or MISSING_SENTINEL)),
+        lexicon_id=intern(_text(row["lexicon_id"], "lexicon_id")),
+        substrate_id=intern(_text(row.get("substrate_id"), "substrate_id",
+                                  default=MISSING_SENTINEL)),
+        variant_id=intern(_text(row.get("variant_id"), "variant_id",
+                                default=MISSING_SENTINEL)),
+        family_id=intern(_text(row.get("family_id"), "family_id",
+                               default=MISSING_SENTINEL)),
         hit_coefficient=None if coeff is None else float(coeff),
     )
 

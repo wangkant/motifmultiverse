@@ -1190,3 +1190,79 @@ def test_a_not_searched_row_may_leave_family_unnamed(tmp_path):
             .replace("\t0.5\t", "\t\t"))
     p.write_text(text)
     assert len(read_hit_table(p)) == 1
+
+
+# --- the two encodings of one table must be one table -------------------------
+# The parquet branch of read_hit_table had NO test. That is why a null identifier
+# becoming the literal string "nan" shipped green: pandas returns a null in an
+# object column as float NaN, NaN is truthy, so `x or SENTINEL` was skipped and
+# str(nan) produced an identifier that no sentinel check could see. The TSV
+# encoding of the same table was refused; the parquet one reported a family
+# called "nan".
+def _frame(**overrides):
+    import pandas as pd
+
+    from motifmultiverse.schema import HIT_TABLE_COLUMNS
+
+    rows = []
+    for b in range(8):
+        for variant, family in (("V_AP1", "AP-1/bZIP"), ("V_CTCF", "CTCF")):
+            row = dict(
+                region_id=f"p{b}", chrom="chr1", start=b * 1000, end=b * 1000 + 50,
+                variant_id=variant, family_id=family, hit_coefficient=1.0,
+                missingness="used", input_scale=8, lexicon_id="L",
+                substrate_id="a" * 64,
+            )
+            rows.append(row)
+    frame = pd.DataFrame(rows)[list(HIT_TABLE_COLUMNS)]
+    for column, (mask_variant, value) in overrides.items():
+        frame.loc[frame.variant_id == mask_variant, column] = value
+    return frame
+
+
+def _both_encodings(tmp_path, frame):
+    tsv, parquet = tmp_path / "h.tsv", tmp_path / "h.parquet"
+    frame.to_csv(tsv, sep="\t", index=False)
+    frame.to_parquet(parquet, index=False)
+    return tsv, parquet
+
+
+def test_parquet_and_tsv_encodings_of_one_table_read_identically(tmp_path):
+    pytest.importorskip("pyarrow")
+    from motifmultiverse.interpret import read_hit_table
+
+    tsv, parquet = _both_encodings(tmp_path, _frame())
+    from_tsv, from_parquet = read_hit_table(tsv), read_hit_table(parquet)
+    assert len(from_tsv) == len(from_parquet)
+    assert from_tsv == from_parquet
+
+
+@pytest.mark.parametrize("column", ["family_id", "variant_id", "chrom", "region_id"])
+def test_a_null_identifier_is_never_read_as_the_string_nan(tmp_path, column):
+    """Both encodings must reach the same verdict, and neither may invent a value."""
+    pytest.importorskip("pyarrow")
+    from motifmultiverse.interpret import InterpretError, read_hit_table
+    from motifmultiverse.schema import SchemaError
+
+    tsv, parquet = _both_encodings(tmp_path, _frame(**{column: ("V_CTCF", None)}))
+    verdicts = {}
+    for name, path in (("tsv", tsv), ("parquet", parquet)):
+        try:
+            records = read_hit_table(path)
+            verdicts[name] = sorted({getattr(r, column) for r in records})
+        except (SchemaError, InterpretError) as exc:
+            verdicts[name] = f"refused: {type(exc).__name__}"
+    assert "nan" not in str(verdicts["parquet"]), f"fabricated identifier: {verdicts}"
+    assert verdicts["tsv"] == verdicts["parquet"], f"encodings disagree: {verdicts}"
+
+
+def test_a_null_coefficient_is_absence_in_both_encodings(tmp_path):
+    pytest.importorskip("pyarrow")
+    from motifmultiverse.interpret import read_hit_table
+
+    frame = _frame(hit_coefficient=("V_CTCF", None), missingness=("V_CTCF", "no_sequence_match"))
+    tsv, parquet = _both_encodings(tmp_path, frame)
+    from_tsv, from_parquet = read_hit_table(tsv), read_hit_table(parquet)
+    assert from_tsv == from_parquet
+    absent = [r for r in from_parquet if r.variant_id == "V_CTCF"]
+    assert absent and all(r.hit_coefficient is None for r in absent)

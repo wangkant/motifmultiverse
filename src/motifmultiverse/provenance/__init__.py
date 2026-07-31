@@ -21,7 +21,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-__all__ = ["ProvenanceRecord", "sha256_file", "record"]
+__all__ = ["ProvenanceError", "ProvenanceRecord", "sha256_file", "record"]
+
+
+class ProvenanceError(ValueError):
+    """An input cannot be recorded without losing or confusing another.
+
+    A subclass of ValueError so existing callers keep working, and typed so it
+    reaches the CLI's refusal contract (exit 4, one sentence) instead of
+    escaping as a traceback. A bare ValueError in that list would swallow real
+    bugs; a refusal has to be recognisable as one.
+    """
 
 # NOTE ON REDACTION: this recorder deliberately does NOT capture the OS username,
 # hostname, or absolute home paths. Provenance must be publishable; a record that
@@ -98,10 +108,10 @@ class ProvenanceRecord:
             key = str(p.relative_to(root)) if root else p.name
         previous = self.inputs.get(key)
         if previous is not None and previous != digest:
-            raise ValueError(
+            raise ProvenanceError(
                 f"provenance key {key!r} already names a different input "
-                f"(sha256 {previous[:12]}... vs {digest[:12]}...). Pass root= so "
-                "the recorded keys distinguish these files."
+                f"(sha256 {previous[:12]}... vs {digest[:12]}...). Pass root= or "
+                "key= so the recorded keys distinguish these files."
             )
         self.inputs[key] = digest
 

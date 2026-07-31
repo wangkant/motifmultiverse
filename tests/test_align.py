@@ -479,14 +479,18 @@ def test_align_cosine_still_returns_zero_for_a_zero_vector():
     assert _cosine(other, zero) == 0.0
 
 
-@pytest.mark.parametrize("scale", [1e-300, 1e-200, 1e-160, 1.0, 1e160, 1e200, 1e300])
-def test_align_cosine_survives_extreme_magnitudes(scale):
-    """The sqrt(v @ v) fast path is exact only inside the float range.
+@pytest.mark.parametrize("scale", [1e-320, 1e-300, 1e-200, 1e-160, 1.0,
+                                   1e160, 1e200, 1e300, 1e308])
+def test_align_cosine_is_exact_at_every_representable_magnitude(scale):
+    """Including the band where the clamp used to turn NaN into +1.0.
 
-    Regression on the optimisation itself: at a uniform 1e-200 the squares
-    underflow to zero and the fast path answered 0.0 where the true cosine is 1.0.
-    Swapping np.linalg.norm back in for the norms alone does not fix it -- the
-    numerator underflows too -- so the fallback rescales both vectors first.
+    np.linalg.norm rescales internally; np.dot does not. Above ~1e153 the
+    numerator overflows, the quotient is NaN, and `max(-1.0, min(1.0, nan))`
+    yields **+1.0**, because a NaN comparison is False and the clamp keeps its
+    first argument. Measured before the fix: two exactly anti-correlated windows
+    at 1e155 reported +1 -- a sign-flipped pair read as a perfect positive match,
+    in the module whose whole docstring is about not doing that. Below ~1e165 the
+    numerator underflows instead and the answer was 0.0.
     """
     np = pytest.importorskip("numpy")
 
@@ -495,3 +499,20 @@ def test_align_cosine_survives_extreme_magnitudes(scale):
     x = np.full((6, 4), scale)
     assert _cosine(x, x) == pytest.approx(1.0, abs=1e-9)
     assert _cosine(x, -x) == pytest.approx(-1.0, abs=1e-9)
+
+
+def test_align_cosine_keeps_zero_for_a_genuinely_zero_window():
+    np = pytest.importorskip("numpy")
+
+    from motifmultiverse.align import _cosine
+
+    assert _cosine(np.zeros((4, 4)), np.ones((4, 4))) == 0.0
+    assert _cosine(np.ones((4, 4)), np.zeros((4, 4))) == 0.0
+
+
+def test_align_cosine_keeps_zero_for_genuinely_orthogonal_windows():
+    np = pytest.importorskip("numpy")
+
+    from motifmultiverse.align import _cosine
+
+    assert _cosine(np.array([[1.0, 0, 0, 0]]), np.array([[0, 1.0, 0, 0]])) == 0.0

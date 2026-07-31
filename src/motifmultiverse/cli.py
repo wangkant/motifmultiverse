@@ -35,7 +35,7 @@ from motifmultiverse.interpret import (
     ESTIMATOR_CHOICES,
     InterpretError,
 )
-from motifmultiverse.provenance import record
+from motifmultiverse.provenance import ProvenanceError, record
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
     Decision,
@@ -561,9 +561,15 @@ def _run_infer(ns: argparse.Namespace) -> int:
     hits = interpret_mod.read_hit_table(ns.hits)
     rec.input_scale = hits[0].input_scale
     rec.substrate_id = hits[0].substrate_id
-    for path in (ns.hits, ns.substrate_manifest, ns.peaks, ns.comparator, ns.held_out):
+    # Keyed by the ROLE each file played, not by its basename. Per-cluster layouts
+    # legitimately give a query and its comparator the same filename in different
+    # directories, which used to collide; the role is also what a reader of the
+    # record actually wants to know.
+    for role, path in (("hits", ns.hits), ("substrate_manifest", ns.substrate_manifest),
+                       ("peaks", ns.peaks), ("comparator", ns.comparator),
+                       ("held_out", ns.held_out)):
         if path:
-            rec.add_input(path)
+            rec.add_input(path, key=f"{role}:{Path(path).name}")
     rec.write(ns.out)
 
     if ns.substrate_manifest:
@@ -634,9 +640,15 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     substrate_id = hits[0].substrate_id
     rec.input_scale = hits[0].input_scale
     rec.substrate_id = substrate_id
-    for path in (ns.hits, ns.substrate_manifest, ns.peaks, ns.comparator, ns.held_out):
+    # Keyed by the ROLE each file played, not by its basename. Per-cluster layouts
+    # legitimately give a query and its comparator the same filename in different
+    # directories, which used to collide; the role is also what a reader of the
+    # record actually wants to know.
+    for role, path in (("hits", ns.hits), ("substrate_manifest", ns.substrate_manifest),
+                       ("peaks", ns.peaks), ("comparator", ns.comparator),
+                       ("held_out", ns.held_out)):
         if path:
-            rec.add_input(path)
+            rec.add_input(path, key=f"{role}:{Path(path).name}")
     rec.write(ns.out)
 
     if ns.substrate_manifest:
@@ -712,7 +724,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"motifmultiverse: {exc.filename}: no such file", file=sys.stderr)
         return 2
     except (GuardError, InterpretError, InferError, IngestError, CompileError,
-            BackendMissing, SchemaError, AlignmentError, AnnotationError) as exc:
+            BackendMissing, SchemaError, AlignmentError, AnnotationError,
+            ProvenanceError) as exc:
         # A refusal is not a crash. Exit 4 means the tool declined to produce a
         # number, and the message says which rule declined it.
         print(f"motifmultiverse: refused: {exc}", file=sys.stderr)
