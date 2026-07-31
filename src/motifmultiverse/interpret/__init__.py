@@ -157,6 +157,18 @@ def _coerce_row(row: dict[str, Any]) -> HitRecord:
     coeff = row.get("hit_coefficient")
     if coeff in ("", None, MISSING_SENTINEL):
         coeff = None
+    elif isinstance(coeff, float) and math.isnan(coeff):
+        # NaN is how parquet and pandas spell "no value in this float column"; a
+        # TSV spells the same thing as an empty field. Without this the two
+        # encodings of one table disagreed: the TSV read fine and the parquet
+        # raised on its first non-USED row, which is every realistic table -- the
+        # upstream opportunity table is 4.48M rows of mostly SEARCHED_NOT_RETAINED.
+        # NaN is also not a measurement: left as a float it reached HitRecord on
+        # USED rows, poisoned every family mean it entered, and was serialised as
+        # a bare `NaN` token that is not valid JSON. Absence takes no number, so
+        # it becomes None here and a USED row carrying it is refused downstream
+        # by the rule that a used hit must have a coefficient.
+        coeff = None
     return HitRecord(
         region_id=intern(str(row["region_id"])),
         chrom=intern(str(row["chrom"])),

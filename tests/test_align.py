@@ -477,3 +477,21 @@ def test_align_cosine_still_returns_zero_for_a_zero_vector():
     other = np.ones((4, 4))
     assert _cosine(zero, other) == 0.0
     assert _cosine(other, zero) == 0.0
+
+
+@pytest.mark.parametrize("scale", [1e-300, 1e-200, 1e-160, 1.0, 1e160, 1e200, 1e300])
+def test_align_cosine_survives_extreme_magnitudes(scale):
+    """The sqrt(v @ v) fast path is exact only inside the float range.
+
+    Regression on the optimisation itself: at a uniform 1e-200 the squares
+    underflow to zero and the fast path answered 0.0 where the true cosine is 1.0.
+    Swapping np.linalg.norm back in for the norms alone does not fix it -- the
+    numerator underflows too -- so the fallback rescales both vectors first.
+    """
+    np = pytest.importorskip("numpy")
+
+    from motifmultiverse.align import _cosine
+
+    x = np.full((6, 4), scale)
+    assert _cosine(x, x) == pytest.approx(1.0, abs=1e-9)
+    assert _cosine(x, -x) == pytest.approx(-1.0, abs=1e-9)

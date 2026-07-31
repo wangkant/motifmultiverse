@@ -229,11 +229,34 @@ def _cosine(a: Any, b: Any) -> float:
     import numpy as np
 
     flat_a, flat_b = a.ravel(), b.ravel()
-    norm_a = math.sqrt(float(flat_a @ flat_a))
-    norm_b = math.sqrt(float(flat_b @ flat_b))
+    with np.errstate(over="ignore", under="ignore"):
+        sq_a, sq_b = float(flat_a @ flat_a), float(flat_b @ flat_b)
+        dot = float(flat_a @ flat_b)
+    degenerate = (
+        not (math.isfinite(sq_a) and math.isfinite(sq_b) and math.isfinite(dot))
+        or (sq_a == 0.0 and flat_a.any())
+        or (sq_b == 0.0 and flat_b.any())
+    )
+    if degenerate:
+        # v @ v is exact only while every v_i^2 stays inside the float range.
+        # Measured: at a uniform 1e-200 the squares underflow to zero and the fast
+        # path answers 0.0 where the true cosine is 1.0 -- and so does the
+        # numerator, so swapping in np.linalg.norm for the norms alone does not
+        # rescue it. Cosine is scale-invariant, so divide both vectors by their
+        # own magnitude first and the whole computation comes back into range.
+        # Real PPM and CWM values are nowhere near these magnitudes, but
+        # "unreachable in our data" is a claim about the data, not the function.
+        scale_a = float(np.max(np.abs(flat_a))) or 1.0
+        scale_b = float(np.max(np.abs(flat_b))) or 1.0
+        unit_a, unit_b = flat_a / scale_a, flat_b / scale_b
+        norm_a = math.sqrt(float(unit_a @ unit_a))
+        norm_b = math.sqrt(float(unit_b @ unit_b))
+        dot = float(unit_a @ unit_b)
+    else:
+        norm_a, norm_b = math.sqrt(sq_a), math.sqrt(sq_b)
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    value = float(np.dot(flat_a, flat_b) / (norm_a * norm_b))
+    value = dot / (norm_a * norm_b)
     # Roundoff can place a mathematically bounded cosine a few ulps outside
     # [-1, 1]; clamp the computed value before schema validation.
     return max(-1.0, min(1.0, value))
