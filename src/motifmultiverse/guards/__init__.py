@@ -26,7 +26,7 @@ from typing import Any
 from motifmultiverse.schema import Missingness
 
 __all__ = [
-    "GuardResult", "GuardError", "ALL_GUARDS", "run_all",
+    "GuardResult", "GuardError", "ALL_GUARDS", "GUARDS_AWAITING_INPUT", "run_all",
     "single_scale", "variant_id_unique", "no_key_parsing", "four_state_missingness",
     "no_cross_model_cwm_avg", "sign_alignment", "interaction_required",
     "estimability_floor", "stratum_parity", "short_motif_flag", "single_family_layer",
@@ -134,6 +134,46 @@ def no_key_parsing(source: str) -> GuardResult:
     if offenders:
         return _fail(gid, "semantics parsed from identifiers -> " + "; ".join(offenders))
     return _ok(gid, "heuristic scan passed")
+
+
+#: Guards with no call site in this release, and the input each is waiting for.
+#:
+#: A guard that is defined, exported and never invoked reads as protection. Seven
+#: of the fifteen were in that position, including `four_state_missingness` -- the
+#: guard for this project's founding failure. Silence about that is the same shape
+#: as the failure itself, so the gap is data here rather than something a reader
+#: has to discover by grepping. `test_every_guard_is_called_or_declared_pending`
+#: fails if a guard is neither invoked in `src/` nor listed below, so a new orphan
+#: cannot appear quietly and a wired-up guard cannot stay on this list.
+GUARDS_AWAITING_INPUT: dict[str, str] = {
+    "four_state_missingness": (
+        "needs an artifact that CLAIMS a coverage/defined/total, independently of "
+        "the rows it is recomputed from. interpret.health_report is not that: there "
+        "the claim and the recomputation are the same code, so the guard would "
+        "corroborate itself -- which is the failure mode it exists to catch."
+    ),
+    "no_cross_model_cwm_avg": (
+        "needs an operations log naming each CWM combination performed. No stage "
+        "records one; the prohibition is currently structural (align never averages) "
+        "rather than checked."
+    ),
+    "interaction_required": (
+        "needs emitted specificity claims carrying an interaction CI. This release "
+        "emits per-family effects, not interactions."
+    ),
+    "estimability_floor": (
+        "needs stratified cells with N and a CI against a reference. Same missing "
+        "stratified-interaction stage as interaction_required."
+    ),
+    "stratum_parity": (
+        "needs the stratifying rule recorded per cell; no stage emits strata yet."
+    ),
+    "single_family_layer": (
+        "needs a composition that carries an estimability status. FamilyComposition "
+        "has no status field, and adding one to satisfy a guard would be inventing "
+        "the semantics the guard is meant to check."
+    ),
+}
 
 
 def four_state_missingness(
@@ -311,17 +351,56 @@ def stratum_parity(cells: Iterable[Mapping[str, Any]]) -> GuardResult:
 
 
 def short_motif_flag(nodes: Sequence[Any]) -> GuardResult:
-    """Short / weakly-supported motifs must carry ``low_confidence_annotation``."""
+    """Short / weakly-supported motifs must carry ``low_confidence_annotation``.
+
+    The thresholds are annotate/README.md's: PWM <= 6 bp, or TomTom q > 0.05, or
+    seqlet count < 100.
+
+    Two ways this used to pass what it exists to catch:
+
+    * ``(motif_length or 99) <= 6`` reads a legitimate **zero** as absent, so the
+      weakest possible motif -- length 0, zero seqlets -- was not short and not
+      low-support, and passed unflagged. Missing and zero are different claims;
+      ``or`` cannot tell them apart.
+    * a non-numeric value, including this package's own ``MISSING_SENTINEL``,
+      raised ``TypeError: '<=' not supported between 'str' and 'int'`` out of the
+      guard. A guard that crashes on a value its own schema produces is not
+      reporting on the data, it is reporting on itself.
+
+    Absent (``None``) is still not an offence: no measurement is not evidence of a
+    short motif. It is reported separately so it cannot be mistaken for a pass.
+    """
     gid = "short_motif_flag"
+
     def g(n: Any, k: str) -> Any:
         return getattr(n, k) if hasattr(n, k) else n.get(k)
-    offenders = []
+
+    def number(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return math.nan          # unmeasurable -> reported, never compared
+        return float(value)
+
+    offenders: list[Any] = []
+    unusable: list[Any] = []
     for n in nodes:
-        short = (g(n, "motif_length") or 99) <= 6
-        weak_q = (g(n, "annotation_matches") or {}).get("tomtom_q", 0.0) > 0.05
-        few = (g(n, "seqlet_count") or 10**9) < 100
+        length, seqlets = number(g(n, "motif_length")), number(g(n, "seqlet_count"))
+        q = number((g(n, "annotation_matches") or {}).get("tomtom_q"))
+        if any(v is not None and math.isnan(v) for v in (length, seqlets, q)):
+            unusable.append(g(n, "variant_id"))
+            continue
+        short = length is not None and length <= 6
+        few = seqlets is not None and seqlets < 100
+        weak_q = q is not None and q > 0.05
         if (short or weak_q or few) and not g(n, "low_confidence_annotation"):
             offenders.append(g(n, "variant_id"))
+    if unusable:
+        return _fail(
+            gid,
+            f"{len(unusable)} node(s) carry a non-numeric motif_length / seqlet_count / "
+            f"tomtom_q, so the threshold cannot be applied: {unusable[:5]}",
+        )
     if offenders:
         return _fail(gid, f"unflagged low-confidence annotations: {offenders[:5]}")
     return _ok(gid, "every short / weak / low-support motif is flagged")

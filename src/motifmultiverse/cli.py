@@ -260,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "DECLARATION_MISSING and costs the query its inference")
     a.add_argument("--selection-rule", default=None,
                    help="the executable rule, required by PROGRAMMATIC_RULE")
+    a.add_argument("--selection-feature", action="append", default=None,
+                   metavar="NAME", dest="selection_features",
+                   help="a feature the peak set was selected ON; repeatable. This is "
+                        "what makes SUBSTRATE_CIRCULAR reachable: a selection feature "
+                        "that is itself attribution-derived (attribution_pc1, "
+                        "deepshap_score, hit_coefficient, ...) means the number would "
+                        "describe the surface it was chosen from, however well "
+                        "licensed the query is on the statistical axis")
     a.add_argument("--held-out", default=None, help="held-out peak set, required by CLUSTERED_WITH_SPLIT")
     a.add_argument("--query-id", default="query", help="name of this specification")
     a.add_argument("--estimator", default="percentile", choices=sorted(ESTIMATOR_CHOICES),
@@ -304,6 +312,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "DECLARATION_MISSING and costs the query its inference")
     a.add_argument("--selection-rule", default=None,
                    help="the executable rule, required by PROGRAMMATIC_RULE")
+    a.add_argument("--selection-feature", action="append", default=None,
+                   metavar="NAME", dest="selection_features",
+                   help="a feature the peak set was selected ON; repeatable. This is "
+                        "what makes SUBSTRATE_CIRCULAR reachable: a selection feature "
+                        "that is itself attribution-derived (attribution_pc1, "
+                        "deepshap_score, hit_coefficient, ...) means the number would "
+                        "describe the surface it was chosen from, however well "
+                        "licensed the query is on the statistical axis")
     a.add_argument("--comparator", default=None, help="baseline peak set; required for inference")
     a.add_argument("--comparator-id", default=None, help="name of the baseline, carried on every effect")
     a.add_argument("--held-out", default=None, help="held-out peak set, required by CLUSTERED_WITH_SPLIT")
@@ -559,6 +575,7 @@ def _run_infer(ns: argparse.Namespace) -> int:
         selection_provenance=(ns.selection_provenance
                               or SelectionProvenance.DECLARATION_MISSING),
         selection_rule=ns.selection_rule or MISSING_SENTINEL,
+        selection_feature_names=list(ns.selection_features or []),
         comparator_id=ns.comparator_id,
         comparator_region_ids=interpret_mod.read_peak_set(ns.comparator),
         held_out_region_ids=interpret_mod.read_peak_set(ns.held_out) if ns.held_out else [],
@@ -631,6 +648,7 @@ def _run_interpret(ns: argparse.Namespace) -> int:
         selection_provenance=(ns.selection_provenance
                               or SelectionProvenance.DECLARATION_MISSING),
         selection_rule=ns.selection_rule or MISSING_SENTINEL,
+        selection_feature_names=list(ns.selection_features or []),
         # An undeclared comparator is undeclared. Falling back to `ns.comparator`
         # put a filesystem path into a semantic field that lands in every effect
         # id: not reproducible on another machine, and a local path leaked into a

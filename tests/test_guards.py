@@ -654,3 +654,51 @@ def test_four_state_missingness_catches_a_fill_on_the_real_column_name():
         value_key="hit_coefficient")
     assert not result.passed
     assert "collapsed to 0" in result.detail
+
+
+def test_every_guard_is_called_or_declared_pending():
+    """A guard that is defined, exported and never invoked reads as protection.
+
+    Seven of the fifteen were in that position, `four_state_missingness` -- the
+    guard for this project's founding failure -- among them, while
+    docs/CONSTRAINTS.md labelled principles ENFORCED partly on their strength.
+    Being silent about that is the same shape as the failure. Each guard must now
+    either have a call site in src/ or say, in guards.GUARDS_AWAITING_INPUT, which
+    input it is waiting for.
+    """
+    import re
+    from pathlib import Path
+
+    import motifmultiverse
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    src = Path(motifmultiverse.__file__).resolve().parent
+    import inspect
+    names = [n for n in guards.__all__
+             if inspect.isfunction(getattr(guards, n, None)) and n != "run_all"]
+    body = "\n".join(
+        p.read_text() for p in src.rglob("*.py") if p.name != "__init__.py" or "guards" not in p.parts
+    )
+    orphans, stale = [], []
+    for name in names:
+        called = bool(re.search(rf"\bguards\.{name}\b|\b{name}\(", body))
+        declared = name in GUARDS_AWAITING_INPUT
+        if not called and not declared:
+            orphans.append(name)
+        if called and declared:
+            stale.append(name)
+    assert not orphans, (
+        "guards with no call site and no declared pending input: " + ", ".join(orphans)
+    )
+    assert not stale, (
+        "guards listed as awaiting input but actually called: " + ", ".join(stale)
+    )
+
+
+def test_guards_awaiting_input_each_say_what_they_wait_for():
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    assert GUARDS_AWAITING_INPUT, "the pending registry should not be silently emptied"
+    for name, reason in GUARDS_AWAITING_INPUT.items():
+        assert name in guards.__all__, f"{name} is not a guard"
+        assert len(reason) > 40, f"{name}: a one-word reason is not a reason"

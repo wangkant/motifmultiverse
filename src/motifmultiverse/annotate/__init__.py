@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from motifmultiverse import guards
 from motifmultiverse.provenance import record
 from motifmultiverse.schema import MotifNode, SchemaError
 from motifmultiverse.schema.annotation import (
@@ -85,10 +86,27 @@ def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBack
                 backend_version=getattr(backend, "version", "UNVERIFIED"),
                 status=BackendStatus.UNVERIFIED, candidate_count=0, detail=str(exc),
             ))
-    return AnnotationRun(
-        candidates=tuple(candidates_by_id[key] for key in sorted(candidates_by_id)),
-        backend_logs=tuple(logs),
-    )
+    retained = tuple(candidates_by_id[key] for key in sorted(candidates_by_id))
+    # The stage's own executable check (annotate/README.md "How to check it").
+    # schema.AnnotationCandidate applies the same rule when a candidate is built;
+    # this re-applies it to what is about to be WRITTEN, from an independently
+    # written threshold implementation in guards/. The two had already drifted --
+    # the guard read a legitimate motif_length of 0 as "absent" and passed the
+    # weakest possible motif -- which is the argument for keeping both.
+    guards.short_motif_flag([
+        {
+            "variant_id": candidate.candidate_id,
+            "motif_length": candidate.motif_length,
+            "seqlet_count": candidate.seqlet_count,
+            "annotation_matches": (
+                {"tomtom_q": candidate.q_value}
+                if candidate.source.casefold() == "tomtom" else {}
+            ),
+            "low_confidence_annotation": candidate.low_confidence_annotation,
+        }
+        for candidate in retained
+    ]).raise_if_failed()
+    return AnnotationRun(candidates=retained, backend_logs=tuple(logs))
 
 
 _CANDIDATE_COLUMNS = [

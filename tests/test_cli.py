@@ -871,3 +871,50 @@ def test_comparator_with_an_id_still_runs(tmp_path):
     assert "gc_matched" in blob, "the declared comparator id must reach the artifact"
     assert str(tmp_path) not in blob, "a local path leaked into the artifact"
     json.loads(blob)
+
+
+def test_substrate_circular_is_reachable_from_the_command_line(tmp_path):
+    """The flagship two-axis outcome had no CLI path to it.
+
+    `claim_scope` becomes SUBSTRATE_CIRCULAR when a declared selection feature is
+    itself attribution-derived, but `PeakSetQuery.selection_feature_names` was
+    never populated by the CLI, so no command could produce the result the whole
+    two-axis design exists for: statistically licensed AND semantically circular,
+    in the same record.
+    """
+    import json
+
+    hits, q, c = _tiny_substrate(tmp_path)
+
+    def scope(*extra):
+        out = tmp_path / f"o{len(extra)}{extra}"
+        assert main([
+            "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+            "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+            *extra, "--bootstrap", "20", "--out", str(out), *_floors(),
+        ]) == 0
+        payload = json.loads((out / "interpretation.json").read_text())
+        return payload["statistical_license"], payload["claim_scope"]
+
+    assert scope() == ("FULL_INFERENCE", "EXTERNAL_STRUCTURE")
+    assert scope("--selection-feature", "gc_content") == (
+        "FULL_INFERENCE", "EXTERNAL_STRUCTURE")
+    # the same query, licensed identically, is circular once the feature it was
+    # selected on is one of the attribution-derived names
+    assert scope("--selection-feature", "attribution_pc1") == (
+        "FULL_INFERENCE", "SUBSTRATE_CIRCULAR")
+
+
+def test_selection_feature_is_repeatable(tmp_path):
+    import json
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+        "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+        "--selection-feature", "gc_content", "--selection-feature", "deepshap_score",
+        "--bootstrap", "20", "--out", str(out), *_floors(),
+    ]) == 0
+    payload = json.loads((out / "interpretation.json").read_text())
+    assert payload["claim_scope"] == "SUBSTRATE_CIRCULAR"
