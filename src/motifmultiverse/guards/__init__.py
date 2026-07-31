@@ -199,59 +199,6 @@ class PendingGuardInput:
 #: arrives, which is the point: the registry announces the moment instead of
 #: waiting to be re-read.
 GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
-    "four_state_missingness": PendingGuardInput(
-        nearest_artifact="schema.substrate.HitSubstrateManifest",
-        why_not_a_call_site=(
-            "The guard needs a coverage/defined/total CLAIMED by something other than "
-            "the code that recomputes it. Exactly one artifact here states a count "
-            "independently of the rows -- the substrate manifest's n_regions, written "
-            "when the run was frozen -- and `interpret.verify_against_manifest` already "
-            "puts it in front of a recomputation from the hit rows, which is this "
-            "guard's shape at one third of its width. The manifest states no defined "
-            "count and no coverage, and the only place those exist is "
-            "`interpret.health_report`, where the claim and the recomputation are the "
-            "same expression: the guard would corroborate itself, which is the failure "
-            "mode it exists to catch.\n"
-            "Persisting guard outcomes does not change this, and was checked rather "
-            "than assumed: `guard_log`'s record holds what a guard RETURNED, so using "
-            "it as the claim would put a guard in front of its own output, which T-16 "
-            "forbids for the same reason. Neither does the health block on "
-            "`interpret.Interpretation`, which is the other place a coverage now "
-            "reaches disk: `explained_fraction` is n_with_used_hit / n_searched over "
-            "PEAKS, and this guard recomputes over the ROWS it is handed, so pointing "
-            "it at the hit table would compare two different quantities and fail on "
-            "correct data -- and synthesising one row per peak so that they line up is "
-            "manufacturing the very claim this entry is waiting for, in the code that "
-            "would then be audited by it."
-        ),
-        closes_when=(
-            "the manifest -- or a ledger written by the program that froze the run, "
-            "not by this package -- records how many (region, variant) opportunities "
-            "were searched and how many were retained, and "
-            "`interpret.verify_against_manifest` puts them in front of a recomputation "
-            "from the missingness column, passing value_key='hit_coefficient' (the "
-            "column a fill could have written into; the guard refuses to guess it). "
-            "That function, not `read_hit_table` as this entry used to say: it is "
-            "where the manifest and the rows are both already in hand, and it already "
-            "makes this comparison for n_regions. The real K562 substrate is "
-            "materialised from an upstream opportunity table whose own vocabulary is "
-            "USED / SEARCHED_NOT_RETAINED / NOT_SEARCHED, so both numbers exist "
-            "upstream and are not carried across. Two things stand between that and a "
-            "call site, and this entry is not closed without both. (1) It is a schema "
-            "change, not an added field: `substrate.read_manifest` refuses any key set "
-            "other than its seven, and n_regions sits inside the hashed semantic "
-            "payload, so two more counts bump the manifest's schema version and "
-            "re-identify every substrate. (2) A DECISION nobody has made about what "
-            "'defined' means. This guard counts only `used`; `interpret.peak_universe` "
-            "treats NO_SEQUENCE_MATCH and HIT_BELOW_FLOOR as measurements that "
-            "contribute 0 and only NOT_SEARCHED as undefined. A caller writing down "
-            "'retained' means the first, a caller writing down 'measured' means the "
-            "second, and the denominator moves with it -- every opportunity, or only "
-            "the searched ones. Wired before that is settled, the guard rejects "
-            "correct data for a definitional reason, and a guard that cries wolf is a "
-            "guard the next maintainer deletes."
-        ),
-    ),
     "interaction_required": PendingGuardInput(
         nearest_artifact="interpret.FamilyEffect",
         why_not_a_call_site=(
@@ -311,7 +258,21 @@ GUARDS_AWAITING_INPUT: dict[str, PendingGuardInput] = {
             "direction (`docs/CONSTRAINTS.md` FP-12's wording) or refused outright, the "
             "way `infer.bca_paired_block_interval` refuses below "
             "`infer.MIN_ESTIMABLE_BLOCKS`. The guard accepts either; the records above "
-            "can express only the second."
+            "can express only the second.\n"
+            "A SEPARATE question that used to be filed here has been decided and is "
+            "not part of what this entry waits for. `_effects_percentile` floors "
+            "replicates and never blocks, while the BCa and wild-cluster paths refuse "
+            "below `infer.MIN_ESTIMABLE_BLOCKS` (30) -- so the same 6-block frame is an "
+            "interval on one path and a refusal on the other. That asymmetry is kept, "
+            "deliberately: 30 is derived from what a jackknife needs to estimate BCa\'s "
+            "acceleration, a quantity the percentile interval does not compute, and "
+            "importing it would be borrowing a constant derived for another estimator "
+            "and presenting it as this one\'s requirement. What was missing was not a "
+            "floor but disclosure, and every effect now records "
+            "`estimator_min_blocks` -- None on the percentile path, saying in the "
+            "artifact that no block floor was enforced there -- beside the "
+            "`n_blocks` it was computed from and the run\'s own declared "
+            "`HealthFloors.min_blocks`."
         ),
     ),
     "stratum_parity": PendingGuardInput(

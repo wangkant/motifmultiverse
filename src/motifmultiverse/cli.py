@@ -273,6 +273,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("hits", help="frozen hit table (.tsv or .parquet), as interpret reads")
     a.add_argument("--substrate-manifest", default=None,
                    help="verified manifest for the one frozen caller specification")
+    a.add_argument("--opportunity-ledger", default=None,
+                   help="ledger written by the program that FROZE this run, stating how "
+                        "many (region, variant) opportunities it materialised, searched "
+                        "and retained. Given one, `four_state_missingness` recomputes the "
+                        "retained coverage from the missingness column and refuses a "
+                        "disagreement -- which is the only form in which that guard is "
+                        "evidence, since a coverage this package computed itself would "
+                        "be the guard checking its own producer")
     a.add_argument("--peaks", required=True,
                    help="queried peak set: one region_id per line, or a BED whose 4th "
                         "column IS the region_id. Matched to the hit table by exact "
@@ -378,6 +386,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("hits", help="frozen hit table (.tsv or .parquet)")
     a.add_argument("--substrate-manifest", default=None,
                    help="verified manifest for the one frozen caller specification")
+    a.add_argument("--opportunity-ledger", default=None,
+                   help="ledger written by the program that FROZE this run, stating how "
+                        "many (region, variant) opportunities it materialised, searched "
+                        "and retained. Given one, `four_state_missingness` recomputes the "
+                        "retained coverage from the missingness column and refuses a "
+                        "disagreement -- which is the only form in which that guard is "
+                        "evidence, since a coverage this package computed itself would "
+                        "be the guard checking its own producer")
     a.add_argument("--peaks", required=True,
                    help="queried peak set: one region_id per line, or a BED whose 4th "
                         "column IS the region_id. Peaks are matched to the hit table by "
@@ -696,7 +712,7 @@ def _warn_if_guard_log_degraded(log: GuardLog) -> None:
 
 def _run_infer(ns: argparse.Namespace) -> int:
     from motifmultiverse import interpret as interpret_mod
-    from motifmultiverse.substrate import read_manifest
+    from motifmultiverse.substrate import read_manifest, read_opportunity_ledger
 
     rec = record("infer", seed=ns.seed)
     hits = interpret_mod.read_hit_table(ns.hits)
@@ -707,6 +723,7 @@ def _run_infer(ns: argparse.Namespace) -> int:
     # directories, which used to collide; the role is also what a reader of the
     # record actually wants to know.
     for role, path in (("hits", ns.hits), ("substrate_manifest", ns.substrate_manifest),
+                       ("opportunity_ledger", ns.opportunity_ledger),
                        ("peaks", ns.peaks), ("comparator", ns.comparator),
                        ("held_out", ns.held_out)):
         if path:
@@ -716,6 +733,16 @@ def _run_infer(ns: argparse.Namespace) -> int:
     if ns.substrate_manifest:
         manifest = read_manifest(ns.substrate_manifest)
         interpret_mod.verify_against_manifest(hits, manifest, "infer")
+    # Bound before the ledger check rather than at the interpret_query call: the
+    # check runs before any effect is computed, and its outcome has to survive its
+    # own refusal like every other guard outcome in this package.
+    infer_guard_log = GuardLog("infer", ns.out)
+    if ns.opportunity_ledger:
+        interpret_mod.verify_missingness_against_ledger(
+            hits,
+            read_opportunity_ledger(ns.opportunity_ledger,
+                                    substrate_id=hits[0].substrate_id),
+            guard_log=infer_guard_log)
     query = PeakSetQuery(
         query_id=ns.query_id,
         region_ids=interpret_mod.read_peak_set(ns.peaks),
@@ -738,7 +765,7 @@ def _run_infer(ns: argparse.Namespace) -> int:
         # same reason: a run refused BY a guard produces no effect table, so the
         # only place its outcome can survive is a file written as the guard
         # returns rather than a field of a result that is never emitted.
-        guard_log=(infer_guard_log := GuardLog("infer", ns.out)),
+        guard_log=infer_guard_log,
     )
     _warn_if_guard_log_degraded(infer_guard_log)
     if result.effects is None:
@@ -778,7 +805,7 @@ def _run_infer(ns: argparse.Namespace) -> int:
 
 def _run_interpret(ns: argparse.Namespace) -> int:
     from motifmultiverse import interpret as interpret_mod
-    from motifmultiverse.substrate import read_manifest
+    from motifmultiverse.substrate import read_manifest, read_opportunity_ledger
 
     # Provenance is written after the inputs are read and checksummed, but before
     # anything is computed: a record that cannot name its inputs describes nothing.
@@ -792,6 +819,7 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     # directories, which used to collide; the role is also what a reader of the
     # record actually wants to know.
     for role, path in (("hits", ns.hits), ("substrate_manifest", ns.substrate_manifest),
+                       ("opportunity_ledger", ns.opportunity_ledger),
                        ("peaks", ns.peaks), ("comparator", ns.comparator),
                        ("held_out", ns.held_out)):
         if path:
@@ -801,6 +829,16 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     if ns.substrate_manifest:
         manifest = read_manifest(ns.substrate_manifest)
         interpret_mod.verify_against_manifest(hits, manifest, "interpret")
+    # Bound before the ledger check rather than at the interpret_query call: the
+    # check runs before any effect is computed, and its outcome has to survive its
+    # own refusal like every other guard outcome in this package.
+    interpret_guard_log = GuardLog("interpret", ns.out)
+    if ns.opportunity_ledger:
+        interpret_mod.verify_missingness_against_ledger(
+            hits,
+            read_opportunity_ledger(ns.opportunity_ledger,
+                                    substrate_id=hits[0].substrate_id),
+            guard_log=interpret_guard_log)
     query = PeakSetQuery(
         query_id=ns.query_id,
         region_ids=interpret_mod.read_peak_set(ns.peaks),
@@ -824,7 +862,7 @@ def _run_interpret(ns: argparse.Namespace) -> int:
                             min_explained_fraction=ns.floor_explained),
         block_size=ns.block_size, n_bootstrap=ns.bootstrap, seed=ns.seed,
         estimator=ns.estimator,
-        guard_log=(interpret_guard_log := GuardLog("interpret", ns.out)),
+        guard_log=interpret_guard_log,
     )
     _warn_if_guard_log_degraded(interpret_guard_log)
     dest = result.write(ns.out)

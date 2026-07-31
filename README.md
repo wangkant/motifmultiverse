@@ -374,14 +374,14 @@ positive test **and a falsification test that must make it fail** — the direct
 to finding 4 above. A meta-test walks the guard registry and fails if any guard ships
 without one.
 
-`single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness`† ·
+`single_scale` · `variant_id_unique` · `no_key_parsing` · `four_state_missingness` ·
 `no_cross_model_cwm_avg` · `no_cross_estimand_pooling` · `sign_alignment` ·
 `interaction_required`† ·
 `estimability_floor`† · `stratum_parity`† · `short_motif_flag` · `single_family_layer`† ·
 `selection_provenance_declared` · `health_before_effect` · `comparator_declared` ·
 `index_order_matches_loader`
 
-† **No call site in this release.** Five of the sixteen are defined and
+† **No call site in this release.** Four of the sixteen are defined and
 falsification-tested but have never been put in front of an artifact, because this
 release emits nothing that carries the thing they check. Counting them as protection
 is the same error the guards exist to prevent, so they are marked here rather than

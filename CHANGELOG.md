@@ -34,6 +34,16 @@ plus a specification-multiverse inference reference implementation.
 - `guards.no_cross_estimand_pooling`: refuses a stability summary that spans two
   estimands, resolving each cell's estimand from the manifest written before the run
   rather than from the code that grouped the results.
+- `substrate.OpportunityLedger` and `interpret.verify_missingness_against_ledger`:
+  the call site `guards.four_state_missingness` — the guard for this project's
+  founding failure — waited four releases for. The ledger is written by the program
+  that FROZE the run, so the claim comes from outside this package and the guard can
+  fail for the reason it exists; every coverage this package could previously have
+  offered it was one this package had itself computed from the same rows. Verified
+  on the frozen K562 substrate: the truthful ledger passes, and one claiming a
+  coverage of 1.0 is refused at exit 4 with the failing outcome on disk. Supplied
+  with `--opportunity-ledger`; a run without one is unchecked on this axis and does
+  not pretend otherwise. Four guards remain uncalled, down from seven.
 - Package skeleton for nine modules (ingest, align, annotate, adjudicate, compile,
   validate, infer, interpret, report), each with a README stating its rule, the failure
   that produced the rule, and how the rule is checked.

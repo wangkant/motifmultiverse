@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from motifmultiverse import guards as guards_mod
 from motifmultiverse import infer as infer_mod
 from motifmultiverse import interpret
 from motifmultiverse import schema as schema_mod
+from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.schema import (
     DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
     HIT_TABLE_COLUMNS,
@@ -1549,3 +1552,102 @@ def test_thin_but_nonzero_coverage_is_not_called_a_key_mismatch():
         peaks, [*_ids(0)[:2], "chr1:0-500", "chr1:1000-1500"], HealthFloors(), BLOCK)
     assert 0.0 < health.intersection_coverage < 0.9
     assert not any("key mismatch" in f for f in health.floor_failures)
+
+
+# --------------------------------------------------------------------------- #
+# The opportunity ledger, and the guard it finally gives a claim to check.
+# --------------------------------------------------------------------------- #
+def _ledger(rows, **over):
+    from motifmultiverse.substrate import OpportunityLedger
+
+    base = dict(
+        substrate_id=SUBSTRATE_ID,
+        n_opportunities=len(rows),
+        n_retained=sum(1 for r in rows if str(r.missingness) == "used"),
+        n_searched=sum(1 for r in rows if str(r.missingness) != "not_searched"),
+        producer="test-freezer 0.0",
+    )
+    return OpportunityLedger(**{**base, **over})
+
+
+def test_a_truthful_ledger_passes_and_records_what_it_checked():
+    rows = _rows()
+    log = GuardLog("interpret")
+    interpret.verify_missingness_against_ledger(rows, _ledger(rows), guard_log=log)
+
+    assert [o.guard_id for o in log.outcomes] == ["four_state_missingness"]
+    assert log.outcomes[0].passed
+    assert "test-freezer 0.0" in log.outcomes[0].subject, (
+        "the subject must name who wrote the claim; that is why the claim is evidence"
+    )
+
+
+def test_the_ledger_catches_a_fill_into_an_undefined_row():
+    """The founding failure, caught end to end rather than in a guard unit test.
+
+    A value is written into a `no_sequence_match` row -- the thing a fill does --
+    and the ledger, written before that happened, still says how many rows were
+    retained. The recomputation moves; the claim does not; the run refuses.
+
+    Note what is NOT relied on: the planted value is 0.7, not 0. A check for
+    literal zeros passes this, which is exactly why the reference implementation's
+    coverage figure corroborated its own error.
+    """
+    rows = _rows()
+    ledger = _ledger(rows)
+    filled = [
+        replace(r, missingness=Missingness.USED, hit_coefficient=0.7,
+                variant_id="UA_FILLED_00", family_id="FAM_A")
+        if str(r.missingness) == "no_sequence_match" else r
+        for r in rows
+    ]
+    assert any(str(r.missingness) == "used" and r.hit_coefficient == 0.7 for r in filled), (
+        "the fixture must actually contain a filled row or this test proves nothing"
+    )
+    assert len(filled) == len(rows), "a fill promotes rows, it does not add them"
+
+    with pytest.raises(guards_mod.GuardError, match="four_state_missingness"):
+        interpret.verify_missingness_against_ledger(filled, ledger)
+
+
+def test_a_ledger_for_another_substrate_is_refused():
+    """A ledger that can be read beside any substrate is a claim about nothing."""
+    import tempfile
+
+    from motifmultiverse.substrate import (
+        SubstrateError,
+        read_opportunity_ledger,
+        write_opportunity_ledger,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "ledger.json"
+        write_opportunity_ledger(_ledger(_rows(), substrate_id="b" * 64), path)
+        with pytest.raises(SubstrateError, match="refusing to check one frozen run"):
+            read_opportunity_ledger(path, substrate_id=SUBSTRATE_ID)
+
+
+def test_a_ledger_whose_counts_are_impossible_is_refused():
+    """Retained beyond searched is not a disagreement to be checked, it is nonsense."""
+    from motifmultiverse.substrate import SubstrateError
+
+    with pytest.raises(SubstrateError, match="cannot be retained without having been searched"):
+        _ledger(_rows(), n_retained=10, n_searched=5)
+
+
+def test_the_ledger_records_both_denominators_and_conflates_neither():
+    """`retained/opportunities` and `searched/opportunities` are different questions.
+
+    Redefining the guard's `defined` to match `peak_universe` -- which treats a
+    searched-but-unretained opportunity as a measurement contributing zero -- was
+    the tempting fix and would have destroyed the guard: a `defined` that counts
+    `no_sequence_match` rows can no longer detect a fill that wrote a value into
+    one. So both counts are recorded, under names that cannot be mistaken for each
+    other, and the guard keeps its own arithmetic.
+    """
+    rows = _rows()
+    ledger = _ledger(rows)
+    assert ledger.n_searched > ledger.n_retained, (
+        "the fixture must distinguish the two denominators"
+    )
+    assert ledger.retained_coverage == ledger.n_retained / ledger.n_opportunities
+    assert ledger.retained_coverage != ledger.n_retained / ledger.n_searched

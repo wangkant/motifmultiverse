@@ -63,6 +63,7 @@ __all__ = [
     "InterpretError", "HealthReport", "ContrastHealth", "FamilyComposition",
     "FamilyEffect", "Interpretation", "read_hit_table", "read_peak_set",
     "peak_universe", "health_report", "contrast_health_report", "compose",
+    "verify_against_manifest", "verify_missingness_against_ledger",
     "estimate_effects", "two_part_effects", "interpret_query",
     "ESTIMATOR", "ESTIMATOR_PERCENTILE", "ESTIMATOR_BCA_WILD", "ESTIMATOR_CHOICES",
     "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP", "MIN_PERCENTILE_REPLICATES",
@@ -299,6 +300,54 @@ def verify_against_manifest(hits: Sequence[HitRecord], manifest: Any, action: st
             f"intersection_coverage reports 1.0 for regions the run never covered. "
             f"Refusing to {action} over a partial substrate."
         )
+
+
+def verify_missingness_against_ledger(hits: Sequence[HitRecord], ledger: Any,
+                                      guard_log: GuardLog | None = None) -> None:
+    """Recompute the freezing program's retained coverage from the rows it froze.
+
+    This is the call site `guards.four_state_missingness` waited for, and the
+    reason it could not have one before is worth stating, because it is the reason
+    the guard is evidence here and would not have been anywhere else.
+
+    The guard recomputes ``defined``, ``total`` and coverage from the raw
+    missingness column and compares them against a *claim*. Every claim this
+    package could previously have handed it came from `interpret.health_report` --
+    where the claim and the recomputation are the same expression, so the guard
+    would have corroborated itself and could not have failed for the reason it
+    exists. The ledger is different in exactly the way that matters: it is written
+    by the program that froze the run, from an upstream table this package never
+    sees, before this package is involved at all. If a fill wrote a value into a
+    ``no_sequence_match`` row somewhere between there and here, the recomputation
+    moves and the ledger does not.
+
+    ``value_key`` is ``hit_coefficient`` and is passed explicitly: it is the column
+    an undefined entry could have been filled into, and the guard refuses to guess
+    which column that is.
+    """
+    rows = [{"missingness": str(h.missingness), "hit_coefficient": h.hit_coefficient}
+            for h in hits]
+    subject = (
+        f"{len(rows)} frozen hit rows against the opportunity ledger written by "
+        f"{ledger.producer} for substrate {ledger.substrate_id}: "
+        f"n_retained={ledger.n_retained}, n_opportunities={ledger.n_opportunities}, "
+        f"n_searched={ledger.n_searched}"
+    )
+    # Unbound when the caller named no directory, rather than branching on whether
+    # to record: an unrecorded guard call is what `guard_log` exists to prevent,
+    # and an unbound log collects without a filesystem so a library caller still
+    # gets the outcome back.
+    log = guard_log if guard_log is not None else GuardLog("interpret")
+    log.record(
+        guards.four_state_missingness(
+            rows,
+            claimed_coverage=ledger.retained_coverage,
+            claimed_defined=ledger.n_retained,
+            claimed_total=ledger.n_opportunities,
+            value_key="hit_coefficient",
+        ),
+        subject=subject,
+    ).raise_if_failed()
 
 
 def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:

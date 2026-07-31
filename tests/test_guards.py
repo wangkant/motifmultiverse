@@ -895,27 +895,43 @@ def test_every_pending_entry_names_a_real_artifact():
 # human re-reads stays pending forever, and the one thing worse than an unwired
 # guard is an unwired guard whose reason stopped being true without anyone noticing.
 
-def test_four_state_missingness_still_has_no_independently_claimed_coverage():
-    """The manifest states a total and nothing else; health_report states all three.
+def test_four_state_missingness_is_wired_to_a_claim_it_does_not_produce():
+    """The guard for this project's founding failure now has a call site.
 
-    So the only artifact that could put a CLAIM in front of a recomputation carries
-    one third of the claim, and the artifact that carries all three computes them in
-    the same expression it would be checked against.
+    What took so long was not the wiring but finding a claim the guard does not
+    also compute. `interpret.health_report` states a coverage in the same
+    expression the guard would recompute -- pointing it there would have been the
+    guard corroborating itself. The opportunity ledger is written by the program
+    that FROZE the run, from an upstream table this package never reads, so a fill
+    occurring anywhere between there and here moves the recomputation and leaves
+    the claim where it was.
+
+    This asserts the shape rather than the behaviour -- that the claim reaching the
+    guard comes from outside the package, and that the guard is no longer filed as
+    waiting. The behaviour is in `tests/test_interpret.py`, which shows it CATCHING
+    a fill.
     """
-    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
-    from motifmultiverse.schema.substrate import HitSubstrateManifest
+    import inspect
 
-    entry = GUARDS_AWAITING_INPUT["four_state_missingness"]
-    assert entry.nearest_artifact == "schema.substrate.HitSubstrateManifest"
-    fields = set(HitSubstrateManifest.__dataclass_fields__)
-    assert "n_regions" in fields, "the one independently claimed count is gone"
-    claimed = {f for f in fields
-               if any(word in f for word in ("defined", "coverage", "searched", "used"))}
-    assert not claimed, (
-        f"the substrate manifest now claims {sorted(claimed)} independently of the hit "
-        "rows: four_state_missingness has the input it was waiting for. Wire it into "
-        "interpret.read_hit_table / verify_against_manifest and delete its "
-        "GUARDS_AWAITING_INPUT entry."
+    from motifmultiverse import interpret
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+    from motifmultiverse.substrate import OpportunityLedger
+
+    assert "four_state_missingness" not in GUARDS_AWAITING_INPUT
+
+    source = inspect.getsource(interpret.verify_missingness_against_ledger)
+    assert "guards.four_state_missingness(" in source
+    assert 'value_key="hit_coefficient"' in source, (
+        "the guard refuses to guess which column a fill could have written into; "
+        "the call site must name it"
+    )
+    # The claim's three parts all come off the ledger, not off anything this
+    # package computed from the same rows.
+    for field in ("retained_coverage", "n_retained", "n_opportunities"):
+        assert f"ledger.{field}" in source, f"claimed_* no longer reads ledger.{field}"
+    assert "producer" in OpportunityLedger.__dataclass_fields__, (
+        "a ledger is evidence because of who wrote it; without the producer it is "
+        "an anonymous pair of integers"
     )
 
 

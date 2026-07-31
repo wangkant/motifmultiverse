@@ -128,6 +128,36 @@ stage carries the fact — and it is worth being exact about what it did **not**
 recording an outcome does not make an unwired guard wireable, because a record of what a
 guard returned is not an independent claim for a guard to check.
 
+### M4d — the founding failure's guard, wired — **DONE**
+
+`guards.four_state_missingness` is the guard for the failure this package exists
+because of, and it had no call site through four releases. The obstacle was never
+the wiring: every coverage this package could hand it was one this package had
+computed from the same rows, so the guard would have corroborated itself and could
+not have failed for the reason it exists.
+
+`substrate.OpportunityLedger` is written by the program that *froze* the run, from
+an upstream table this package never reads, and states how many (region, variant)
+opportunities were materialised, searched and retained.
+`interpret.verify_missingness_against_ledger` puts those in front of a
+recomputation from the raw missingness column and refuses a disagreement, with
+`value_key="hit_coefficient"` named explicitly because the guard will not guess
+which column a fill could have written into. Verified on the real frozen K562
+substrate: the truthful ledger passes (claimed coverage 0.336663 over 576,589
+opportunities, recomputed identically), and a ledger claiming coverage 1.0 — the
+founding failure's exact shape — is refused at exit 4 with no interpretation
+written and the failing outcome recorded on disk.
+
+Two things this did **not** buy. It runs only where a ledger is supplied; a run
+without one is unchecked on this axis and says so rather than defaulting. And the
+counts had to be recorded under two distinct names — `n_retained` and `n_searched`
+against `n_opportunities` — because redefining the guard's `defined` to match
+`interpret.peak_universe` was the tempting alternative and would have destroyed
+the guard: a `defined` that counts `no_sequence_match` rows can no longer detect a
+fill that wrote a value into one.
+
+Four guards remain uncalled, down from seven.
+
 ### M4c — the specification curve — **DONE, on the `multiverse` path only**
 
 `multiverse` (`src/motifmultiverse/multiverse/`) runs a predeclared grid over one

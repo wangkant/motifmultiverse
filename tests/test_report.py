@@ -978,21 +978,28 @@ def test_a_malformed_bias_ledger_is_refused(tmp_path, monkeypatch, real_project)
 def test_a_guard_absent_from_guards_awaiting_input_is_not_thereby_wired(real_project, tmp_path):
     """The inversion that sank the previous attempt, held shut.
 
-    `GUARDS_AWAITING_INPUT` records why five guards have no call site. It is not a
-    complement: the ten guards it does not mention are not thereby known to be
+    `GUARDS_AWAITING_INPUT` records why four guards have no call site. It is not a
+    complement: the twelve guards it does not mention are not thereby known to be
     called. This fixture carries no `guard_outcomes.json`, so nothing the report
     can read says any guard passed on this run, and concluding otherwise from an
     absence is the shape of fabrication the whole module exists to make
     impossible.
+
+    `four_state_missingness` left this set when the opportunity ledger gave it a
+    claim written by the program that froze the run. It is now among the unlisted,
+    and this test asserts the report treats it exactly as it treats the rest of
+    them -- named as a guard whose call site the page cannot see, never as one
+    that passed.
     """
     doc = render(real_project, tmp_path / "out")
     flat = _flat(doc)
 
     awaiting = guards.GUARDS_AWAITING_INPUT
     assert set(awaiting) == {
-        "four_state_missingness", "interaction_required",
-        "estimability_floor", "stratum_parity", "single_family_layer",
+        "interaction_required", "estimability_floor", "stratum_parity",
+        "single_family_layer",
     }
+    assert "four_state_missingness" not in awaiting
     for guard_id, pending in awaiting.items():
         assert guard_id in flat, guard_id
         for field in ("nearest_artifact", "why_not_a_call_site", "closes_when"):
