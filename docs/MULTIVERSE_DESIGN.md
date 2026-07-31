@@ -108,6 +108,24 @@ where none was, the report says so and stays descriptive.
 | `guard_outcomes.json` | what each guard returned, as everywhere else here |
 | `cell_guard_outcomes.tsv` | the same outcomes as `guard_outcomes.json`, joined to the cell each licensed |
 
+## 7b. The measurement may carry its own coverage check
+
+A measurement that names an `opportunity_ledger` — the record written by the
+program that *froze* that hit table, stating how many (region, variant)
+opportunities it materialised, searched and retained — puts
+`guards.four_state_missingness` in front of every cell that reads it. The guard
+recomputes `defined`, `total` and coverage from the raw missingness column and
+refuses a disagreement, so a fill occurring anywhere between the freeze and the
+grid stops the cell rather than propagating into an effect.
+
+It is declared on the measurement rather than the cell because it is a property of
+the frozen table: the same hit table has the same retained coverage in every cell
+that reads it. The *outcome* is nevertheless recorded per cell, because a reader
+asking whether a particular effect rests on a verified substrate should not have
+to work out which cell happened to be read first. Where no ledger is declared,
+those cells are unchecked on that axis and their outcome list says so by not
+containing the guard.
+
 ## 8. A design
 
 Paths are relative to the design file. `test_the_design_documented_here_parses`
@@ -151,7 +169,8 @@ silently.
       "substrate_id": "0000000000000000000000000000000000000000000000000000000000000000",
       "hit_table": "substrate_core.tsv",
       "lexicon_content_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-      "lexicon_manifest": "lexicon_manifests/core.manifest.json"
+      "lexicon_manifest": "lexicon_manifests/core.manifest.json",
+      "opportunity_ledger": "ledgers/core.ledger.json"
     }
   ],
   "statistical_choices": [

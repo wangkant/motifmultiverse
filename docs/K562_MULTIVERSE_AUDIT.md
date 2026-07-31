@@ -17,11 +17,21 @@ already existed.
 and none was non-estimable**, so the dropped-cell path is exercised in the test
 suite rather than here — this grid does not demonstrate it and does not claim to.
 522 family-level effects, and 102 stability summaries across 6 estimands, each
-summary inside one estimand. 145 guard outcomes: four per cell, plus the
-`no_cross_estimand_pooling` call over the finished summaries. Each is joined to the
-cell it licensed in `cell_guard_outcomes.tsv` — the directory-level
+summary inside one estimand.
+
+181 guard outcomes: **five per cell**, plus the `no_cross_estimand_pooling` call
+over the finished summaries. All pass. Each per-cell outcome is joined to the cell
+it licensed in `cell_guard_outcomes.tsv` — the directory-level
 `guard_outcomes.json` records them all but has no cell to attribute them to, which
-for a 36-cell grid is 144 entries a reader cannot place.
+for a 36-cell grid is 180 entries a reader cannot place.
+
+The fifth is `four_state_missingness`, and it is the one worth naming here. Both
+measurements declare an `opportunity_ledger` written by the freezing run, so every
+cell recomputes the retained coverage from the raw missingness column and compares
+it against a claim this package did not produce: 194,116 of 576,589 opportunities
+retained for `core_final` (0.336663), 257,613 of 847,925 for `expanded` (0.303816).
+An audit whose central claim is that a missing value never becomes zero should not
+rest that claim on its own arithmetic, and here it does not.
 
 ## 1. The statistical axis moves the interval, not the estimate
 

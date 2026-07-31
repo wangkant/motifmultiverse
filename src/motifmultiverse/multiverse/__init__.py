@@ -58,6 +58,7 @@ from typing import Any
 from motifmultiverse import guards, interpret
 from motifmultiverse.guard_log import GuardLog
 from motifmultiverse.schema import PeakSetQuery, SchemaError, SelectionProvenance
+from motifmultiverse.substrate import read_opportunity_ledger
 
 __all__ = [
     "MULTIVERSE_SCHEMA_VERSION", "MultiverseError", "CellStatus",
@@ -181,6 +182,14 @@ class Measurement:
     hit_table: str
     lexicon_content_hash: str
     lexicon_manifest: str = ""
+    #: The `substrate.OpportunityLedger` for this frozen run, written by the
+    #: program that froze it. Declared here rather than per-cell because it is a
+    #: property of the measurement: the same hit table has the same retained
+    #: coverage in every cell that reads it. Where it is given, every cell using
+    #: this measurement records `four_state_missingness` among its guard outcomes;
+    #: where it is not, those cells are unchecked on that axis and their outcome
+    #: list says so by not containing it.
+    opportunity_ledger: str = ""
     label: str = ""
 
     def __post_init__(self) -> None:
@@ -539,6 +548,17 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
                 _verify_measurement(hits, spec.measurement, design.root)
                 hit_cache[key] = hits
             hits = hit_cache[key]
+            if spec.measurement.opportunity_ledger:
+                # Re-checked per cell rather than once per measurement, because a
+                # guard outcome belongs to the cell it licensed: a reader asking
+                # "was this effect computed over a substrate whose coverage was
+                # verified" must not have to know which cell happened to be first.
+                interpret.verify_missingness_against_ledger(
+                    hits,
+                    read_opportunity_ledger(
+                        _resolve(spec.measurement.opportunity_ledger),
+                        substrate_id=spec.measurement.substrate_id),
+                    guard_log=log)
 
             query_regions = _peaks(spec.estimand.query_regions)
             baseline_regions = _peaks(spec.estimand.baseline_regions)

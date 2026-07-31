@@ -69,6 +69,19 @@ It fills nothing with zero. A family not estimable in a cell is
 `NOT_ESTIMABLE`, absent from that cell's counts and never present as a measured
 zero.
 
+## The measurement may carry its own coverage check
+
+A measurement that names an `opportunity_ledger` puts
+`guards.four_state_missingness` — the guard for this project's founding failure —
+in front of every cell that reads that hit table. The ledger is written by the
+program that *froze* the table; the guard recomputes `defined`, `total` and
+coverage from the raw missingness column and refuses a disagreement, so a fill
+occurring between the freeze and the grid stops the cell instead of propagating
+into an effect. Declared on the measurement because it is a property of the frozen
+table; recorded per cell because a guard outcome belongs to the effect it
+licensed. A measurement without one leaves those cells unchecked on that axis, and
+their outcome list says so by not containing the guard.
+
 ## Identity: what "one frozen dataset" means
 
 `substrate_id` is the SHA-256 of a frozen hit caller's output; `lexicon_id` names

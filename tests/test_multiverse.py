@@ -540,3 +540,55 @@ def test_a_summary_filed_under_the_wrong_estimand_is_refused(dataset):
     result = guards.no_cross_estimand_pooling(mislabelled, specs)
     assert not result.passed
     assert "filed under estimand" in result.detail
+
+
+def test_a_measurement_may_declare_its_ledger_and_every_cell_records_the_check(dataset,
+                                                                               tmp_path):
+    """A declared ledger puts `four_state_missingness` on every cell that reads it.
+
+    Per cell rather than once per measurement, because a guard outcome belongs to
+    the cell it licensed: a reader asking whether *this* effect rests on a
+    substrate whose coverage was verified should not have to work out which cell
+    happened to be read first.
+    """
+    from motifmultiverse.substrate import OpportunityLedger, write_opportunity_ledger
+
+    rows = _hit_rows()
+    write_opportunity_ledger(
+        OpportunityLedger(
+            substrate_id=SUBSTRATE,
+            n_opportunities=len(rows),
+            n_retained=sum(1 for r in rows if r["missingness"] == "used"),
+            n_searched=len(rows),
+            producer="test-freezer",
+        ),
+        dataset / "core.ledger.json")
+
+    design = _design(
+        dataset,
+        measurements=[_measurement(opportunity_ledger="core.ledger.json")],
+        statistical=[_statistical("a"), _statistical("b", seed=1)])
+    result = multiverse.run_multiverse(design, tmp_path / "out")
+
+    assert [c.status for c in result.cells] == [CellStatus.SUCCESS] * 2
+    for cell in result.cells:
+        ids = [g["guard_id"] for g in cell.guard_outcomes]
+        assert "four_state_missingness" in ids, (
+            "a cell whose measurement declared a ledger did not record the check"
+        )
+
+
+def test_a_measurement_with_a_ledger_for_another_substrate_refuses_the_cell(dataset,
+                                                                           tmp_path):
+    from motifmultiverse.substrate import OpportunityLedger, write_opportunity_ledger
+
+    write_opportunity_ledger(
+        OpportunityLedger(substrate_id="f" * 64, n_opportunities=10, n_retained=5,
+                          n_searched=10, producer="test-freezer"),
+        dataset / "wrong.ledger.json")
+    design = _design(dataset,
+                     measurements=[_measurement(opportunity_ledger="wrong.ledger.json")])
+
+    result = multiverse.run_multiverse(design, tmp_path / "out")
+    assert [c.status for c in result.cells] == [CellStatus.REFUSED_SCHEMA]
+    assert "refusing to check one frozen run" in result.cells[0].reason
