@@ -261,7 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("hits", help="frozen hit table (.tsv or .parquet), as interpret reads")
     a.add_argument("--substrate-manifest", default=None,
                    help="verified manifest for the one frozen caller specification")
-    a.add_argument("--peaks", required=True, help="queried peak set")
+    a.add_argument("--peaks", required=True,
+                   help="queried peak set: one region_id per line, or a BED whose 4th "
+                        "column IS the region_id. Matched to the hit table by exact "
+                        "string equality on region_id, never by interval overlap")
     a.add_argument("--comparator", required=True,
                    help="baseline peak set; an effect without a baseline is not an effect")
     a.add_argument("--comparator-id", required=True, help="name of the baseline, on every row")

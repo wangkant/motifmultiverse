@@ -42,6 +42,7 @@ from typing import Any
 
 from motifmultiverse import guards, infer
 from motifmultiverse.schema import (
+    DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES,
     ESTIMATOR_CAPABILITY,
     HIT_TABLE_COLUMNS,
     IMPLEMENTED_ESTIMATORS,
@@ -835,6 +836,25 @@ def _effects_percentile(q_peaks: list[Peak], c_peaks: list[Peak], families: list
     # here: a q value derived from an invalid p value is also invalid. Both are
     # emitted by `_effects_bca_wild`, whose p value comes from FP-15's specified
     # test rather than from this replicate tail.
+    # The floor is on the replicates that were ESTIMABLE, not on the ones that
+    # were asked for. A draw whose blocks happen to hold no peak on one side is
+    # skipped above, so `n_bootstrap` is an upper bound on what the interval is
+    # actually computed from: with two blocks, one per side, `n_bootstrap=39`
+    # left 20 estimable replicates and the interval came out `[0.55, 0.55]` --
+    # the same zero-width 95% interval the requested-count check was added to
+    # prevent, at a replicate count that passes it. `infer` already floors the
+    # achieved count for the same reason (`len(replicates) < MIN_ESTIMABLE_BLOCKS`).
+    n_estimable = min((len(r) for r in replicates), default=n_bootstrap)
+    if n_estimable < MIN_PERCENTILE_REPLICATES:
+        raise InterpretError(
+            f"only {n_estimable} of {n_bootstrap} bootstrap replicates were estimable, "
+            f"below the preregistered floor of {MIN_PERCENTILE_REPLICATES} for a 95% "
+            "percentile interval: a draw whose blocks hold no peak on one side yields no "
+            "difference to resample, and both endpoints would be extreme replicates "
+            "rather than the 95% interval they would be labelled. Refusing to report an "
+            "interval narrower than the replicates support."
+        )
+
     effects: list[FamilyEffect] = []
     for k, fam in enumerate(families):
         point = (_mean([p.family_coefficient_sum.get(fam, 0.0) for p in q_peaks])
@@ -1176,7 +1196,15 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
         # printed exactly what an EXTERNAL_STRUCTURE run printed. The note is
         # not a caveat beside a suppressed number -- the number is licensed, and
         # what the note names is what it may be a claim ABOUT.
-        selected_on = ", ".join(query.selection_feature_names) or "an attribution-derived feature"
+        # Only the features that are actually in the registry, because it is only
+        # those that made the scope circular. Naming every declared feature said
+        # "selected on gc_content, hit_coefficient, which is derived from the same
+        # attribution surface" -- true of one of them and false of the other, in
+        # the sentence whose whole job is to say what the number may be about.
+        selected_on = ", ".join(
+            name for name in query.selection_feature_names
+            if name in DEFAULT_ATTRIBUTION_DERIVED_FEATURE_NAMES
+        ) or "an attribution-derived feature"
         notes.append(
             f"claim_scope is SUBSTRATE_CIRCULAR: this peak set was selected on {selected_on}, "
             "which is derived from the same attribution surface these numbers describe. The "
@@ -1209,7 +1237,7 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
             f"inference restricted to the held-out half ({len(region_ids)} query peaks, "
             f"{len(comparator_ids)} comparator peaks)"
         )
-        if n_comparator_submitted and not comparator_ids:
+        if region_ids and n_comparator_submitted and not comparator_ids:
             raise InterpretError(
                 f"the held-out set retains none of the {n_comparator_submitted} comparator "
                 "peaks submitted. CLUSTERED_WITH_SPLIT restricts both sides of the contrast "

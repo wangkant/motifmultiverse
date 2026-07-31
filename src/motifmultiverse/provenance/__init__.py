@@ -162,9 +162,13 @@ class ProvenanceRecord:
         # Named per-process so two runs writing the same directory cannot stage
         # over each other's partial file; the final os.replace still decides
         # which one the log ends up holding.
-        staged = dest.with_name(f"{dest.name}.{os.getpid()}.partial")
-        staged.write_text(json.dumps(existing, indent=2, sort_keys=True))
-        os.replace(staged, dest)
+        staged = dest.with_name(f".{dest.name}.{os.getpid()}.partial")
+        try:
+            staged.write_text(json.dumps(existing, indent=2, sort_keys=True))
+            os.replace(staged, dest)
+        except BaseException:
+            staged.unlink(missing_ok=True)
+            raise
         return dest
 
 

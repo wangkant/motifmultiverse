@@ -150,7 +150,7 @@ separate health records rather than one:
 |---|---|
 | `query_health` | the submitted query peak set alone |
 | `comparator_health` | the submitted comparator peak set alone, or `None` if none was submitted |
-| `contrast_health` | both sides together (`interpret.ContrastHealth`: `query`, `comparator`, `shared_blocks`, `union_blocks`, `passed`, `floor_failures`), or `None` if there was no comparator to contrast against |
+| `contrast_health` | both sides together (`interpret.ContrastHealth`: `query`, `comparator`, `shared_blocks`, `union_blocks`, `n_shared_peaks`, `passed`, `floor_failures`), or `None` if there was no comparator to contrast against |
 
 An effect is emitted only when **both** `query_health` and `comparator_health` pass their
 floors — checking the query alone and differencing against an unexamined comparator can
