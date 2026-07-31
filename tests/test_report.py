@@ -176,13 +176,16 @@ _REAL_INTERPRETATION_JSON = (
 )
 
 _REAL_PROVENANCE_JSON = (
-    '[{"command":"motifmultiverse interpret /data1/test/leixiong/kant/new_experiment/region_v4/04'
-    '_cbp_only_islands/mmv/substrate_CBP2114_core_final.tsv --peaks /tmp/claude-26399/-data1-test'
-    '-leixiong-kant/27c8cefc-97b6-4bae-8516-e5742c85b242/scratchpad/mmvps/cl5.txt --comparator /t'
-    'mp/claude-26399/-data1-test-leixiong-kant/27c8cefc-97b6-4bae-8516-e5742c85b242/scratchpad/mm'
-    'vps/not_cl5.txt --comparator-id not_cl5 --query-id cl5 --selection-provenance '
-    'PROGRAMMATIC_RULE --selection-rule leiden res0.5 == 5 --bootstrap 100 --out /tmp/claude-2639'
-    '9/-data1-test-leixiong-kant/27c8cefc-97b6-4bae-8516-e5742c85b242/scratchpad/mmvps/ok","input'
+    # The real run's own checksums, ids and counts, with its PATHS generalised.
+    # `provenance.redaction_policy` keeps `command` verbatim on purpose -- a record
+    # that cannot say what was run describes nothing -- so a real record carries
+    # real paths, and a real record pasted into a test file carries them into the
+    # repository. The assertions here are about verbatim rendering, not about
+    # where the files lived.
+    '[{"command":"motifmultiverse interpret data/substrate_CBP2114_core_final.tsv'
+    ' --peaks peaksets/cl5.txt --comparator peaksets/not_cl5.txt --comparator-id '
+    'not_cl5 --query-id cl5 --selection-provenance PROGRAMMATIC_RULE '
+    '--selection-rule leiden res0.5 == 5 --bootstrap 100 --out runs/cl5","input'
     '_scale":33917,"inputs":{"comparator:not_cl5.txt":"ba7989ea84b0891552ec650ddfc98bdd39cb4ea0d8'
     '8c7dc21a29b8987c38710b","hits:substrate_CBP2114_core_final.tsv":"557cf50902ba78ac481b37ffe8d'
     'cacb200f1c7ec645fe42b8e4571daf6ccfbe1","peaks:cl5.txt":"ba759d16140262e87202ca23b06f4b39bc5c'

@@ -68,10 +68,10 @@ one would naturally write instead are wrong, so a passing round trip here is
 discriminating rather than vacuous.
 
 Both loader generations were exercised on that same file: finemo **0.41** (PyPI,
-Python 3.13) through `compile.load_back`, and finemo **0.30** (`envs/chrombpnet_local`,
-Python 3.10 — this package needs 3.11, so the loader was called directly there with
-the arguments `_loader_call_kwargs` binds for the 0.30 signature). Both returned the
-same 29 names in the manifest's order.
+Python 3.13) through `compile.load_back`, and finemo **0.30** (an older
+installation on Python 3.10 — this package needs 3.11, so the loader was called
+directly there with the arguments `_loader_call_kwargs` binds for the 0.30
+signature). Both returned the same 29 names in the manifest's order.
 
 ---
 

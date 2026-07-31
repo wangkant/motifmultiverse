@@ -306,7 +306,16 @@ run the checks.
 
 MIT (`LICENSE`).
 
-There is deliberately no `CITATION.cff` yet. A citation file with placeholder
-authors renders on GitHub as a claim that the project is ready to be cited, which
-is a stronger statement than this repository can support. It goes in at
-publication, with real names.
+## Citation
+
+`CITATION.cff` carries the author and ORCID. It deliberately carries **no DOI**:
+a placeholder resolves to nothing while rendering on GitHub as a citable record,
+which is a stronger claim than an unpublished pre-alpha can support. When a
+preprint exists its DOI goes in under `preferred-citation` so citations reach the
+paper; a Zenodo DOI for the software itself can only be minted once this
+repository is public, so it comes after that rather than before.
+
+Two tests keep the file honest — `CITATION.cff`'s version must equal
+`motifmultiverse.__version__`, and its `license` must match `LICENSE` — because
+a citation record naming the wrong version cites something else, and every other
+hand-maintained claim in this repository has drifted at least once.

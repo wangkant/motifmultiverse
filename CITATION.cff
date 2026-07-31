@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: motifmultiverse
+abstract: >-
+  Bias-aware harmonization and robust inference of attribution-derived
+  regulatory motifs across models and methods. An attribution lexicon compiler:
+  it turns several local TF-MoDISco outputs into one shared lexicon that is safe
+  to compare across models, and records the merge, naming and admission
+  decisions with their evidence rather than leaving them implicit.
+type: software
+authors:
+  - family-names: Wang
+    given-names: Qiankang
+    orcid: "https://orcid.org/0009-0004-2425-7940"
+version: 0.1.0.dev0
+license: MIT
+repository-code: "https://github.com/wangkant/motifmultiverse"
+keywords:
+  - regulatory-genomics
+  - motifs
+  - attribution
+  - tf-modisco
+  - multiverse-analysis
+
+# No DOI yet, and none is invented here. A placeholder DOI is worse than an
+# absent one: it resolves to nothing while looking like a citable record. When a
+# preprint exists, add its DOI under `preferred-citation` (type: article) so
+# citations go to the paper; a Zenodo `doi:` for the software itself can only be
+# minted once this repository is public, so it comes after that, not before.

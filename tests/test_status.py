@@ -517,3 +517,104 @@ def test_the_readme_marks_exactly_the_guards_that_have_no_call_site():
     assert set(ALL_GUARDS) <= listed, (
         "README no longer lists every guard: " + ", ".join(sorted(set(ALL_GUARDS) - listed))
     )
+
+
+def test_citation_file_stays_in_sync_with_the_package():
+    """A citation record that names the wrong version cites something else.
+
+    Every other hand-maintained claim in this repository has drifted at least
+    once, which is why status.py derives them. CITATION.cff cannot be derived --
+    it is the authoritative statement of authorship -- so it is checked instead.
+    """
+    import yaml
+
+    import motifmultiverse
+
+    root = _repo_root()
+    path = root / "CITATION.cff"
+    if not path.exists():
+        pytest.skip("CITATION.cff is not present in this installation")
+    cff = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    assert cff["cff-version"] == "1.2.0"
+    assert cff["version"] == motifmultiverse.__version__, (
+        f"CITATION.cff cites {cff['version']}, package is {motifmultiverse.__version__}"
+    )
+    assert cff["type"] == "software"
+    assert cff["authors"] and all(a.get("orcid") for a in cff["authors"]), (
+        "every author needs an ORCID; a name alone does not disambiguate a person"
+    )
+    # No invented identifier. A placeholder DOI resolves to nothing while looking
+    # like a citable record, which is worse than having none.
+    assert "doi" not in cff, "a DOI appeared; check it resolves before pinning it here"
+
+
+def test_citation_license_matches_the_license_file():
+    import yaml
+
+    root = _repo_root()
+    path = root / "CITATION.cff"
+    if not path.exists():
+        pytest.skip("CITATION.cff is not present in this installation")
+    declared = yaml.safe_load(path.read_text(encoding="utf-8"))["license"]
+    first_line = (root / "LICENSE").read_text(encoding="utf-8").splitlines()[0].strip()
+    assert declared.split("-")[0].lower() in first_line.lower(), (
+        f"CITATION.cff says {declared}, LICENSE begins {first_line!r}"
+    )
+
+
+#: Shapes that must never reach a published file. Kept as data, and as a test,
+#: because a scan typed fresh at each release is a scan that misses a category:
+#: the pattern used before this test existed looked for `kant/envs` and sailed
+#: past `envs/chrombpnet_local` in a shipped README, and past a real absolute
+#: path with a username in it that a fixture had baked in verbatim.
+_LEAK_PATTERNS = (
+    (r"/data1/|/data/scratch/", "an absolute path from the authoring machine"),
+    (r"/afs/", "an AFS path"),
+    (r"\bcsail\b|\.mit\.edu\b", "an institutional hostname"),
+    (r"miniforge3|/envs/[a-z_]+|conda/envs", "a local environment name"),
+    (r"claude-\d{4,}|scratchpad/|pytest-of-", "an agent or test scratch path"),
+    (r"GPU-[0-9a-f]{8}-", "a GPU UUID"),
+    (r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}", "an e-mail address"),
+)
+
+
+def test_no_published_file_carries_a_local_path_or_identity():
+    """The repository is published; anything tracked is published with it.
+
+    Both leaks this test was written after were introduced by commits whose own
+    subject lines were about correctness, not about paths -- a fixture pasted a
+    real provenance record verbatim (`command` is unredacted by policy, so a real
+    record carries real paths), and a README named the environment a comparison
+    had been run in. Neither author was careless; both were writing about
+    something else. A scan nobody has to remember to run is the only kind that
+    holds.
+    """
+    import re
+    import subprocess
+
+    root = _repo_root()
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, capture_output=True, text=True, check=False,
+    )
+    if tracked.returncode != 0:
+        pytest.skip("not a git checkout; nothing is tracked here to scan")
+    names = [n for n in tracked.stdout.split("\0") if n]
+    assert names, "git ls-files returned nothing"
+
+    offences: list[str] = []
+    for name in names:
+        if name == "LICENSE":              # the licence carries the author's name by design
+            continue
+        if name == "tests/test_status.py":  # this file defines the patterns it scans for
+            continue
+        path = root / name
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue                        # binary or unreadable: nothing to leak in text
+        for pattern, what in _LEAK_PATTERNS:
+            for match in re.finditer(pattern, text):
+                line = text.count("\n", 0, match.start()) + 1
+                offences.append(f"{name}:{line}: {what} -- {match.group(0)!r}")
+    assert not offences, "published files carry local identity:\n  " + "\n  ".join(offences[:20])
