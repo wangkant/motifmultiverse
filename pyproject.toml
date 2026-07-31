@@ -44,7 +44,7 @@ Documentation = "./docs/"
 where = ["src"]
 
 [tool.setuptools.package-data]
-motifmultiverse = ["*/README.md"]
+motifmultiverse = ["*/README.md", "adjudicate/criteria.v1.yaml"]
 
 [tool.ruff]
 line-length = 100

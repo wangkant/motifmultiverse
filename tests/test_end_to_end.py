@@ -655,9 +655,10 @@ def test_the_shipped_criteria_still_refuse_to_guess_a_threshold():
     If someone ever fills a magnitude into `config/criteria.v1.yaml` to make a
     pipeline collapse duplicates, this fails and says why.
     """
+    from motifmultiverse.adjudicate import packaged_criteria_path
     from motifmultiverse.schema.criteria import CriterionStatus, load_criteria
 
-    shipped = load_criteria(Path("config/criteria.v1.yaml"))
+    shipped = load_criteria(packaged_criteria_path())
     for criterion_id in ("TRUE_DUPLICATE", "FRAGMENT_MATCH"):
         criterion = shipped[criterion_id]
         assert criterion.status is CriterionStatus.CRITERION_NOT_YET_DEFINED, (

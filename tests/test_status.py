@@ -262,3 +262,35 @@ def test_constraint_tally_in_prose_matches_the_machine_readable_source():
     assert tight in constraints or spaced in constraints, (
         f"CONSTRAINTS.md tally disagrees with constraints.tsv ({tight})"
     )
+
+
+def test_no_module_readme_claims_to_be_unimplemented_while_it_is_implemented():
+    """The module READMEs ship inside the wheel, so a stale one reaches users.
+
+    `annotate/README.md` opened with "Every other module in this package is
+    *unimplemented*" and tabulated six implemented modules as unimplemented,
+    while its own body was described as raising NotImplementedError. A reader who
+    pip-installed the package was told the tool does nothing.
+    """
+
+    from motifmultiverse.status import MODULES, module_status
+
+    root = _repo_root() / "src" / "motifmultiverse"
+    stale: list[str] = []
+    for name in MODULES:
+        readme = root / name / "README.md"
+        if not readme.exists():
+            continue
+        text = readme.read_text()
+        implemented = module_status(name)["status"] == "IMPLEMENTED"
+        # A module that IS implemented must not say its own body raises.
+        if implemented and "The body raises `NotImplementedError`" in text:
+            stale.append(f"{name}: says its body raises but it is implemented")
+        # ... and must not tabulate other implemented modules as unimplemented.
+        for other in MODULES:
+            if module_status(other)["status"] != "IMPLEMENTED":
+                continue
+            if f"unimplemented (`{other}`" in text or f"`{other}`, " in text.split("unimplemented (")[-1][:200]:
+                if "unimplemented (" in text and f"`{other}`" in text.split("unimplemented (")[1][:200]:
+                    stale.append(f"{name}: tabulates implemented module {other} as unimplemented")
+    assert not stale, "stale module READMEs:\n  " + "\n  ".join(sorted(set(stale)))

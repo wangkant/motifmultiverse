@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from motifmultiverse.adjudicate import packaged_criteria_path
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
     REGISTRY_SCHEMA_VERSION,
@@ -33,7 +34,7 @@ from motifmultiverse.schema.criteria import (
     load_criteria,
 )
 
-CRITERIA_PATH = Path(__file__).resolve().parents[1] / "config" / "criteria.v1.yaml"
+CRITERIA_PATH = packaged_criteria_path()
 
 
 def _complete_duplicate_evidence():
@@ -1558,3 +1559,42 @@ def test_cli_adjudicate_registry_metadata_changes_the_representative(tmp_path):
         representatives.append(table["representative_node_id"].iat[0])
 
     assert representatives == ["node-a", "node-b"]
+
+
+# --- regression: the default criterion registry must survive `pip install` -----
+def test_packaged_criteria_resolve_without_the_repository_tree():
+    """`--help` called the default "packaged" while it was not in the wheel.
+
+    The default was `Path(__file__).parents[3] / "config" / "criteria.v1.yaml"`,
+    which is the repository root only from a source checkout. Installed, it
+    pointed above site-packages -- and `config/` was never listed in
+    `package-data`, so no wheel could have carried it. A plain `pip install`
+    left `adjudicate` unusable at its default.
+    """
+    from motifmultiverse.adjudicate import packaged_criteria_path
+    from motifmultiverse.schema.criteria import load_criteria
+
+    path = packaged_criteria_path()
+    assert path.exists(), f"packaged criterion registry missing at {path}"
+    # It must live inside the package, not be reached by walking out of it.
+    import motifmultiverse
+    package_root = Path(motifmultiverse.__file__).resolve().parent
+    assert package_root in path.resolve().parents, (
+        f"{path} is outside the installed package; it cannot ship in a wheel"
+    )
+    assert load_criteria(path), "packaged criterion registry is empty"
+
+
+def test_criteria_resource_is_declared_as_package_data():
+    """A resource that is loaded but not declared ships only by accident."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[1]
+    pyproject = root / "pyproject.toml"
+    if not pyproject.exists():
+        pytest.skip("source tree not present in this installation")
+    data = tomllib.loads(pyproject.read_text())
+    declared = data["tool"]["setuptools"]["package-data"]["motifmultiverse"]
+    assert any("criteria.v1.yaml" in entry for entry in declared), (
+        f"criteria.v1.yaml is loaded at runtime but not in package-data: {declared}"
+    )

@@ -14,19 +14,27 @@ In the reference implementation `annotate` had no stage at all -- family assignm
 
 ---
 
-## Status: **never specified**, which is not the same as unimplemented
+## Status: candidate retention is implemented; **family assignment was never specified**
 
-Every other module in this package is *unimplemented*: its rule exists, its criterion is
-written, and what remains is to write the code. `annotate` is not in that position. In
-the reference implementation it **had no stage at all** — no design, no criterion, no
-artifact. Family assignment happened as a side effect inside an adjudication script.
+The stage runs: it loads the registry, retains database-label candidates with their
+evidence, flags weak ones, and writes its artifact and provenance. What it does *not* do
+is decide a family, and that is not a coding gap. In the reference implementation
+`annotate` **had no stage at all** — no design, no criterion, no artifact; family
+assignment happened as a side effect inside an adjudication script.
 
-The two states sit at different places on the roadmap:
+Two different things can be missing, and they wait on different work:
 
 | state | what it is waiting for |
 |---|---|
-| unimplemented (`ingest`, `align`, `adjudicate`, `compile`, `validate`, `infer`, `report`) | **implementation** — the rule and its check are written |
-| never specified (`annotate`) | **design** — what a family assignment must satisfy has not been decided, so there is nothing to implement yet |
+| unimplemented (`report`) | **implementation** — the rule and its check are written |
+| never specified (family assignment inside `annotate`) | **design** — what a family assignment must satisfy has not been decided, so there is nothing to implement yet |
+
+> The per-module status is derived, not typed: `motifmultiverse --help` and
+> `implementation_status.json` render it from the CLI dispatch table. An earlier version
+> of this section listed seven modules as unimplemented when six of them had been
+> implemented, which is the same class of stale hand-written claim that
+> [`../../../src/motifmultiverse/status.py`](../status.py) exists to prevent — and this
+> file ships inside the wheel, so the claim reached users.
 
 Treating the second as the first is how a stage gets built to whatever the first caller
 happened to need. So the open questions are written down here as questions, because a
@@ -77,5 +85,6 @@ implementation one, so it is recorded as a known gap in
 ruling**. Building it to whatever the first caller needs is precisely the failure
 mode this whole README is about.
 
-The body raises `NotImplementedError`. See `docs/ROADMAP.md` and `FP-19` in
+The *family-assignment* slot raises nothing and decides nothing: it is left unfilled
+pending that ruling, rather than defaulted. See `docs/ROADMAP.md` and `FP-19` in
 `docs/CONSTRAINTS.md`.

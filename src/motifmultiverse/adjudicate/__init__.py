@@ -37,10 +37,35 @@ __all__ = [
     "apply_manual_override",
     "write_adjudication_artifacts",
     "adjudicate_evidence",
+    "packaged_criteria_path",
     "run",
 ]
 
 ADJUDICATION_SCHEMA_VERSION = "1"
+CRITERIA_RESOURCE = "criteria.v1.yaml"
+
+
+def packaged_criteria_path() -> Path:
+    """Locate the versioned criterion registry that ships with the package.
+
+    The default used to be ``Path(__file__).parents[3] / "config" / ...``, which
+    resolves to the repository root only when running from a source checkout. In
+    an installed wheel it pointed above ``site-packages`` at a directory that does
+    not exist -- and could not have existed, because ``config/`` was never listed
+    in ``package-data``. ``--help`` called it "packaged" while a plain
+    ``pip install`` left the subcommand unusable.
+
+    The registry is loaded by the code and its digest is recorded into every
+    decision (``criteria_sha256``), so it belongs beside the module that reads it
+    rather than in the repository's ``config/``, which holds user-facing examples.
+    """
+    from importlib.resources import as_file, files
+
+    resource = files(__package__).joinpath(CRITERIA_RESOURCE)
+    with as_file(resource) as concrete:
+        return Path(concrete)
+
+
 _MEDOID_TIE_FIELDS = (
     "motif_completeness",
     "seqlet_count",
@@ -999,7 +1024,7 @@ def adjudicate_evidence(
     annotation_path = evidence / "annotation_candidates.parquet"
     stability_path = evidence / "stability_results.parquet"
     if criteria_path is None:
-        criteria_path = Path(__file__).resolve().parents[3] / "config" / "criteria.v1.yaml"
+        criteria_path = packaged_criteria_path()
     criteria_path = Path(criteria_path)
     registry_path, node_metadata = _read_node_metadata(registry_dir)
 

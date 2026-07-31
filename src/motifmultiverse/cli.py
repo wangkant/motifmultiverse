@@ -175,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--criteria", default=None,
                    help="versioned executable criterion registry "
-                        "(default: packaged config/criteria.v1.yaml)")
+                        "(default: the criteria.v1.yaml packaged with adjudicate)")
     a.add_argument("--review", default="review.yaml", help="human review file to emit")
     a.add_argument("--out", default="evidence/", help="output directory")
     a.set_defaults(func=_run_adjudicate)
