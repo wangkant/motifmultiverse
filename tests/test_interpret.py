@@ -1157,3 +1157,36 @@ def test_read_hit_table_accepts_a_complete_table(tmp_path):
     records = read_hit_table(p)
     assert len(records) == 1
     assert records[0].family_id == "F1"
+
+
+def test_a_used_hit_must_name_a_family_not_the_sentinel(tmp_path):
+    """A sentinel family is reported AS a family, not as a missing assignment.
+
+    Verified against the pre-fix code: a table whose family_id column was entirely
+    MISSING_SENTINEL produced a composition entry with family_id "NA",
+    peak_share 1.0 and an effect. That is the table this package's own `compile`
+    leads to -- it emits variant ids and no family, because family assignment is
+    the slot annotate/README.md records as never specified.
+    """
+    from motifmultiverse.interpret import read_hit_table
+    from motifmultiverse.schema import MISSING_SENTINEL, SchemaError
+
+    p = _write_hit_table(tmp_path / "hits.tsv")
+    text = p.read_text().replace("\tF1\t", f"\t{MISSING_SENTINEL}\t")
+    p.write_text(text)
+    with pytest.raises(SchemaError, match="must name a family_id"):
+        read_hit_table(p)
+
+
+def test_a_not_searched_row_may_leave_family_unnamed(tmp_path):
+    """The refusal is about USED rows: absence still has no family to name."""
+    from motifmultiverse.interpret import read_hit_table
+    from motifmultiverse.schema import MISSING_SENTINEL
+
+    p = _write_hit_table(tmp_path / "hits.tsv")
+    text = (p.read_text()
+            .replace("\tF1\t", f"\t{MISSING_SENTINEL}\t")
+            .replace("\tused\t", "\tno_sequence_match\t")
+            .replace("\t0.5\t", "\t\t"))
+    p.write_text(text)
+    assert len(read_hit_table(p)) == 1

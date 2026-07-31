@@ -294,3 +294,43 @@ def test_no_module_readme_claims_to_be_unimplemented_while_it_is_implemented():
                 if "unimplemented (" in text and f"`{other}`" in text.split("unimplemented (")[1][:200]:
                     stale.append(f"{name}: tabulates implemented module {other} as unimplemented")
     assert not stale, "stale module READMEs:\n  " + "\n  ".join(sorted(set(stale)))
+
+
+def test_every_readme_quickstart_command_parses():
+    """The README's own `validate` line omitted a required argument and exited 2.
+
+    A documented command that the parser rejects is a claim the tool contradicts
+    the moment anyone copies it. Parsing is checked here, not execution: the
+    quick-start names input files that do not exist in a checkout, and inventing
+    them would test the fixtures rather than the documentation.
+    """
+    import shlex
+
+    from motifmultiverse.cli import build_parser
+
+    readme = (_repo_root() / "README.md").read_text()
+    commands: list[str] = []
+    for block in readme.split("```")[1::2]:
+        buffer = ""
+        for raw in block.splitlines():
+            line = raw.split("#", 1)[0].rstrip() if not raw.lstrip().startswith("#") else ""
+            if not line.strip():
+                continue
+            buffer += line[:-1] + " " if line.endswith("\\") else line
+            if not line.endswith("\\"):
+                if buffer.strip().startswith("motifmultiverse "):
+                    commands.append(buffer.strip())
+                buffer = ""
+    assert commands, "no motifmultiverse commands found in README code blocks"
+
+    parser = build_parser()
+    failures = []
+    for command in commands:
+        argv = shlex.split(command)[1:]
+        if argv and argv[0].startswith("-"):        # --help / --version
+            continue
+        try:
+            parser.parse_args(argv)
+        except SystemExit:
+            failures.append(command)
+    assert not failures, "README commands the parser rejects:\n  " + "\n  ".join(failures)

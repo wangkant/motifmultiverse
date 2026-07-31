@@ -1075,6 +1075,22 @@ class HitRecord:
         if self.missingness is Missingness.USED:
             if self.variant_id == MISSING_SENTINEL:
                 raise SchemaError(f"{self.region_id}: a used hit must name a variant_id")
+            if self.family_id == MISSING_SENTINEL:
+                # The variant twin of the line above, which was missing. Every
+                # number `interpret` reports is grouped by family, so a sentinel
+                # family is not an absence -- it becomes a family. Verified: a
+                # table whose family_id column is entirely the sentinel produced a
+                # family literally called "NA" holding peak_share 1.0 and an
+                # effect. That is the table this package's own `compile` leads to,
+                # since it emits variant ids (`U_UNASSIGNED_00`) and no family:
+                # family assignment is the slot annotate/README.md records as
+                # never specified. Refusing here keeps that gap visible instead of
+                # letting it be reported as a result.
+                raise SchemaError(
+                    f"{self.region_id}/{self.variant_id}: a used hit must name a family_id. "
+                    "Every reported number is grouped by family, so a sentinel would be "
+                    "reported as a family rather than as the missing assignment it is."
+                )
             if self.hit_coefficient is None:
                 raise SchemaError(f"{self.region_id}/{self.variant_id}: used hit with no coefficient")
         elif self.hit_coefficient is not None:

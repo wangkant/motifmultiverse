@@ -116,7 +116,11 @@ motifmultiverse --help              # 9 subcommands with real arguments
 # a minimal path from discovery output through adjudication to a frozen lexicon:
 motifmultiverse ingest project.yaml --out registry/
 motifmultiverse align registry/ --out evidence/
-motifmultiverse annotate evidence/ --registry registry/ --tomtom --out evidence/
+# --tomtom reads PRECOMPUTED TomTom output named by --databases; it does not run
+# TomTom. config/db.yaml is site-specific and not shipped -- copy the shape from
+# config/db.example.yaml. Without it the backend is logged UNVERIFIED, not skipped.
+motifmultiverse annotate evidence/ --registry registry/ --tomtom \
+    --databases config/db.yaml --out evidence/
 motifmultiverse adjudicate evidence/ --registry registry/ --out adjudication/
 motifmultiverse compile registry/ \
     --decisions adjudication/merge_decisions.json --out lexicons/
@@ -124,6 +128,7 @@ motifmultiverse compile registry/ \
 # validate requires frozen, standardized before/after hit tables and the exact
 # manifest-bound decision/validation split artifacts; see validate --help.
 motifmultiverse validate lexicons/ --before-hits before.parquet --after-hits after.parquet \
+    --substrate-manifest substrate.manifest.json \
     --split-manifest split-manifest.json --decision-artifact decision-split.json \
     --validation-artifact validation-split.json --out validation/
 

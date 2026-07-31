@@ -127,3 +127,40 @@ permutation is absent from that enum on purpose: it is not unimplemented, it is
 
 `0` success · `2` usage or missing input · `4` refusal — the tool declined to
 produce a number, and the message says which rule declined it.
+
+## Getting an `interpret`-ready hit table out of `compile`
+
+The stages in this package stop at a compiled lexicon. `interpret` and `infer`
+start from a *hit table*, and nothing here produces one, because producing one
+means running a hit caller over your peaks — an external backend (`finemo-gpu`),
+declared optional on purpose. The seam is real work, not a missing function call,
+so it is written down rather than stubbed:
+
+1. `compile` writes `<tier>.h5` plus `<tier>.manifest.json`. The manifest's
+   `index` maps each `pattern_tag` in the H5 to its `node_id` and `variant_id`.
+2. Run the hit caller with `<tier>.h5` over the peak universe you intend to query.
+   **One frozen run over the whole universe** — the caller is not input-scale
+   invariant, so every later query has to be a subset of that one run, never a
+   re-run per subset.
+3. Join the caller's per-hit `pattern_tag` back through the manifest to
+   `variant_id`, and emit the columns in `schema.HIT_TABLE_COLUMNS`.
+   `substrate_id` identifies that frozen run; `input_scale` is its region count.
+4. `missingness` is four states, not a flag. A peak the caller searched and
+   retained nothing for is `no_sequence_match` or `hit_below_floor`, never a row
+   with `hit_coefficient` 0.0 and never an absent row.
+
+### `family_id` is not derivable here, and that is deliberate
+
+Step 3 cannot be completed from this package's outputs alone: `compile` emits
+`variant_id`, never `family_id`. Family assignment is the slot
+[`../annotate/README.md`](../annotate/README.md) records as **never specified** —
+what a family assignment must satisfy has not been decided, so there is nothing to
+implement yet, and inventing one to close the seam is precisely the failure that
+README is about.
+
+Until it is decided, `family_id` has to come from your own ontology, declared and
+versioned like any other input. It cannot be left at the sentinel: every number
+`interpret` reports is grouped by family, so a sentinel family is reported *as* a
+family rather than as the missing assignment it is. `HitRecord` therefore refuses
+a `used` row that does not name one — the same rule it already applied to
+`variant_id`.
