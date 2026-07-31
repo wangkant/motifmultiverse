@@ -50,6 +50,17 @@ was harmless only because nothing ever read the digits.
 groups this run looked for at all. That declaration is the only thing that can
 separate `not_searched` from the two absences the file itself can show.
 
+### A layout this reader cannot read is refused, not reported as two absences
+
+`group_absent` claims discovery ran and the group never formed — evidence about
+the admission gate. An **original** (pre-`tfmodisco-lite`) TF-MoDISco file keeps
+its patterns under `metacluster_idx_to_submetacluster_results`, so this reader saw
+neither `pos_patterns` nor `neg_patterns` and recorded that claim twice, with exit
+0 and an empty registry, for a file that may hold dozens of patterns. That is a
+measurement invented out of the reader's own blindness. The three absences are
+unchanged; what is refused is answering with any of them about a file that was
+never read.
+
 `cross_model_claims_restricted` is written into the registry whenever fewer than
 three distinct models are present, so the N ≥ 3 rule travels with the data instead
 of being something a later step has to remember to ask.

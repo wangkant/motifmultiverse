@@ -702,3 +702,93 @@ def test_guards_awaiting_input_each_say_what_they_wait_for():
     for name, reason in GUARDS_AWAITING_INPUT.items():
         assert name in guards.__all__, f"{name} is not a guard"
         assert len(reason) > 40, f"{name}: a one-word reason is not a reason"
+
+
+def test_run_all_can_actually_run_every_guard():
+    """`run_all` called every guard with one positional argument.
+
+    Two guards take more than one: `four_state_missingness` needs the claimed
+    coverage/defined/total it exists to recompute against, and
+    `index_order_matches_loader` needs both orders it compares. Handing each a
+    single value raised `TypeError` out of the entry point whose whole promise is
+    to run everything, so the "run every guard" call could not run the guard for
+    this project's founding failure.
+
+    The payload table is checked against `ALL_GUARDS` rather than listed loosely,
+    so a new guard cannot be added without deciding what `run_all` must feed it.
+    """
+    from motifmultiverse.guards import ALL_GUARDS, run_all
+
+    payloads = {
+        "single_scale": [{"input_scale": 12}],
+        "variant_id_unique": [{"variant_id": "v1", "denovo_pattern_id": "p1"}],
+        "no_key_parsing": "value = 1\n",
+        "four_state_missingness": {
+            "rows": [{"missingness": "used", "coefficient": 1.0}],
+            "claimed_coverage": 1.0, "claimed_defined": 1, "claimed_total": 1,
+            "value_key": "coefficient",
+        },
+        "no_cross_model_cwm_avg": [],
+        "sign_alignment": [{"registered_on": "unsigned_ppm"}],
+        "interaction_required": [],
+        "estimability_floor": [],
+        "stratum_parity": [],
+        "short_motif_flag": [],
+        "single_family_layer": [],
+        "selection_provenance_declared": [],
+        "health_before_effect": {
+            "health": {"intersection_coverage": 1.0, "n_blocks": 40,
+                       "explained_fraction": 0.9},
+            "emitted_order": ["health"],
+        },
+        "comparator_declared": [],
+        "index_order_matches_loader": {"index_names": ["a", "b"],
+                                       "loader_names": ["a", "b"]},
+    }
+    assert set(payloads) == set(ALL_GUARDS), "the payload table drifted from ALL_GUARDS"
+
+    results = run_all(payloads)
+    assert [r.guard_id for r in results] == list(ALL_GUARDS)
+    assert all(r.passed for r in results), [r for r in results if not r.passed]
+
+
+def test_run_all_still_reports_a_guard_that_fails_on_its_multi_argument_input():
+    """Reaching the guard is not the point unless the guard can still say no.
+
+    A repair that swallowed the argument mismatch -- returning a passing result,
+    or skipping the guard -- would make `run_all` green for the same reason the
+    old one was red, so the multi-argument path is exercised with input the guard
+    must reject.
+    """
+    from motifmultiverse.guards import run_all
+
+    results = run_all({
+        # The claim is 1.0 coverage over rows that are half undefined: the
+        # founding failure, in the shape the guard was written to catch.
+        "four_state_missingness": {
+            "rows": [{"missingness": "used", "coefficient": 1.0},
+                     {"missingness": "no_sequence_match", "coefficient": 0.4}],
+            "claimed_coverage": 1.0, "claimed_defined": 2, "claimed_total": 2,
+            "value_key": "coefficient",
+        },
+        "index_order_matches_loader": {"index_names": ["neg-1", "pos-1"],
+                                       "loader_names": ["pos-1", "neg-1"]},
+    })
+    assert [(r.guard_id, r.passed) for r in results] == [
+        ("four_state_missingness", False), ("index_order_matches_loader", False),
+    ]
+
+
+def test_run_all_refuses_a_multi_argument_guard_given_a_bare_value():
+    """A wrong-shaped input is a caller error, not a data violation.
+
+    Returning a failed `GuardResult` would let "you passed the wrong thing" and
+    "the artifact broke the rule" arrive at a report looking identical, so the
+    shape error is raised and names the arguments the guard wanted.
+    """
+    import pytest
+
+    from motifmultiverse.guards import run_all
+
+    with pytest.raises(TypeError, match="index_names, loader_names"):
+        run_all({"index_order_matches_loader": ["pos-1", "neg-1"]})

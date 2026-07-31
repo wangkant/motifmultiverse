@@ -894,7 +894,8 @@ def _lexicons(tmp_path):
                 "contrib_scores", data=motif_arrays[node_id]["cwm"],
             )
     ordered = [
-        ("pos_patterns", f"pattern_{number}", {"node_id": node_id})
+        ("pos_patterns", f"pattern_{number}",
+         {"node_id": node_id, "variant_id": f"MA_FAM_{number + 1:02d}"})
         for number, node_id in enumerate(motif_arrays)
     ]
     content_hash = lexicon_semantic_hash(
@@ -963,7 +964,8 @@ def test_lexicon_binding_rejects_a_manifest_that_omits_a_real_hdf5_motif(tmp_pat
     payload["node_ids"] = payload["node_ids"][:1]
     payload["index"] = payload["index"][:1]
     payload["lexicon_content_hash"] = lexicon_semantic_hash(
-        [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
+        [("pos_patterns", "pattern_0",
+          {"node_id": "node-0", "variant_id": "MA_FAM_01"})],
         {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
         schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
         loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
@@ -1123,8 +1125,10 @@ def test_lexicon_binding_rejects_nonlocal_or_aliased_hdf5_links(tmp_path, link_k
         }
         payload["lexicon_content_hash"] = lexicon_semantic_hash(
             [
-                ("pos_patterns", "pattern_0", {"node_id": "node-0"}),
-                ("pos_patterns", "pattern_1", {"node_id": "node-1"}),
+                ("pos_patterns", "pattern_0",
+                 {"node_id": "node-0", "variant_id": "MA_FAM_01"}),
+                ("pos_patterns", "pattern_1",
+                 {"node_id": "node-1", "variant_id": "MA_FAM_02"}),
             ],
             arrays,
             schema_version="1.0",
@@ -1151,8 +1155,10 @@ def test_lexicon_binding_requires_the_dataset_selected_by_motif_type(tmp_path):
     payload["motif_type"] = "hcwm"
     payload["lexicon_content_hash"] = lexicon_semantic_hash(
         [
-            ("pos_patterns", "pattern_0", {"node_id": "node-0"}),
-            ("pos_patterns", "pattern_1", {"node_id": "node-1"}),
+            ("pos_patterns", "pattern_0",
+             {"node_id": "node-0", "variant_id": "MA_FAM_01"}),
+            ("pos_patterns", "pattern_1",
+             {"node_id": "node-1", "variant_id": "MA_FAM_02"}),
         ],
         {
             "node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])},
@@ -1715,3 +1721,115 @@ def test_unlinked_backend_result_refuses_before_any_artifact_is_published(tmp_pa
             provenance=provenance, lexicon=binding,
         )
     assert not (tmp_path / "refused").exists()
+
+
+def test_affected_subset_scan_stays_linear_in_the_hit_table():
+    """`evaluate_stability` rebuilt the affected-peak set once per hit row.
+
+    The membership tests were written `key[0] in set(affected)` inside a
+    comprehension, so the set was reconstructed from the sorted list for every
+    hit in the table and the scan became quadratic. A validation of 80,000 hits
+    over 16,000 affected peaks took 99 seconds; the same call now takes about
+    1.7. This is a wall-clock test because the defect has no other observable --
+    the numbers were always right, only the number of times the same set was
+    built was wrong -- so the ceiling is set an order of magnitude above the
+    linear time and well below the quadratic one, and the result is asserted
+    alongside it so a "fix" that changed an answer would fail here too.
+    """
+    import time
+
+    n_peaks, hits_per_peak = 16_000, 5
+    before_rows, after_rows = [], []
+    for peak in range(n_peaks):
+        for hit in range(hits_per_peak):
+            common = {"peak_id": f"peak-{peak:06d}", "hit_id": f"hit-{hit}",
+                      "reconstruction": 0.25}
+            # Varying, not constant: a constant coefficient column makes the
+            # conservation correlation undefined and buries this test in numpy
+            # divide-by-zero warnings that have nothing to do with what it checks.
+            before_rows.append({**common, "coefficient": 1.0 + hit})
+            after_rows.append({**common, "coefficient": 2.0 + hit})
+    before, after = pd.DataFrame(before_rows), pd.DataFrame(after_rows)
+
+    started = time.perf_counter()
+    result = evaluate_stability("decision:linear", before, after)
+    elapsed = time.perf_counter() - started
+
+    assert result.n_affected_peaks == n_peaks
+    assert result.n_affected_hits == n_peaks * hits_per_peak
+    assert result.hit_jaccard == 1.0
+    assert elapsed < 20.0, (
+        f"{len(before_rows)} hits took {elapsed:.1f}s; the quadratic rebuild took 99s "
+        "and the linear scan takes under 2s"
+    )
+
+
+def test_an_exploratory_run_is_marked_exploratory_in_the_artifacts_it_writes(tmp_path):
+    """A run whose validation peaks ARE its decision peaks must say so on paper.
+
+    `AnalysisMode.EXPLORATORY` is the waiver `assert_split_compatibility` tells a
+    caller to declare when the two peak sets overlap, so it is the record that the
+    result is nonconfirmatory. That record reached the artifact only inside the
+    SHA-256 of the validation split identity, which means a reader comparing a
+    reused-peak run against a genuinely held-out one saw two files with identical
+    columns, identical statuses and identical power statements. A waiver nobody
+    can read is not a waiver.
+    """
+    import pyarrow.parquet as pq
+
+    binding = load_lexicon_binding(_lexicons(tmp_path))
+    manifest = _manifest()
+    reused = frozenset({"p-discovery"})
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:reuse",
+        decision_peak_ids=reused, validation_peak_ids=reused,
+        mode=AnalysisMode.EXPLORATORY,
+    )
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id=decision.decision_id, result_id="pending",
+        decision_peak_ids=reused, validation_peak_ids=reused,
+        mode=AnalysisMode.EXPLORATORY,
+    )
+    provenance = _stability_provenance(binding, manifest, decision, provisional)
+    results, verification = run_backend_validation(
+        binding, decision.decision_id, [_AvailableBackend()],
+    )
+    validation = replace(
+        provisional,
+        result_id=stability_result_id(
+            results, verification, provenance, binding, manifest, decision, provisional,
+        ),
+        artifact_id="",
+    )
+    out = tmp_path / "exploratory"
+    result_path, verification_path = write_stability_artifacts(
+        out, results, verification, manifest=manifest, decision=decision,
+        validation=validation, provenance=provenance, lexicon=binding,
+    )
+
+    frame = pd.read_parquet(result_path)
+    assert list(frame["analysis_mode"]) == ["EXPLORATORY"] * len(frame)
+    metadata = pq.read_schema(result_path).metadata
+    assert metadata[b"motifmultiverse.analysis_mode"] == b"EXPLORATORY"
+    header, *rows = verification_path.read_text(encoding="utf-8").strip().split("\n")
+    column = header.split("\t").index("analysis_mode")
+    assert {row.split("\t")[column] for row in rows} == {"EXPLORATORY"}
+
+
+def test_a_primary_run_is_marked_primary_rather_than_left_blank(tmp_path):
+    """The mode column is not an EXPLORATORY-only annotation.
+
+    A field that appears only when something is wrong is read as noise the first
+    time it is empty; the twin of the exploratory test pins that a clean
+    held-out run states its mode too, so the column always carries a claim.
+    """
+    (
+        binding, manifest, decision, validation, provenance, results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    result_path, verification_path = write_stability_artifacts(
+        tmp_path / "primary", results, verification, manifest=manifest,
+        decision=decision, validation=validation, provenance=provenance, lexicon=binding,
+    )
+
+    assert list(pd.read_parquet(result_path)["analysis_mode"]) == ["PRIMARY"]
+    assert "PRIMARY" in verification_path.read_text(encoding="utf-8")

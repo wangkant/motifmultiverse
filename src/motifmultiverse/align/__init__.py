@@ -23,6 +23,23 @@ own length, the search would happily return that window as "the" alignment.
 The floor is applied before scoring is even compared across candidates: an
 invalid window is not scored down, it is not a candidate at all.
 
+**Registration happens on the trimmed core, never on the padded pattern
+window.** TF-MoDISco emits every pattern at one fixed window width and pads the
+flanks with near-uniform background, so two patterns of the same width share
+most of their rows no matter what motif each one actually contains. Cosine over
+the whole window measures that shared padding: measured on 29 real ChromBPNet
+discovery patterns (50bp windows, cores 4-30bp), every one of the 406 pairs
+scored at least 0.665 and the median was 0.821 -- a 4bp `CATC` core and an 11bp
+`GCCCCGCCCCC` core registered at 0.945. Trimmed first, the same 406 pairs span
+0.032 to 0.989 with a median of 0.611, and 212 of them stop clearing the
+overlap floor at all. Worse, the bilateral overlap floor below is computed from
+the window length, so on a uniform-width registry it is satisfied by every pair
+and excludes nothing -- the same short-window failure it exists to prevent,
+hidden one level down. `ingest` already records each node's contribution-bearing
+span as `trimmed_core`; `align_registry` slices both the PPM and the CWM to it
+before any candidate is scored, and refuses a node that declares none rather
+than falling back to the padded window.
+
 **The null re-runs the full pipeline per shuffle.** `calibrate_pair_null` calls
 `register_pair` -- offset and orientation search included -- once per shuffle,
 on freshly permuted data. A null that reused the observed offset and only
@@ -58,9 +75,12 @@ __all__ = [
 BASE_ORDER = "ACGT"
 
 #: Bumped whenever the registration rule itself changes (the overlap floor,
-#: the scoring function, the orientation search). Carried on every emitted
-#: edge so a downstream reader never has to guess which rule produced a row.
-REGISTRATION_RULE_VERSION = "unsigned_ppm_v1"
+#: the scoring function, the orientation search, the window registered on).
+#: Carried on every emitted edge so a downstream reader never has to guess
+#: which rule produced a row. `unsigned_ppm_v1` registered on the untrimmed
+#: pattern window, and its scores are not comparable to these: the flanking
+#: background two same-width patterns share dominated its cosine.
+REGISTRATION_RULE_VERSION = "unsigned_ppm_trimmed_core_v2"
 
 #: The bilateral overlap floor. Both conditions must hold: raw overlap length
 #: AND the fraction of each motif's own length that overlap represents -- a
@@ -288,6 +308,32 @@ def _candidate_windows(source_len: int, target_len: int):
         yield offset, s_start, s_end, t_start, t_end, overlap_bp
 
 
+def _declared_core(node: dict[str, Any], length: int) -> tuple[int, int] | None:
+    """The half-open trimmed core this registry node declares, or None.
+
+    `ingest` records `trimmed_core` for every node it writes: the span of the
+    pattern whose contribution actually rises above the trim threshold. Anything
+    outside it is the near-uniform background TF-MoDISco pads each fixed-width
+    window with, and registering on that padding is the failure the module
+    docstring describes.
+
+    None means "this registry declares no core", and the caller drops the pair.
+    Falling back to the full window would be worse than refusing: it would put
+    the padded score back into the edge table under the same rule version as a
+    trimmed one, where nothing downstream could tell the two apart.
+    """
+    core = node.get("trimmed_core")
+    if not isinstance(core, (list, tuple)) or len(core) != 2:
+        return None
+    try:
+        start, end = int(core[0]), int(core[1])
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= start < end <= length:
+        return None
+    return start, end
+
+
 def register_pair(source_ppm: Any, target_ppm: Any,
                   source_cwm: Any | None = None, target_cwm: Any | None = None,
                   *, min_overlap_bp: int = DEFAULT_MIN_OVERLAP_BP,
@@ -483,6 +529,12 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     """Register every pair of motifs in a registry, calibrate a null for each,
     and write both the edge table and the null summary.
 
+    Every matrix is trimmed to the node's declared `trimmed_core` first, so an
+    emitted `offset` and `overlap_bp` are in core coordinates, not window ones,
+    and `overlap_frac_*` is a fraction of each core rather than of the padding
+    around it. A node whose registry record declares no usable core is excluded
+    with the pairs it would have joined; see `_declared_core`.
+
     `null_shuffles` and `seed` are threaded through as the provenance the
     non-negotiable constraints require: every emitted edge carries both
     (`AlignmentEvidence.null_shuffles` / `.seed`), not just the run as a whole.
@@ -525,6 +577,21 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
             a_ppm, b_ppm = a_arrays["ppm"][:], b_arrays["ppm"][:]
             a_cwm = a_arrays["cwm"][:] if "cwm" in a_arrays else None
             b_cwm = b_arrays["cwm"][:] if "cwm" in b_arrays else None
+            # Trim to the declared core before anything is scored. Both matrices
+            # of a node take the same window, because `register_pair` measures
+            # the signed CWM at the registration the PPM chose and the two would
+            # otherwise no longer describe the same positions.
+            a_core = _declared_core(a, a_ppm.shape[0])
+            b_core = _declared_core(b, b_ppm.shape[0])
+            if a_core is None or b_core is None:
+                n_excluded += 1
+                continue
+            a_ppm = a_ppm[a_core[0]:a_core[1]]
+            b_ppm = b_ppm[b_core[0]:b_core[1]]
+            if a_cwm is not None:
+                a_cwm = a_cwm[a_core[0]:a_core[1]]
+            if b_cwm is not None:
+                b_cwm = b_cwm[b_core[0]:b_core[1]]
             try:
                 evidence = register_pair(
                     a_ppm, b_ppm, source_cwm=a_cwm, target_cwm=b_cwm,

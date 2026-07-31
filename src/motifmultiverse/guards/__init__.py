@@ -598,10 +598,57 @@ ALL_GUARDS = {
 }
 
 
+def _required_parameters(fn: Any) -> list[str]:
+    """The names of ``fn``'s parameters that have no default.
+
+    Derived from the signature rather than listed here, so a guard that grows or
+    loses an argument cannot leave a hand-maintained list behind (the same reason
+    ``ALL_GUARDS`` is walked instead of enumerated in prose).
+    """
+    import inspect
+
+    return [
+        name for name, parameter in inspect.signature(fn).parameters.items()
+        if parameter.default is inspect.Parameter.empty
+    ]
+
+
 def run_all(inputs: Mapping[str, Any]) -> list[GuardResult]:
-    """Run each guard for which ``inputs`` supplies an argument."""
+    """Run each guard for which ``inputs`` supplies its argument(s).
+
+    Most guards take one argument -- the rows, nodes or claims they check -- and
+    ``inputs[guard_id]`` is that value. Two do not: ``four_state_missingness``
+    needs the claimed coverage/defined/total it must recompute against, and
+    ``index_order_matches_loader`` needs both orders it compares. Handing them a
+    single positional value raised ``TypeError`` straight out of the "run every
+    guard" entry point, so the one call that promises to run everything could not
+    run two of the fifteen -- including the guard for this project's founding
+    failure. For those guards ``inputs[guard_id]`` is a Mapping of keyword
+    arguments instead.
+
+    The shape is decided from the signature, never sniffed from the value: a
+    Mapping is already the legitimate single argument of
+    ``health_before_effect``, and guessing would silently splat a report into
+    keyword arguments. A guard whose arguments arrive in the wrong shape raises
+    ``TypeError`` naming what it wanted -- it does not return a failed
+    ``GuardResult``, because "the caller passed the wrong thing" and "the data
+    violated the rule" are different claims and a report cannot tell them apart
+    once they look alike.
+    """
     results = []
     for gid, fn in ALL_GUARDS.items():
-        if gid in inputs:
-            results.append(fn(inputs[gid]))
+        if gid not in inputs:
+            continue
+        value = inputs[gid]
+        required = _required_parameters(fn)
+        if len(required) == 1:
+            results.append(fn(value))
+        elif isinstance(value, Mapping):
+            results.append(fn(**value))
+        else:
+            raise TypeError(
+                f"{gid} takes {len(required)} arguments ({', '.join(required)}), so "
+                f"inputs[{gid!r}] must be a mapping of keyword arguments, not "
+                f"{type(value).__name__}"
+            )
     return results

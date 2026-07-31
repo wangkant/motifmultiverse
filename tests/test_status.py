@@ -334,3 +334,51 @@ def test_every_readme_quickstart_command_parses():
         except SystemExit:
             failures.append(command)
     assert not failures, "README commands the parser rejects:\n  " + "\n  ".join(failures)
+
+
+def test_no_enforced_row_rests_only_on_a_guard_with_no_call_site():
+    """`FP-12` and `FP-21` were `ENFORCED` on guards nothing ever calls.
+
+    Both rows named exactly one mechanism -- `guards.estimability_floor` and
+    `guards.interaction_required` -- and `guards.GUARDS_AWAITING_INPUT` records
+    both as having no call site in this release. So an artifact violating either
+    principle came out of this tool unchallenged while the table said the rule was
+    enforced, which is the failure `guards/__init__.py` names outright: a guard
+    that is defined, exported and never invoked reads as protection.
+
+    The check is derived from the machine-readable table and the live registry
+    rather than typed, so relabelling a row `ENFORCED` without wiring the guard up
+    fails here instead of shipping.
+    """
+    import csv
+    import re
+
+    from motifmultiverse.guards import GUARDS_AWAITING_INPUT
+
+    root = _repo_root()
+    tsv = root / "docs" / "constraints.tsv"
+    if not tsv.exists():                       # installed without docs/
+        import pytest
+        pytest.skip("docs/ not present in this installation")
+
+    # A cited mechanism is a dotted reference: `guards.x`, `schema.Y`,
+    # `validate.z`. A row is vacuous when every mechanism it cites is a guard the
+    # registry says is waiting for an input it never receives.
+    reference = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*")
+    vacuous = []
+    for row in csv.DictReader(tsv.open(encoding="utf-8"), delimiter="\t"):
+        if row["enforcement"] != "ENFORCED":
+            continue
+        cited = reference.findall(row["enforced_by"])
+        assert cited, f"{row['principle_id']}: ENFORCED but names no mechanism at all"
+        awaiting = [
+            name for name in cited
+            if name.startswith("guards.")
+            and name.removeprefix("guards.") in GUARDS_AWAITING_INPUT
+        ]
+        if len(awaiting) == len(cited):
+            vacuous.append(f"{row['principle_id']} rests only on {', '.join(awaiting)}")
+    assert not vacuous, (
+        "ENFORCED rows whose only named enforcement has no call site:\n  "
+        + "\n  ".join(vacuous)
+    )

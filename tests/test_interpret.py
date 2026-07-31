@@ -634,7 +634,7 @@ def test_interpretation_json_emits_the_two_independent_permission_axes(tmp_path)
         held_out_region_ids=_ids(0, half) + _ids(1, half),
     )
     result = interpret.interpret_query(
-        _rows(), query, n_bootstrap=20,
+        _rows(), query, n_bootstrap=50,
         floors=HealthFloors(min_blocks=N_BLOCKS // 2))
     payload = json.loads(result.write(tmp_path / "interpretation").read_text())
     assert payload["statistical_license"] == "HELD_OUT_INFERENCE"
@@ -1084,7 +1084,7 @@ def test_two_part_contribution_floor_carries_its_threshold_provenance_to_disk(tm
 def test_an_unusable_usage_definition_is_refused_at_the_interpretation_boundary():
     with pytest.raises(infer_mod.InferError, match="no default"):
         interpret.interpret_query(_cancelling_rows(), _cancelling_query(),
-                                  n_bootstrap=20, usage_definition="ANY_HIT")
+                                  n_bootstrap=50, usage_definition="ANY_HIT")
 
 
 def test_two_part_is_suppressed_with_the_effects_it_sits_beside():
@@ -1266,3 +1266,224 @@ def test_a_null_coefficient_is_absence_in_both_encodings(tmp_path):
     assert from_tsv == from_parquet
     absent = [r for r in from_parquet if r.variant_id == "V_CTCF"]
     assert absent and all(r.hit_coefficient is None for r in absent)
+
+
+# --- regression: a comparator that overlaps the query ------------------------
+# `estimate_effects` differenced the two sides without ever asking whether they
+# were two sides. Measured on the real K562 CBP-2114 substrate before this
+# existed: island cluster 5 (8,277 peaks) against *all* 33,917 peaks reported all
+# twelve families at exactly 0.7560 of their value against the same 33,917 minus
+# the island -- 25,640/33,917, the comparator's disjoint fraction -- with the
+# interval shifted to match, no note and no health field.
+def test_a_comparator_that_overlaps_the_query_is_refused_rather_than_attenuated():
+    """A peak on both sides of the difference is subtracted from itself."""
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    everything = _ids(0) + _ids(1)
+    with pytest.raises(interpret.InterpretError, match="share 84 peak"):
+        interpret.estimate_effects(peaks, _ids(0), everything, "all_peaks",
+                                   n_bootstrap=50, seed=1, block_size=BLOCK)
+
+
+def test_a_comparator_identical_to_the_query_is_refused_rather_than_reported_as_zero():
+    """The degenerate end of the same defect, which produced the worst artifact.
+
+    comparator == query returned effect 0.0 with the interval [0.0, 0.0] and
+    ``is_cross_condition`` True on every family: a zero-width interval around an
+    exact zero, which reads as "measured, and there is no difference".
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    with pytest.raises(interpret.InterpretError, match="subtracted from itself"):
+        interpret.estimate_effects(peaks, _ids(0), _ids(0), "itself",
+                                   n_bootstrap=50, seed=1, block_size=BLOCK)
+
+
+def test_contrast_health_counts_shared_peaks_because_shared_blocks_cannot_show_them():
+    """`shared_blocks` was the only overlap number and it is not a proxy for this.
+
+    On the real substrate the overlapping and disjoint contrasts spanned 283 and
+    282 shared blocks -- one apart, while one had 8,277 peaks on both sides and
+    the other none. The fixture reproduces the same insensitivity exactly.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    disjoint = interpret.contrast_health_report(peaks, _ids(0), _ids(1), HealthFloors(), BLOCK)
+    overlapping = interpret.contrast_health_report(
+        peaks, _ids(0), _ids(0) + _ids(1), HealthFloors(), BLOCK)
+
+    assert disjoint.n_shared_peaks == 0
+    assert overlapping.n_shared_peaks == len(_ids(0))
+    assert overlapping.shared_blocks == disjoint.shared_blocks, (
+        "the block counts are equal, which is why they cannot stand in for the peak overlap")
+
+
+# --- regression: a family measured as zero must keep its composition row ------
+def _rows_with_a_family_searched_and_never_retained() -> list[HitRecord]:
+    """`_rows()` plus FAM_C, searched in every peak and retained in none.
+
+    ``NO_SEQUENCE_MATCH`` rows name their family -- the real K562 substrate
+    carries 11 of its 12 families that way -- so this is a measured zero, not an
+    absence of measurement.
+    """
+    rows = _rows()
+    for row in list(rows):
+        if row.missingness is Missingness.USED and row.family_id == "FAM_A":
+            rows.append(HitRecord(
+                region_id=row.region_id, chrom=row.chrom, start=row.start, end=row.end,
+                missingness=Missingness.NO_SEQUENCE_MATCH, input_scale=SCALE,
+                lexicon_id=LEXICON, substrate_id=SUBSTRATE_ID,
+                variant_id="UA_FAMC_00", family_id="FAM_C"))
+    return rows
+
+
+def test_a_family_every_query_peak_measured_as_zero_keeps_its_composition_row():
+    """An omitted row is indistinguishable from "this family was never searched".
+
+    `compose` took its family list from `Peak.family_hit_count`, which only gains
+    a key through `add_used_hit`, so a family searched everywhere and retained
+    nowhere vanished. On the real substrate a 2,176-peak query with no CTCF and
+    no GATA hit emitted a ten-row composition beside a twelve-row effects table.
+    """
+    peaks = interpret.peak_universe(_rows_with_a_family_searched_and_never_retained(), BLOCK)
+    rows = {c.family_id: c for c in interpret.compose(peaks, _ids(0))}
+
+    assert set(rows) == {"FAM_A", "FAM_B", "FAM_C"}
+    assert rows["FAM_C"].n_peaks_with_family == 0
+    assert rows["FAM_C"].peak_share == 0.0
+    assert rows["FAM_C"].mean_coefficient_per_peak == 0.0
+    assert rows["FAM_C"].n_peaks_searched == len(_ids(0))
+
+
+def test_an_unnamed_family_is_not_promoted_to_a_measured_zero():
+    """The sentinel is an absent assignment, not a family that measured zero.
+
+    Admitting it would put `NA` in a composition table as a family, which is the
+    failure `HitRecord.__post_init__` already refuses for USED rows.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    assert peaks[NO_MATCH_PEAK].families_measured == set()
+    assert interpret.compose(peaks, [NO_MATCH_PEAK]) == []
+
+
+# --- regression: the shipped README said FP-15's estimators were absent -------
+def test_the_interpret_readme_does_not_call_an_implemented_estimator_unimplemented():
+    """`interpret/README.md` ships in the wheel and said of the BCa interval and
+    the wild cluster bootstrap-t "Neither is implemented", while both run and are
+    selectable as `--estimator bca-wild-cluster`. A reader who pip-installed the
+    package was told the licensed path did not exist.
+    """
+    from pathlib import Path
+
+    readme = (Path(interpret.__file__).parent / "README.md").read_text(encoding="utf-8")
+    assert "Neither is implemented" not in readme
+    for spelling, recorded in interpret.ESTIMATOR_CHOICES.items():
+        assert spelling in readme, f"--estimator {spelling} runs but the README never names it"
+        assert recorded in readme, f"results record {recorded} but the README never names it"
+
+
+# --- regression: the percentile path had no replicate floor -------------------
+def test_a_percentile_interval_is_refused_below_the_replicate_floor():
+    """`--bootstrap 1` emitted `[x, x]`: a zero-width 95% interval.
+
+    B replicates resolve a tail no finer than 1/(B+1), so a 2.5% tail needs
+    B >= 39; below it both endpoints are the extreme replicates and at B = 1 they
+    are the same one. The interval was printed beside its point estimate with
+    nothing saying it came from a single draw.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    with pytest.raises(interpret.InterpretError, match="below the preregistered floor of 39"):
+        interpret.estimate_effects(peaks, _ids(0), _ids(1), "odd",
+                                   n_bootstrap=1, seed=1, block_size=BLOCK)
+
+
+def test_the_replicate_floor_itself_still_produces_a_real_interval():
+    """The floor is the smallest count that works, not one past it."""
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    effects = interpret.estimate_effects(
+        peaks, _ids(0), _ids(1), "odd",
+        n_bootstrap=interpret.MIN_PERCENTILE_REPLICATES, seed=1, block_size=BLOCK)
+    low, high = effects[0].ci
+    assert low < high
+
+
+# --- regression: --held-out silently emptied the comparator -------------------
+def test_a_held_out_set_that_empties_the_comparator_names_the_split_not_the_baseline():
+    """The refusal blamed the caller for something the caller had supplied.
+
+    `CLUSTERED_WITH_SPLIT` intersects BOTH sides with the held-out set. A
+    held-out list naming only query peaks therefore left `comparator_ids` empty,
+    and the run failed with "a cross-condition effect needs a named baseline peak
+    set" at a caller who had named one, with the split never mentioned.
+    """
+    half = range(N_BLOCKS // 2, N_BLOCKS)
+    query = _query(
+        selection_provenance=SelectionProvenance.CLUSTERED_WITH_SPLIT,
+        held_out_region_ids=_ids(0, half),
+    )
+    with pytest.raises(interpret.InterpretError, match="retains none of the .* comparator peaks"):
+        interpret.interpret_query(_rows(), query, n_bootstrap=50,
+                                  floors=HealthFloors(min_blocks=N_BLOCKS // 4))
+
+
+def test_the_held_out_note_reports_both_sides_it_restricted():
+    """It announced a query-side restriction only, so the comparator's loss was
+    invisible even when the run went on to succeed."""
+    half = range(N_BLOCKS // 2, N_BLOCKS)
+    query = _query(
+        selection_provenance=SelectionProvenance.CLUSTERED_WITH_SPLIT,
+        held_out_region_ids=_ids(0, half) + _ids(1, half),
+    )
+    result = interpret.interpret_query(_rows(), query, n_bootstrap=50,
+                                       floors=HealthFloors(min_blocks=N_BLOCKS // 4))
+    assert any("comparator peaks" in note for note in result.notes), result.notes
+
+
+# --- regression: SUBSTRATE_CIRCULAR was silent --------------------------------
+def test_substrate_circular_says_so_in_the_notes():
+    """The flagship two-axis outcome produced no note at all.
+
+    `output_mode` -- the field the CLI printed -- has no representation for it,
+    so a FULL_INFERENCE run selected on `hit_coefficient` was indistinguishable
+    in every emitted sentence from one selected on genomic position. The scope
+    existed only as a JSON field beside a number people quote.
+    """
+    result = interpret.interpret_query(
+        _rows(), _query(selection_feature_names=["hit_coefficient"]), n_bootstrap=50)
+
+    assert result.claim_scope == ClaimScope.SUBSTRATE_CIRCULAR.value
+    assert result.statistical_license == StatisticalLicense.FULL_INFERENCE.value
+    circular = [n for n in result.notes if "SUBSTRATE_CIRCULAR" in n]
+    assert circular, result.notes
+    assert "hit_coefficient" in circular[0], "the note must name the feature that made it circular"
+
+
+def test_an_external_selection_gets_no_circularity_note():
+    """The falsification twin: the note must not fire on every query."""
+    result = interpret.interpret_query(
+        _rows(), _query(selection_feature_names=["gc_content"]), n_bootstrap=50)
+    assert result.claim_scope == ClaimScope.EXTERNAL_STRUCTURE.value
+    assert not [n for n in result.notes if "SUBSTRATE_CIRCULAR" in n]
+
+
+# --- regression: zero overlap is a key mismatch, not thin coverage ------------
+def test_zero_intersection_is_reported_as_a_key_mismatch_rather_than_thin_coverage():
+    """`--peaks` accepts a BED, but matching is exact string equality on region_id.
+
+    A 3-column BED is read as `chrom:start-end`, so against a table that spells
+    the same peak `peak_000001` every submitted id misses. The only thing said
+    was "intersection_coverage=0.0 < floor 0.9", which sends the reader looking
+    for missing peaks rather than for the key the two sides disagree on.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    health = interpret.health_report(
+        peaks, ["chr1:0-500", "chr1:1000-1500"], HealthFloors(), BLOCK)
+
+    assert health.intersection_coverage == 0.0
+    assert any("key mismatch" in f for f in health.floor_failures), health.floor_failures
+
+
+def test_thin_but_nonzero_coverage_is_not_called_a_key_mismatch():
+    """The falsification twin: a genuinely thin query keeps the plain message."""
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    health = interpret.health_report(
+        peaks, [*_ids(0)[:2], "chr1:0-500", "chr1:1000-1500"], HealthFloors(), BLOCK)
+    assert 0.0 < health.intersection_coverage < 0.9
+    assert not any("key mismatch" in f for f in health.floor_failures)

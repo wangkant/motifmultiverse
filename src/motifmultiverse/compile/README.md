@@ -96,6 +96,15 @@ One compatibility constraint falls out of reading that loader: it stacks every m
 into a single array, so a lexicon whose patterns differ in length cannot be read back
 at all. `compile` refuses to write one.
 
+### Publication is all-or-nothing
+
+Tiers are written to a staging directory and moved into `--out` only once every
+one of them has been written and verified. A compile that wrote `core` and then
+refused `expanded` used to leave both files behind, and `validate` binds a lexicon
+set by globbing `*.manifest.json` — so the wreckage of a refused compile read
+downstream as a perfectly valid one-tier lexicon. What a refusal does leave is
+`provenance.json`: a rejected compile still records what was attempted (`T-09`).
+
 ### Tiers, and the threshold that is deliberately absent
 
 `core` ⊆ `expanded`; `sensitivity` is `expanded` with some merges left split
@@ -130,9 +139,26 @@ A collapse names a representative, and `compile` refuses one that is not among i
 own members — that is what "observed medoid, never a constructed average" means at
 the artifact level (`FP-05`).
 
+### `motif_type` is the loader's vocabulary
+
+`motif_type` is handed verbatim to the backend named by `loader_backend`. finemo's
+loader dispatches on `cwm` / `hcwm` / `pfm` / `pfm_softmax` and has no else-branch,
+so an unrecognised value leaves its motif locals unbound and raises
+`UnboundLocalError` from inside the backend rather than being refused here. The
+compiler's table once keyed that third entry `ppm` — *our* name for the array —
+and `compile(motif_type="ppm")` therefore wrote a lexicon that the very loader its
+manifest declared could not read.
+
 ### `lexicon_content_hash`
 
 `FP-11` requires every family-level number to state the lexicon it was computed
-under. The hash is over the ordered content (pattern tags, node ids, arrays), not
-over the file, so it is stable across rewrites. Nothing yet checks that a downstream
-number cites it; the thing to cite now exists.
+under. The hash is over the ordered content (pattern tags, node ids, **variant
+ids**, arrays), not over the file, so it is stable across rewrites. Nothing yet
+checks that a downstream number cites it; the thing to cite now exists.
+
+`variant_id` is in there because it is what downstream binds to. The hit caller
+returns a `pattern_tag`; this manifest's `index` is the only table that resolves a
+tag to the semantic identity every family-level number is grouped by. Hashing tag,
+node id and arrays alone let two lexicons that resolve the same tags to entirely
+different variant assignments share one hash — so the citation `FP-11` asks for
+named a lexicon it could not tell apart from another one.

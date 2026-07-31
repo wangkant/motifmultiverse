@@ -270,13 +270,15 @@ def bca_paired_block_interval(
     return (lo, hi)
 
 
-#: Upper bound on Rademacher weights drawn per chunk inside
-#: `wild_cluster_bootstrap_t` (a chunk is a `(n, G)` int8 matrix; the bound keeps
-#: the float64 working set beside it modest for genome-scale block counts).
-#: Chunk boundaries are unobservable in the result: the bit stream is consumed
-#: sequentially, so chunking changes nothing but peak memory
-#: (`test_wct_chunk_size_cannot_change_the_result` makes that an executable
-#: claim by monkeypatching this constant).
+#: Upper bound on Rademacher weights whose float64 product with the centred
+#: block effects is materialised at once inside `wild_cluster_bootstrap_t` (that
+#: `(n, G)` float64 array is the working set; the int8 weight matrix beside it is
+#: an eighth of its size). Chunk boundaries are unobservable in the result
+#: because the weights are DRAWN in one call and only the arithmetic over them is
+#: chunked -- see the comment at the draw for why chunking the draw itself did
+#: not have that property (`test_wct_chunk_size_cannot_change_the_result` and
+#: `test_wct_chunk_size_cannot_change_the_result_at_a_misaligned_block_count`
+#: make it an executable claim by monkeypatching this constant).
 _MAX_WEIGHTS_PER_CHUNK = 8_000_000
 
 
@@ -406,16 +408,24 @@ def wild_cluster_bootstrap_t(
 
     rng = np.random.default_rng(seed)
     sqrt_g = math.sqrt(g)
+    # The ENTIRE Rademacher draw happens in this one call, before any chunking.
+    # numpy's bounded small-integer generator buffers bits inside a call and
+    # DISCARDS the partial buffer when the call returns -- for `dtype=int8` it
+    # hands out four values per 32-bit word -- so `n` draws of `(k, G)` are not
+    # the bit stream of one draw of `(n * k, G)` unless `G` is a multiple of
+    # four. Drawing per chunk therefore made the p-value depend on
+    # `_MAX_WEIGHTS_PER_CHUNK`, a pure memory constant: at G = 30 (this module's
+    # own MIN_ESTIMABLE_BLOCKS, and not a multiple of four) shrinking the chunk
+    # moved p from 0.7305 to 0.7006 on the same data and seed. A number that
+    # moves when someone tunes a memory bound is not reproducible, so the draw is
+    # no longer split; int8 keeps it cheap (one byte per weight) and only the
+    # float64 product below -- eight times larger -- is chunked.
+    weights = rng.integers(0, 2, size=(n_bootstrap, g), dtype=np.int8) * 2 - 1
     chunk = max(1, min(n_bootstrap, _MAX_WEIGHTS_PER_CHUNK // g))
     extreme = 0
     n_valid = 0
-    remaining = n_bootstrap
-    while remaining > 0:
-        n = min(chunk, remaining)
-        remaining -= n
-        # int8 keeps the draw small; the float64 product below is the working set.
-        weights = rng.integers(0, 2, size=(n, g), dtype=np.int8) * 2 - 1
-        boot = weights.astype(np.float64) * centered
+    for start in range(0, n_bootstrap, chunk):
+        boot = weights[start:start + chunk].astype(np.float64) * centered
         # Degenerate == every weighted effect bitwise identical (the structural
         # zero-variance condition; see the docstring).
         valid = ~(boot == boot[:, :1]).all(axis=1)

@@ -79,6 +79,16 @@ Floors are arguments (`--floor-coverage`, `--floor-blocks`, `--floor-explained`)
 declared before the run and recorded in the result. A floor chosen after the
 numbers are visible is not a floor.
 
+`ContrastHealth` reports a fourth number that has no floor because it has no
+tolerable value: `n_shared_peaks`, the peaks submitted on **both** sides. A peak
+on both sides of the difference is subtracted from itself, so an effect is
+refused outright when the comparator overlaps the query. "Cluster vs all peaks"
+attenuated every family by exactly the comparator's disjoint fraction (0.7560 on
+a real K562 island) with the interval shifted to match; at `comparator == query`
+every effect was exactly 0.0 with a zero-width interval. `shared_blocks` does not
+show it — 283 blocks overlapping against 282 disjoint. Spell it "query vs
+everything except the query".
+
 **Suppression here is wider than the design report requires**, and that is this
 repository's own tightening. The report suppresses the *interpretation section*; a
 failed floor here also withholds the descriptive composition. The reasoning: at 20%
@@ -91,7 +101,7 @@ prevent. If a project wants the looser rule, that is one condition in
 
 | selection provenance | output |
 |---|---|
-| `EXTERNAL` | full inference: effect, interval, *q* |
+| `EXTERNAL` | full inference: effect and interval (*p* and *q* only under `--estimator bca-wild-cluster`) |
 | `PROGRAMMATIC_RULE` | full inference; the rule text is required and recorded |
 | `CLUSTERED_WITH_SPLIT` | full inference **on the held-out half only** |
 | `CLUSTERED_NO_SPLIT` | descriptive decomposition; no interval, no *p* |
@@ -106,16 +116,36 @@ information. Asking the agent later does not repair it.
 
 ### What the estimator actually is
 
-Percentile **block** bootstrap over whole genomic blocks, paired between query and
-comparator, with the block size, replicate count `B` and seed stored beside every
-interval. The *p* value is floored at 1/(B+1) and *q* is Benjamini-Hochberg over
-the families tested in that call.
+Two paths, selected by `--estimator`. Both resample **whole genomic blocks**, both
+are paired between query and comparator, and both store the block size, replicate
+count `B` and seed beside every interval. What the flag changes is how the
+uncertainty around the same point estimate is computed, and therefore what the
+result is licensed to carry.
 
-`FP-15` specifies a **BCa** paired block bootstrap and a block-level wild cluster
-bootstrap-*t*. Neither is implemented. Every result names its estimator
-(`percentile_block_bootstrap`) rather than saying "block bootstrap", because the
+| `--estimator` | recorded as | interval | *p* / *q* |
+|---|---|---|---|
+| `percentile` *(default)* | `percentile_block_bootstrap` | percentile block bootstrap | **withheld** — `ESTIMATION_ONLY` |
+| `bca-wild-cluster` | `wild_cluster_bootstrap_t` | BCa paired genomic-block bootstrap | wild cluster bootstrap-*t*, *q* by Benjamini-Hochberg over the families in that call — `INTERVAL_AND_TEST` |
+
+`FP-15`'s specified pair is the second row, and it is implemented
+(`infer.bca_paired_block_interval`, `infer.wild_cluster_bootstrap_t`). It is not
+the default: a default that emits *p* values emits them to callers who never
+decided they wanted a hypothesis test. The default path emits no *p* and no *q* at
+all, because the proportion of bootstrap replicates crossing zero looks like a
+two-sided *p* value and is not a calibrated one — and a *q* derived from it would
+inherit the invalidity.
+
+The default path refuses below `interpret.MIN_PERCENTILE_REPLICATES` (39) rather
+than degrading: `B` replicates resolve a tail no finer than 1/(B+1), so a 2.5%
+tail needs `B ≥ 39`, and below it both endpoints are the extreme replicates. At
+`B = 1` that produced `[x, x]` — a zero-width 95% interval printed beside its
+point estimate, which reads as infinite precision rather than as one draw.
+
+Every result names its estimator rather than saying "block bootstrap", because the
 distance between what was specified and what ran is exactly the thing that
-disappears from a methods section.
+disappears from a methods section. The recorded value names the half that decides
+the result's *capability* — the test — with the interval half named in the run's
+notes.
 
 Every result also carries `estimators_defined` and `estimators_implemented`
 (`schema.Estimator`), so a consumer branches on the recognised set rather than on a

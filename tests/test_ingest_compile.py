@@ -582,7 +582,7 @@ def test_loader_parameters_propagate_to_roundtrip_verification(tmp_path, monkeyp
     """
     registry = _registry(tmp_path)
     manifests = compile_mod.compile_lexicons(
-        registry, tmp_path / "lex", trim_threshold=0.21, motif_type="ppm",
+        registry, tmp_path / "lex", trim_threshold=0.21, motif_type="pfm",
         include_rc=True, verify="skip",
     )
     manifest = manifests["core"]
@@ -597,7 +597,7 @@ def test_loader_parameters_propagate_to_roundtrip_verification(tmp_path, monkeyp
     result = compile_mod.verify_roundtrip(tmp_path / "lex" / "core.h5", manifest)
     assert result.passed
     assert captured["trim_threshold"] == 0.21
-    assert captured["motif_type"] == "ppm"
+    assert captured["motif_type"] == "pfm"
     assert captured["include_rc"] is True
 
 
@@ -847,3 +847,192 @@ def test_ingest_records_one_checksum_per_analysis_even_when_the_files_share_a_na
     )
     assert len({prov["inputs"][k] for k in h5_keys}) == 2, "two files, two checksums"
     assert not any(k.startswith("/") for k in prov["inputs"]), "keys must stay relative"
+
+
+# --- regression: a lexicon's identity must cover what downstream binds to ------
+# The hit caller hands back `pattern_tag`; the manifest index is the only table
+# that turns a tag into the `variant_id` every family-level number is grouped by
+# (interpret/README.md step 3), and `schema` calls variant_id the only stable
+# semantic identity. A content hash blind to that column is a citation that
+# cannot name which lexicon a number came from -- the thing FP-11 asks for.
+def test_lexicon_identity_covers_the_variant_id_downstream_binds_to(tmp_path):
+    modisco = _modisco(tmp_path / "shared.h5")
+    seen: dict[str, dict[str, object]] = {}
+    for union_id in ("MA", "MB"):
+        home = tmp_path / union_id
+        home.mkdir()
+        project = home / "project.json"
+        project.write_text(json.dumps({
+            "project": "test-project", "peak_universe_id": "u1",
+            "analyses": [{"id": "modelA_r1", "model": "modelA", "readout": "r1",
+                          "union_id": union_id, "context": "promoter",
+                          "modisco_h5": str(modisco)}]}))
+        ingest.ingest_project(project, home / "registry")
+        manifests = compile_mod.compile_lexicons(
+            home / "registry", home / "lex", tiers=("core",), verify="skip")
+        index = json.loads((home / "lex" / "core.manifest.json").read_text())["index"]
+        seen[union_id] = {
+            "hash": manifests["core"].lexicon_content_hash,
+            "node_ids": [row["node_id"] for row in index],
+            "variant_ids": [row["variant_id"] for row in index],
+            "pattern_order": manifests["core"].pattern_order,
+        }
+
+    # Same discovery file, same nodes, same tags, same arrays: variant_id is the
+    # only thing that differs, which is exactly the case the hash used to miss.
+    assert seen["MA"]["node_ids"] == seen["MB"]["node_ids"]
+    assert seen["MA"]["pattern_order"] == seen["MB"]["pattern_order"]
+    assert seen["MA"]["variant_ids"] != seen["MB"]["variant_ids"]
+    assert seen["MA"]["hash"] != seen["MB"]["hash"]
+
+
+def test_lexicon_identity_refuses_a_pattern_that_names_no_variant_id():
+    """Silently hashing the tag alone is how two variant assignments collided."""
+    with pytest.raises(compile_mod.CompileError, match="variant_id"):
+        compile_mod.lexicon_semantic_hash(
+            [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
+            {"node-0": {"cwm": np.zeros((MOTIF_LEN, 4))}},
+            schema_version="1.0", trim_threshold=0.3, motif_type="cwm",
+            include_rc=False, loader_backend="finemo",
+            loader_parameters={"motif_lambda_default": 0.7},
+        )
+
+
+# --- regression: motif_type is the loader's vocabulary, not ours ---------------
+# `motif_type` is handed verbatim to the backend named by `loader_backend`.
+# finemo's `load_modisco_motifs` dispatches on cwm / hcwm / pfm / pfm_softmax and
+# has no else-branch, so an unknown value leaves its motif locals unbound and
+# raises `UnboundLocalError` from inside the backend. Verified against the real
+# loader (finemo 0.x, python 3.10) on a compiled lexicon:
+#   cwm -> 5 motifs;  ppm -> UnboundLocalError 'motif_norm';  pfm -> 5 motifs.
+def test_compile_refuses_a_motif_type_the_declared_loader_cannot_dispatch(tmp_path):
+    registry = _registry(tmp_path)
+    with pytest.raises(compile_mod.CompileError, match="motif_type"):
+        compile_mod.compile_lexicons(
+            registry, tmp_path / "unreadable", motif_type="ppm", verify="skip")
+    assert not (tmp_path / "unreadable" / "core.h5").exists()
+
+    manifests = compile_mod.compile_lexicons(
+        registry, tmp_path / "readable", motif_type="pfm", verify="skip")
+    assert manifests["core"].motif_type == "pfm"
+    with h5py.File(tmp_path / "readable" / "core.h5", "r") as h5:
+        assert "sequence" in h5["pos_patterns"]["pattern_0"]
+
+
+# --- regression: a refused tier must not leave a publishable fragment ----------
+# `validate.load_lexicon_binding` binds a lexicon set by globbing
+# `*.manifest.json`, so a compile that wrote `core` and then refused `expanded`
+# read downstream as a perfectly valid one-tier lexicon, with a `lexicon_identity`
+# computed over the surviving fragment and nothing saying two tiers are missing.
+def test_a_tier_refused_after_another_was_written_publishes_nothing(tmp_path):
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    odd = sorted(node["node_id"] for node in nodes)[0]
+    with h5py.File(registry / "arrays.h5", "a") as h5:
+        del h5[odd]["cwm"]
+        h5[odd].create_dataset("cwm", data=np.zeros((MOTIF_LEN + 3, 4)))
+    decisions = tmp_path / "d.json"
+    decisions.write_text(json.dumps(_adjudication_payload(tiers={
+        odd: {"discovery_tier": "core", "analysis_tier": "expanded",
+              "tier_reason": "held out of core so only expanded mixes lengths"}})))
+
+    out = tmp_path / "lex"
+    with pytest.raises(compile_mod.CompileError, match="mixes motif lengths"):
+        compile_mod.compile_lexicons(
+            registry, out, decisions_path=decisions, verify="skip")
+
+    # provenance.json stays: a rejected compile still records what was attempted
+    # (T-09). Everything a consumer would read as a lexicon does not.
+    assert sorted(path.name for path in out.iterdir()) == ["provenance.json"]
+
+
+def test_a_successful_compile_leaves_no_staging_directory_behind(tmp_path):
+    out = tmp_path / "lex"
+    compile_mod.compile_lexicons(_registry(tmp_path), out, verify="skip")
+    assert not [path for path in out.iterdir() if path.is_dir()]
+    assert (out / "manifest.tsv").exists()
+    assert {f"{tier}.h5" for tier in compile_mod.TIERS} <= {
+        path.name for path in out.iterdir()}
+
+
+# --- regression: an unreadable layout is not three-absence evidence ------------
+# `group_absent` claims discovery ran and the group never formed (DATA_MODEL.md):
+# evidence about the admission gate. An original (pre-lite) TF-MoDISco file keeps
+# its patterns under `metacluster_idx_to_submetacluster_results`, so this reader
+# saw neither group and recorded that claim twice, with exit 0 and an empty
+# registry, for a file that may hold dozens of patterns.
+def test_an_original_tfmodisco_output_is_refused_not_recorded_as_two_absences(tmp_path):
+    prelite = tmp_path / "prelite.h5"
+    with h5py.File(prelite, "w") as h5:
+        patterns = (h5.create_group(ingest.PRE_LITE_ROOT_GROUP)
+                    .create_group("metacluster_0")
+                    .create_group("seqlets_to_patterns_result")
+                    .create_group("patterns"))
+        for name in ("pattern_0", "pattern_1"):
+            motif = patterns.create_group(name)
+            motif.create_dataset("contrib_scores", data=np.ones((MOTIF_LEN, 4)))
+            motif.create_dataset("sequence", data=np.full((MOTIF_LEN, 4), 0.25))
+
+    project = _project(tmp_path, analyses=[{
+        "id": "legacy_run", "model": "m", "readout": "r", "union_id": "MA",
+        "context": "promoter", "modisco_h5": str(prelite)}])
+    with pytest.raises(ingest.IngestError, match="group_absent"):
+        ingest.ingest_project(project, tmp_path / "registry")
+    assert not (tmp_path / "registry" / "registry.json").exists()
+
+
+# --- pinned: ingest order is lexical, and compile renumbers to the loader's ----
+# This is the documented design, not a defect: recovering the loader's order at
+# ingest would mean parsing the digits out of a pattern name (`no_key_parsing`).
+# compile ASSIGNS names so the loader's own numeric sort reproduces the manifest,
+# and the manifest carries both tag and node_id so the mapping is a table. The
+# 9 -> 10 boundary is where lexicographic and numeric sorts diverge, and
+# compile/README.md claims it holds there; nothing pinned that claim until here.
+def test_ingest_reads_lexically_and_compile_renumbers_across_the_nine_ten_boundary(tmp_path):
+    many = tmp_path / "many.h5"
+    with h5py.File(many, "w") as h5:
+        for i in range(12):
+            _pattern(h5, "pos_patterns", f"pattern_{i}", seed=i)
+    project = _project(tmp_path, analyses=[{
+        "id": "wide", "model": "m", "readout": "r", "union_id": "MA",
+        "context": "promoter", "modisco_h5": str(many)}])
+    _meta, nodes = ingest.ingest_project(project, tmp_path / "registry")
+
+    source_names = [node.node_id.split(".")[-1] for node in nodes]
+    assert source_names.index("pattern_10") < source_names.index("pattern_2")
+
+    manifests = compile_mod.compile_lexicons(
+        tmp_path / "registry", tmp_path / "lex", tiers=("core",), verify="skip")
+    index = json.loads((tmp_path / "lex" / "core.manifest.json").read_text())["index"]
+    by_tag = {row["pattern_tag"]: row["node_id"] for row in index}
+    assert by_tag["pos_patterns.pattern_2"].endswith("pattern_10")
+
+    # What the loader would hand back: fixed group order, numeric suffix within.
+    with h5py.File(tmp_path / "lex" / "core.h5", "r") as h5:
+        emitted = [
+            f"{group}.{name}"
+            for group in ingest.MODISCO_GROUPS if group in h5
+            for name in sorted(h5[group].keys(), key=lambda n: int(n.rsplit("_", 1)[1]))
+        ]
+    assert guards.index_order_matches_loader(manifests["core"].pattern_order,
+                                             emitted).passed
+
+
+# --- regression: one discovery file, one checksum ------------------------------
+# The digest was recomputed inside the per-pattern loop, so a 17 MB real
+# modisco.h5 with 33 patterns was read 33 times to re-derive a value that cannot
+# change mid-loop (~23 ms per pass on the measured file).
+def test_the_discovery_file_is_hashed_once_per_analysis_not_once_per_pattern(
+        tmp_path, monkeypatch):
+    calls: list[str] = []
+    real = ingest.sha256_file
+    monkeypatch.setattr(
+        ingest, "sha256_file", lambda path: (calls.append(str(path)), real(path))[1])
+
+    _meta, nodes = ingest.ingest_project(_project(tmp_path), tmp_path / "registry")
+
+    assert len(nodes) == 5
+    digests = {node.provenance["modisco_h5_sha256"] for node in nodes}
+    assert len(digests) == 1
+    assert len([c for c in calls if c.endswith("a.h5")]) == 1

@@ -13,6 +13,16 @@ skeleton that defers provenance is a tool that never has it.
 Exit codes: ``0`` success, ``2`` no subcommand, ``3`` unimplemented body,
 ``4`` refusal -- the tool declined to produce a number and says which rule
 declined it.
+
+KNOWN LIMITATION: a refusal appends its provenance record and produces nothing
+else, so it neither writes nor removes result artifacts. Re-running into a
+``--out`` that already holds a result therefore leaves that earlier result in
+place beside the refusal's record, with nothing in the directory relating the
+two. Read the exit code, not the directory. Deleting the earlier result to
+prevent the misreading would destroy a real result, and marking it stale needs
+a decision about what an output directory promises that this design has not
+made; ``tests/test_cli.py::test_a_refused_run_leaves_the_earlier_result_beside_its_own_refusal``
+pins the behaviour so it stays a known state rather than a surprise.
 """
 from __future__ import annotations
 
@@ -33,6 +43,7 @@ from motifmultiverse.interpret import (
     DEFAULT_BLOCK_SIZE,
     DEFAULT_BOOTSTRAP,
     ESTIMATOR_CHOICES,
+    MIN_PERCENTILE_REPLICATES,
     InterpretError,
 )
 from motifmultiverse.provenance import ProvenanceError, record
@@ -275,7 +286,13 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE,
                    help=f"genomic block size for the bootstrap (default: {DEFAULT_BLOCK_SIZE})")
     a.add_argument("--bootstrap", type=int, default=DEFAULT_BOOTSTRAP,
-                   help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP})")
+                   # `%%` because argparse %-formats help text; a bare `%` here
+                   # raised ValueError out of --help, which is the one place a
+                   # tool must never fail.
+                   help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP}). The "
+                        f"percentile path refuses below {MIN_PERCENTILE_REPLICATES}: fewer "
+                        "replicates cannot resolve a 2.5%% tail, so both endpoints would be "
+                        "extreme replicates rather than the 95%% interval they are labelled")
     a.add_argument("--floor-coverage", type=float, default=HealthFloors().min_intersection_coverage,
                    help="pre-registered floor on intersection coverage")
     a.add_argument("--floor-blocks", type=int, default=HealthFloors().min_blocks,
@@ -305,7 +322,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("hits", help="frozen hit table (.tsv or .parquet)")
     a.add_argument("--substrate-manifest", default=None,
                    help="verified manifest for the one frozen caller specification")
-    a.add_argument("--peaks", required=True, help="queried peak set (BED, or one region_id per line)")
+    a.add_argument("--peaks", required=True,
+                   help="queried peak set: one region_id per line, or a BED whose 4th "
+                        "column IS the region_id. Peaks are matched to the hit table by "
+                        "exact string equality on region_id, never by interval overlap, "
+                        "so a 3-column BED is read as 'chrom:start-end' strings and "
+                        "matches only a table whose region_id is spelled that way")
     a.add_argument("--selection-provenance", default=None,
                    choices=[g.value for g in SelectionProvenance],
                    help="how the peak set was chosen; omitting it is recorded as "
@@ -327,7 +349,13 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE,
                    help=f"genomic block size for the bootstrap (default: {DEFAULT_BLOCK_SIZE})")
     a.add_argument("--bootstrap", type=int, default=DEFAULT_BOOTSTRAP,
-                   help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP})")
+                   # `%%` because argparse %-formats help text; a bare `%` here
+                   # raised ValueError out of --help, which is the one place a
+                   # tool must never fail.
+                   help=f"block bootstrap replicates (default: {DEFAULT_BOOTSTRAP}). The "
+                        f"percentile path refuses below {MIN_PERCENTILE_REPLICATES}: fewer "
+                        "replicates cannot resolve a 2.5%% tail, so both endpoints would be "
+                        "extreme replicates rather than the 95%% interval they are labelled")
     a.add_argument("--estimator", default="percentile", choices=sorted(ESTIMATOR_CHOICES),
                    help="percentile: block bootstrap interval, no p or q value "
                         "(ESTIMATION_ONLY, the conservative default). bca-wild-cluster: "
@@ -681,7 +709,13 @@ def _run_interpret(ns: argparse.Namespace) -> int:
     dest = result.write(ns.out)
 
     h = result.health
+    # Both permission axes, because `output_mode` is the deprecated view that
+    # cannot represent SUBSTRATE_CIRCULAR: a query selected on `hit_coefficient`
+    # and a query selected on genomic position printed the same line, and the
+    # difference between them existed only in the JSON nobody re-opens.
     print(f"query {result.query_id}: {result.selection_provenance} -> {result.output_mode}")
+    print(f"  statistical_license   : {result.statistical_license}")
+    print(f"  claim_scope           : {result.claim_scope}")
     print(f"  intersection_coverage : {h['intersection_coverage']} "
           f"({h['n_in_universe']}/{h['n_submitted']} submitted peaks in the universe)")
     print(f"  n_blocks              : {h['n_blocks']} (block size {h['block_size']})")

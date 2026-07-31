@@ -477,3 +477,100 @@ def test_shipped_db_example_declares_a_version_for_every_backend_section():
         assert isinstance(section, dict), f"{name} section missing"
         assert section.get("version"), f"{name} section has no version; the adapter refuses it"
         assert isinstance(section.get("matches"), list), f"{name} matches must be a list"
+
+
+def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
+    """KNOWN LIMITATION, pinned: annotation completeness does not cross the stage seam.
+
+    The test above states the retention rule: a backend that returns one row for
+    a node outside the run is not trusted for any of its rows. That is
+    deliberate -- output that disagrees with the registry cannot be verified row
+    by row -- and the drop is not silent, because the backend log carries
+    UNVERIFIED and names the node that caused it.
+
+    What is nowhere recorded is the consequence, which this test pins. The
+    dropped rows were the family evidence, and ``adjudicate`` reads
+    ``annotation_candidates.parquet`` and nothing else. So the component below
+    loses the family conflict that refused its merge, and adjudicates as a
+    duplicate instead, on annotation evidence it has no way to know is partial.
+    With the shipped criteria that is a DEFERRED rather than a collapse only
+    because TRUE_DUPLICATE is CRITERION_NOT_YET_DEFINED; a project registry that
+    freezes it, which ``--criteria`` exists to supply, collapses the pair.
+
+    It is pinned rather than patched because both obvious repairs invent a rule
+    the design has not decided. Keeping the good rows contradicts the retention
+    rule above. Deferring every component whenever a backend is UNVERIFIED would
+    defer whole runs at any site without HOMER, since a backend that failed
+    cannot say which nodes it would have covered -- which is exactly why
+    "annotation evidence is incomplete" has to become a declared adjudication
+    input by design before it can become one in code. See annotate/README.md.
+    """
+    from motifmultiverse.adjudicate import adjudicate_component, packaged_criteria_path
+    from motifmultiverse.align import AlignmentEvidence
+    from motifmultiverse.annotate import annotate_nodes
+    from motifmultiverse.schema import Decision
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+    from motifmultiverse.schema.criteria import (
+        Criterion,
+        CriterionStatus,
+        Predicate,
+        load_criteria,
+    )
+
+    def _match(node_id, family_id, matched):
+        return AnnotationCandidate.create(
+            node_id=node_id, proposed_family_id=family_id, source="tomtom",
+            source_version="5.5", matched_motif_id=matched, motif_length=10,
+            seqlet_count=150,
+        )
+
+    nodes = [_node(node_id="node-a"), _node(node_id="node-b")]
+    nodes = [replace(nodes[0], variant_id="UA_ALPHA_01"),
+             replace(nodes[1], variant_id="UA_BETA_02")]
+    conflicting = [_match("node-a", "FAM_ALPHA", "JASPAR:MA0001"),
+                   _match("node-b", "FAM_BETA", "JASPAR:MA0002")]
+    stray = _match("node-ghost", "FAM_GAMMA", "JASPAR:MA0003")
+
+    complete = annotate_nodes(nodes, [_StaticBackend("tomtom", "5.5", conflicting)])
+    dropped = annotate_nodes(nodes, [_StaticBackend("tomtom", "5.5", [*conflicting, stray])])
+
+    assert len(complete.candidates) == 2
+    assert dropped.candidates == ()
+    # Not silent: the reason survives, and it names the row that caused it.
+    log = dropped.backend_logs[0]
+    assert log.status.value == "UNVERIFIED"
+    assert "node-ghost" in log.detail
+
+    edge = AlignmentEvidence(
+        source_node_id="node-a", target_node_id="node-b", orientation="+", offset=0,
+        overlap_bp=10, overlap_frac_source=1.0, overlap_frac_target=1.0,
+        ppm_similarity=0.99, signed_cwm_similarity=0.99, empirical_p_value=0.001,
+        null_shuffles=1000, seed=7,
+    )
+    metadata = {
+        node_id: {"variant_id": variant_id, "motif_completeness": 1.0,
+                  "seqlet_count": 150, "core_ic": 10.0, "cross_context_recurrence": 1}
+        for node_id, variant_id in (("node-a", "UA_ALPHA_01"), ("node-b", "UA_BETA_02"),
+                                    ("node-ghost", "UA_GAMMA_03"))
+    }
+
+    def _adjudicate(candidates, criteria):
+        return adjudicate_component(["node-a", "node-b"], [edge], candidates, [],
+                                    criteria, "test", node_metadata=metadata)
+
+    shipped = load_criteria(packaged_criteria_path())
+    assert _adjudicate(complete.candidates, shipped).relationship == "AMBIGUOUS_CROSS_FAMILY"
+    assert _adjudicate(complete.candidates, shipped).decision == Decision.REFUSE_MERGE
+    assert _adjudicate(dropped.candidates, shipped).relationship == "TRUE_DUPLICATE"
+    assert _adjudicate(dropped.candidates, shipped).decision == Decision.DEFERRED
+
+    frozen_duplicate = dict(shipped)
+    frozen_duplicate["TRUE_DUPLICATE"] = Criterion(
+        criterion_id="TRUE_DUPLICATE", version="project-1", status=CriterionStatus.FROZEN,
+        relationship="TRUE_DUPLICATE", required_evidence=("ppm_similarity",),
+        predicates=(Predicate(field="ppm_similarity", operator="ge", value=0.9),),
+        insufficient_evidence_action=Decision.DEFERRED,
+        decision_if_matched=Decision.COLLAPSE,
+    )
+    assert _adjudicate(complete.candidates, frozen_duplicate).decision == Decision.REFUSE_MERGE
+    assert _adjudicate(dropped.candidates, frozen_duplicate).decision == Decision.COLLAPSE

@@ -100,6 +100,38 @@ def validate_project(cfg: dict[str, Any]) -> AnalysisConfig:
     )
 
 
+#: The root group of an *original* (pre-``tfmodisco-lite``) TF-MoDISco HDF5. Its
+#: patterns live at ``metacluster_idx_to_submetacluster_results/metacluster_N/
+#: seqlets_to_patterns_result/patterns/pattern_N`` -- a layout this reader does
+#: not read. Recognised by name only, to refuse the file; nothing is parsed out of
+#: it and no pattern is read through it.
+PRE_LITE_ROOT_GROUP = "metacluster_idx_to_submetacluster_results"
+
+
+def assert_readable_layout(h5: Any, analysis_id: str, h5_path: Any) -> None:
+    """Refuse a discovery file whose patterns this reader cannot see at all.
+
+    ``group_absent`` is a claim, not a shrug: ``docs/DATA_MODEL.md`` defines it as
+    *discovery ran and the group never formed*, which is evidence about the
+    admission gate. An original-TF-MoDISco file has neither ``pos_patterns`` nor
+    ``neg_patterns`` at its root, so reading it produced exactly that claim twice
+    over -- and exit 0, and an empty registry -- for a file that may hold dozens of
+    patterns under the older layout. That is a measurement invented from the
+    reader's own blindness, the discovery-stage form of ``BA-01`` the three
+    absences exist to prevent. The three absences are unchanged; what is refused
+    is answering with any of them about a file that was never read.
+    """
+    if PRE_LITE_ROOT_GROUP in h5:
+        raise IngestError(
+            f"{analysis_id}: {h5_path} is an original TF-MoDISco output (it carries "
+            f"{PRE_LITE_ROOT_GROUP!r}), whose patterns this reader does not read. "
+            "It cannot be recorded as two group_absent metaclusters: group_absent "
+            "claims discovery ran and the group never formed, and nothing here "
+            "observed that. Convert it to tfmodisco-lite layout (pos_patterns / "
+            "neg_patterns) and re-declare the analysis."
+        )
+
+
 def group_state(h5: Any, group: str, searched: bool) -> MetaclusterState:
     """The three absences, kept apart (V-08)."""
     if not searched:
@@ -182,11 +214,16 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
         # one checksum under one key and attributed it to whichever file was read
         # last. The config's own id is unique by construction and leaks no path.
         prov.add_input(h5_path, key=f"{analysis_id}:{h5_path.name}")
+        # Hashed once per file, not once per pattern. The digest goes on to every
+        # node this file produces, and re-reading a 17 MB discovery output for each
+        # of its patterns re-derived a value that cannot have changed mid-loop.
+        h5_digest = sha256_file(h5_path)
         # An analysis may declare which metaclusters it looked for at all.
         declared = analysis.get("search_metaclusters") or {}
         searched = {g: bool(declared.get(g, True)) for g in MODISCO_GROUPS}
 
         with h5py.File(h5_path, "r") as h5:
+            assert_readable_layout(h5, analysis_id, h5_path)
             states[analysis_id] = {g: group_state(h5, g, searched[g]).value
                                    for g in MODISCO_GROUPS}
             for group in MODISCO_GROUPS:
@@ -231,7 +268,7 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
                         discovery_tier=Tier.CORE,
                         analysis_tier=Tier.CORE,
                         provenance={"analysis_id": analysis_id,
-                                    "modisco_h5_sha256": sha256_file(h5_path),
+                                    "modisco_h5_sha256": h5_digest,
                                     "trim_threshold": trim_threshold},
                     ))
                     arrays[node_id] = {"cwm": cwm, "hypothetical_cwm": hcwm, "ppm": ppm}

@@ -76,7 +76,8 @@ def test_validate_cli_writes_split_bound_stability_and_backend_artifacts(tmp_pat
             "contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]])
         )
     content_hash = lexicon_semantic_hash(
-        [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
+        [("pos_patterns", "pattern_0",
+          {"node_id": "node-0", "variant_id": "MA_FAM_01"})],
         {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
         schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
         loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
@@ -473,7 +474,7 @@ def test_interpret_artifacts_record_the_verified_substrate_id(tmp_path):
     assert main([
         "interpret", str(hits), "--substrate-manifest", str(manifest_path),
         "--peaks", str(q), "--comparator", str(c), "--comparator-id", "odd",
-        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "50", "--out", str(out),
         *_floors(),
     ]) == 0
     assert json.loads((out / "interpretation.json").read_text())["substrate_id"] == manifest.substrate_id
@@ -866,7 +867,7 @@ def test_comparator_with_an_id_still_runs(tmp_path):
     assert main([
         "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
         "--comparator-id", "gc_matched",
-        "--selection-provenance", "EXTERNAL", "--bootstrap", "20", "--out", str(out),
+        "--selection-provenance", "EXTERNAL", "--bootstrap", "50", "--out", str(out),
         *_floors(),
     ]) == 0
     blob = (out / "interpretation.json").read_text()
@@ -893,7 +894,7 @@ def test_substrate_circular_is_reachable_from_the_command_line(tmp_path):
         assert main([
             "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
             "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
-            *extra, "--bootstrap", "20", "--out", str(out), *_floors(),
+            *extra, "--bootstrap", "50", "--out", str(out), *_floors(),
         ]) == 0
         payload = json.loads((out / "interpretation.json").read_text())
         return payload["statistical_license"], payload["claim_scope"]
@@ -916,7 +917,7 @@ def test_selection_feature_is_repeatable(tmp_path):
         "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
         "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
         "--selection-feature", "gc_content", "--selection-feature", "deepshap_score",
-        "--bootstrap", "20", "--out", str(out), *_floors(),
+        "--bootstrap", "50", "--out", str(out), *_floors(),
     ]) == 0
     payload = json.loads((out / "interpretation.json").read_text())
     assert payload["claim_scope"] == "SUBSTRATE_CIRCULAR"
@@ -944,7 +945,7 @@ def test_same_named_query_and_comparator_do_not_collide(tmp_path):
         "--peaks", str(tmp_path / "setA" / "peaks.txt"),
         "--comparator", str(tmp_path / "setB" / "peaks.txt"),
         "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
-        "--bootstrap", "20", "--out", str(out), *_floors(),
+        "--bootstrap", "50", "--out", str(out), *_floors(),
     ]) == 0
     rec = json.loads((out / "provenance.json").read_text())[0]
     assert set(rec["inputs"]) == {"hits:hits.tsv", "peaks:peaks.txt", "comparator:peaks.txt"}
@@ -964,3 +965,207 @@ def test_a_provenance_refusal_is_a_refusal_not_a_traceback(tmp_path, capsys):
     with pytest.raises(ProvenanceError, match="already names a different input"):
         rec.add_input(b)
     assert isinstance(ProvenanceError("x"), ValueError), "stays a ValueError for old callers"
+
+
+def test_compile_refuses_a_decisions_file_that_is_not_json_and_exits_4(tmp_path, capsys):
+    """A malformed decisions file is a refusal, not a traceback.
+
+    `--decisions` was read with a bare `json.loads`, so anything that is not JSON
+    escaped the exit-code contract entirely: exit 1 and a raw `JSONDecodeError`
+    stack, where every other refusal in this tool exits 4 and names the rule that
+    declined. It also escaped T-09 -- the parse ran before `prov.write`, so the
+    one artifact a rejected compile is supposed to leave behind was not written.
+    """
+    h5py = pytest.importorskip("h5py")
+    np = pytest.importorskip("numpy")
+    modisco = tmp_path / "modisco.h5"
+    with h5py.File(modisco, "w") as h5:
+        grp = h5.require_group("pos_patterns").create_group("pattern_0")
+        grp.create_dataset("contrib_scores", data=np.ones((10, 4)))
+        grp.create_dataset("hypothetical_contribs", data=np.ones((10, 4)))
+        grp.create_dataset("sequence", data=np.full((10, 4), 0.25))
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "project": "cli-test", "peak_universe_id": "u1",
+        "analyses": [{"id": "a1", "model": "m", "readout": "r", "union_id": "MA",
+                      "context": "promoter", "modisco_h5": str(modisco)}]}))
+    assert main(["ingest", str(project), "--out", str(tmp_path / "registry")]) == 0
+    capsys.readouterr()
+
+    decisions = tmp_path / "decisions.txt"
+    decisions.write_text("these are notes, not a decision bundle\n")
+    out = tmp_path / "lex"
+    assert main(["compile", str(tmp_path / "registry"), "--decisions", str(decisions),
+                 "--out", str(out), "--verify-roundtrip", "skip"]) == 4
+    assert "refused" in capsys.readouterr().err
+    assert (out / "provenance.json").exists()
+    assert not (out / "core.h5").exists()
+
+
+def test_compile_refuses_a_decisions_file_that_is_not_utf8_and_exits_4(tmp_path, capsys):
+    """Same contract for bytes that are not text at all: `read_text` raised too."""
+    h5py = pytest.importorskip("h5py")
+    np = pytest.importorskip("numpy")
+    modisco = tmp_path / "modisco.h5"
+    with h5py.File(modisco, "w") as h5:
+        grp = h5.require_group("pos_patterns").create_group("pattern_0")
+        grp.create_dataset("contrib_scores", data=np.ones((10, 4)))
+        grp.create_dataset("hypothetical_contribs", data=np.ones((10, 4)))
+        grp.create_dataset("sequence", data=np.full((10, 4), 0.25))
+    project = tmp_path / "project.json"
+    project.write_text(json.dumps({
+        "project": "cli-test", "peak_universe_id": "u1",
+        "analyses": [{"id": "a1", "model": "m", "readout": "r", "union_id": "MA",
+                      "context": "promoter", "modisco_h5": str(modisco)}]}))
+    assert main(["ingest", str(project), "--out", str(tmp_path / "registry")]) == 0
+    capsys.readouterr()
+
+    decisions = tmp_path / "decisions.bin"
+    decisions.write_bytes(b"\xff\xfe\x00\x01not utf-8")
+    assert main(["compile", str(tmp_path / "registry"), "--decisions", str(decisions),
+                 "--out", str(tmp_path / "lex"), "--verify-roundtrip", "skip"]) == 4
+    assert "refused" in capsys.readouterr().err
+
+
+def test_an_unreadable_provenance_log_is_refused_and_kept_not_overwritten(tmp_path, capsys):
+    """Appending must not crash the tool, and must not discard the earlier records.
+
+    Every subcommand writes its record before it computes, so a provenance.json
+    the append cannot parse is not one lost run -- it is every later run in that
+    directory. Letting the JSONDecodeError out of the append made each of them a
+    traceback and exit 1. Overwriting instead would be worse: the earlier
+    records are the one thing provenance exists to keep.
+    """
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    argv = ["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+            "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+            "--bootstrap", "50", "--out", str(out), *_floors()]
+    assert main(argv) == 0
+    dest = out / "provenance.json"
+    damaged = dest.read_text()[:120]
+    dest.write_text(damaged)
+
+    assert main(argv) == 4, "a refusal, not a traceback"
+    assert "not readable provenance" in capsys.readouterr().err
+    assert dest.read_text() == damaged, "the damaged file is kept for the operator"
+
+
+def test_a_provenance_file_that_is_not_a_log_is_refused(tmp_path):
+    """A parseable file of the wrong shape is still not something to append to."""
+    from motifmultiverse.provenance import ProvenanceError, record
+
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "provenance.json").write_text('{"subcommand": "interpret"}')
+    with pytest.raises(ProvenanceError, match="is not a provenance log"):
+        record("interpret", out_dir=out)
+
+
+def test_an_interrupted_provenance_write_cannot_truncate_the_existing_log(tmp_path, monkeypatch):
+    """Writing in place truncates first, so a killed run took out the log itself."""
+    import pathlib
+
+    from motifmultiverse.provenance import record
+
+    out = tmp_path / "o"
+    record("interpret", out_dir=out)
+    dest = out / "provenance.json"
+    intact = dest.read_text()
+
+    real_write_text = pathlib.Path.write_text
+
+    def killed_mid_write(self, data, *args, **kwargs):
+        # What a kill during `write_text` leaves on disk: the file was opened
+        # for writing, which truncated it, and only some of the bytes landed.
+        real_write_text(self, data[: len(data) // 2], *args, **kwargs)
+        raise KeyboardInterrupt("killed mid-write")
+
+    monkeypatch.setattr(pathlib.Path, "write_text", killed_mid_write)
+    with pytest.raises(KeyboardInterrupt):
+        record("interpret", out_dir=out)
+    monkeypatch.undo()
+
+    assert dest.read_text() == intact
+    assert len(json.loads(dest.read_text())) == 1
+
+
+def test_a_refused_run_leaves_the_earlier_result_beside_its_own_refusal(tmp_path):
+    """KNOWN LIMITATION, pinned: an output directory carries no staleness contract.
+
+    Provenance is written before anything is computed, on purpose (see this
+    module's docstring and provenance/__init__.py): a record that arrives only
+    on success is a record the runs you most want to explain never get. So a
+    refused run appends its record and then refuses, and the directory ends up
+    holding a result from an earlier run, a refusal record, and nothing that
+    relates the two. A reader who sees only the directory reads the old result
+    as this run's.
+
+    Not fixed, and specifically not by any of these. Deleting the earlier
+    result would destroy a real result to prevent a misreading of it. Adding a
+    staleness marker file makes a new artifact whose meaning to every downstream
+    reader is undecided. Saying it in the refusal message would break the
+    refusal contract this CLI's docstring states -- exit 4, one sentence.
+    Recording the run's outcome *in* the provenance record is the honest repair
+    and is a schema change plus a second write, which needs a ruling on what a
+    record written before the work means once the work is known to have failed.
+    """
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest, write_manifest
+
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    argv = ["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+            "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+            "--bootstrap", "50", "--out", str(out), *_floors()]
+    assert main(argv) == 0
+    produced = (out / "interpretation.json").read_text()
+
+    foreign = build_manifest(
+        peak_universe_hash="c" * 64, n_regions=12,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.3.1", lexicon_content_hash="a" * 64,
+            parameters={"lambda": 0.7}, preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.tsv": "d" * 64}, created_at="2026-07-25T00:00:00Z",
+    )
+    manifest_path = write_manifest(foreign, tmp_path / "substrate.manifest.json")
+    assert main([*argv, "--substrate-manifest", str(manifest_path)]) == 4
+
+    records = json.loads((out / "provenance.json").read_text())
+    assert [r["subcommand"] for r in records] == ["interpret", "interpret"]
+    assert (out / "interpretation.json").read_text() == produced, "stale, and unmarked"
+
+
+def test_the_printed_interpretation_names_both_permission_axes(tmp_path, capsys):
+    """`claim_scope` reached the JSON and nothing else.
+
+    The printed block led with `output_mode`, the deprecated view that cannot
+    represent SUBSTRATE_CIRCULAR, so a query selected on an attribution-derived
+    feature printed exactly what an EXTERNAL_STRUCTURE query printed. The one
+    outcome the two-axis design exists for was invisible at the terminal.
+    """
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    assert main([
+        "interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+        "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+        "--selection-feature", "hit_coefficient",
+        "--bootstrap", "50", "--out", str(out), *_floors(),
+    ]) == 0
+    printed = capsys.readouterr().out
+    assert "claim_scope" in printed
+    assert "SUBSTRATE_CIRCULAR" in printed
+    assert "statistical_license" in printed and "FULL_INFERENCE" in printed
+
+
+def test_the_peaks_flag_states_how_a_bed_is_matched(capsys):
+    """`--peaks` advertised "BED" and matched by exact string equality on
+    region_id. A 3-column BED is read as `chrom:start-end` and misses every row
+    of a table keyed `peak_000001`, which surfaced only as coverage 0.0.
+    """
+    with pytest.raises(SystemExit):
+        main(["interpret", "--help"])
+    help_text = capsys.readouterr().out
+    assert "4th column IS the region_id" in help_text
+    assert "exact string equality" in help_text

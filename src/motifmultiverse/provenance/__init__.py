@@ -119,14 +119,52 @@ class ProvenanceRecord:
         return asdict(self)
 
     def write(self, out_dir: str | os.PathLike[str]) -> Path:
+        """Append this record to the directory's log without ever destroying it.
+
+        Appending is a read-modify-write, and two things about that sequence
+        have to hold or the log stops describing anything.
+
+        It has to be atomic. Writing in place truncates the file first, so a
+        process killed mid-write leaves half a JSON document -- and because
+        every subcommand writes its record *before* it computes, that half
+        document is read by the next run, and the one after it. One
+        interrupted run would take out every later run in the directory. The
+        replacement is therefore staged in a sibling file and moved into place
+        with ``os.replace``, which is atomic: a reader sees the old log or the
+        new one, never a truncation.
+
+        And an unreadable log is not an empty one. Overwriting it would
+        silently discard the recorded history of every earlier run in the
+        directory -- the one loss provenance exists to prevent -- so the
+        recorder refuses instead. The refusal is a ``ProvenanceError`` so it
+        reaches the CLI's exit-4 contract rather than escaping as a
+        ``JSONDecodeError`` traceback from inside an append.
+        """
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         dest = out / "provenance.json"
         existing: list[dict[str, Any]] = []
         if dest.exists():
-            existing = json.loads(dest.read_text())
+            try:
+                existing = json.loads(dest.read_text())
+            except ValueError as exc:
+                raise ProvenanceError(
+                    f"{dest} is not readable provenance ({exc}) and will not be "
+                    "overwritten; move it aside to keep the earlier records, or "
+                    "delete it to start a new log."
+                ) from exc
+            if not isinstance(existing, list):
+                raise ProvenanceError(
+                    f"{dest} is not a provenance log -- a log is a list of records, "
+                    f"this is {type(existing).__name__} -- and will not be overwritten."
+                )
         existing.append(self.to_dict())
-        dest.write_text(json.dumps(existing, indent=2, sort_keys=True))
+        # Named per-process so two runs writing the same directory cannot stage
+        # over each other's partial file; the final os.replace still decides
+        # which one the log ends up holding.
+        staged = dest.with_name(f"{dest.name}.{os.getpid()}.partial")
+        staged.write_text(json.dumps(existing, indent=2, sort_keys=True))
+        os.replace(staged, dest)
         return dest
 
 

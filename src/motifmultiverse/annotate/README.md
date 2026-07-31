@@ -88,3 +88,25 @@ mode this whole README is about.
 The *family-assignment* slot raises nothing and decides nothing: it is left unfilled
 pending that ruling, rather than defaulted. See `docs/ROADMAP.md` and `FP-19` in
 `docs/CONSTRAINTS.md`.
+
+## A recorded limitation: a dropped backend is visible here and nowhere downstream
+
+A backend that returns even one row naming a node outside the run is not trusted for
+any of its rows. That is deliberate — output disagreeing with the registry cannot be
+verified row by row — and the drop is recorded, not silent: the backend's entry in
+`annotation_backend_logs.json` is `UNVERIFIED` and its `detail` names the row that
+caused it, which the CLI prints.
+
+The consequence is not recorded. `adjudicate` reads `annotation_candidates.parquet`
+and nothing else, so a component whose family conflict lived in the dropped rows
+adjudicates as a duplicate rather than refusing the merge, on annotation evidence it
+cannot tell is partial. `tests/test_annotate.py::test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it`
+pins that chain end to end.
+
+It stays open because both repairs invent a rule this design has not decided.
+Retaining the good rows contradicts the retention rule above. Deferring every
+component whenever a backend is `UNVERIFIED` would defer whole runs at any site
+without HOMER, because a backend that failed cannot say which nodes it *would* have
+covered — so "the annotation evidence for this component is incomplete" has to be
+specified as an adjudication input, with its own criterion, before it can be one.
+That is design question 5, and it waits on the same ruling as the other four.

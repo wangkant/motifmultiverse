@@ -36,6 +36,7 @@ import json
 import math
 import os
 import re
+import shutil
 from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Any
@@ -244,9 +245,19 @@ def lexicon_semantic_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays
     JSON (sorted keys, tight separators, no whitespace or key-order dependence),
     so the hash is deterministic across runs and machines rather than resting on a
     ``dict`` iteration order or a ``repr``. Array identity follows: loader order,
-    node id, and each array's dtype and shape ahead of its bytes, so two arrays
-    that happen to serialize to the same byte length at different shapes cannot
-    collide either.
+    node id, **variant id**, and each array's dtype and shape ahead of its bytes,
+    so two arrays that happen to serialize to the same byte length at different
+    shapes cannot collide either.
+
+    ``variant_id`` is in there because it is what downstream binds to. The hit
+    caller returns ``pattern_tag``; the manifest index is the only table that
+    resolves a tag to the semantic identity a family-level number is grouped by
+    (``interpret/README.md`` step 3), and ``schema`` calls it the *only* stable
+    semantic identity. Hashing tag, node id and arrays alone let two lexicons that
+    resolve the same tags to entirely different variant identities share one
+    ``lexicon_content_hash`` -- so a number citing that hash under ``FP-11``
+    named a lexicon that could not be told apart from the other one, which is
+    exactly the citation ``FP-11`` exists to make meaningful.
     """
     h = hashlib.sha256()
     metadata = {
@@ -259,7 +270,16 @@ def lexicon_semantic_hash(ordered: list[tuple[str, str, dict[str, Any]]], arrays
     }
     h.update(json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode())
     for group, pattern_name, node in ordered:
-        h.update(f"{group}.{pattern_name}\t{node['node_id']}\n".encode())
+        try:
+            identity = f"{group}.{pattern_name}\t{node['node_id']}\t{node['variant_id']}\n"
+        except KeyError as exc:
+            raise CompileError(
+                f"{group}.{pattern_name} names no {exc.args[0]}. A lexicon's identity "
+                "covers the variant_id each pattern tag resolves to, so it cannot be "
+                "computed from a node that does not carry one; supplying the tag alone "
+                "would content-address two different variant assignments identically."
+            ) from exc
+        h.update(identity.encode())
         grp = arrays[node["node_id"]]
         for key in ("cwm", "hypothetical_cwm", "ppm"):
             h.update(key.encode())
@@ -285,10 +305,20 @@ _COMPILED_INDEX_FIELDS = {
     "index", "pattern_tag", "node_id", "variant_id", "metacluster",
 }
 _COMPILED_MOTIF_DATASETS = {"contrib_scores", "hypothetical_contribs", "sequence"}
+#: ``motif_type`` -> (the HDF5 dataset the loader reads, the registry array key).
+#: The **keys are the loader's vocabulary**, not ours: ``motif_type`` is handed
+#: verbatim to ``load_modisco_motifs``, which dispatches on ``cwm`` / ``hcwm`` /
+#: ``pfm`` / ``pfm_softmax`` and has no branch for anything else -- an unknown
+#: value leaves its local motif variables unbound and raises ``UnboundLocalError``
+#: deep inside the backend rather than being rejected. This table once said
+#: ``ppm``, which is *our* name for the registry array (the values' second
+#: element), so ``compile(motif_type="ppm")`` wrote a lexicon that the very loader
+#: its manifest declared could not read. The two namespaces meet here, in a table,
+#: and nowhere else.
 _MOTIF_TYPE_DATASET = {
     "cwm": ("contrib_scores", "cwm"),
     "hcwm": ("hypothetical_contribs", "hypothetical_cwm"),
-    "ppm": ("sequence", "ppm"),
+    "pfm": ("sequence", "ppm"),
 }
 _VARIANT_ID_RE = re.compile(r"^[A-Za-z0-9]+_[A-Za-z0-9]+_\d{2,}$")
 _COMPARISON_FIELDS = {
@@ -582,7 +612,12 @@ def validate_compiled_lexicon(
                 f"{manifest_source} manifest index metacluster does not match {group}"
             )
         expected_by_group[group].append(pattern)
-        ordered.append((group, pattern, {"node_id": row["node_id"]}))
+        # variant_id travels with node_id because the semantic hash covers both;
+        # by here the index row's variant_id has already been checked for shape
+        # and uniqueness, so recomputing the hash from it is a like-for-like
+        # replay of what the compiler hashed.
+        ordered.append((group, pattern,
+                        {"node_id": row["node_id"], "variant_id": row["variant_id"]}))
     expected_order = [
         f"{group}.{pattern}"
         for group in MODISCO_GROUPS
@@ -874,6 +909,19 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
     )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # Lexicon artifacts are built here and moved into `out` only once every tier
+    # has been written and verified. A tier is refused after earlier tiers are
+    # already on disk -- mixed motif lengths in `expanded`, a round-trip the
+    # backend cannot perform under `--verify-roundtrip require` -- and the
+    # directory that was left behind is not merely untidy: `validate` binds a
+    # lexicon set by globbing `*.manifest.json`, so a compile that refused two of
+    # three tiers read downstream as a perfectly valid one-tier lexicon, with a
+    # `lexicon_identity` computed over the surviving fragment. Staging inside
+    # `out` keeps the move on one filesystem; the leading dot keeps a crashed run's
+    # leftovers out of that glob, and the next run clears them.
+    staging = out / ".compile-staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir()
     # Resolved once, to its effective form, before it is hashed or stored: any
     # spelling that reads back identically (``None``, ``{}``, an explicit
     # ``{"motif_lambda_default": 0.7}``) must produce the same manifest and the
@@ -885,13 +933,27 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
     meta, nodes, arrays = load_registry(registry_dir)
     try:
         payload: dict[str, Any] = {}
+        # Read the bytes, but do not decode or parse them yet. A decisions file
+        # that is not UTF-8 JSON is a refusal like any other, and it has to reach
+        # the same two rules the refusals below already obey: provenance is
+        # written first (T-09), and the caller sees `CompileError` -- exit 4, the
+        # rule that declined -- rather than a `JSONDecodeError` traceback and an
+        # exit code the CLI never documented.
+        decisions_bytes: bytes | None = None
         if decisions_path is not None:
             prov.add_input(decisions_path)
-            payload = json.loads(Path(decisions_path).read_text())
+            decisions_bytes = Path(decisions_path).read_bytes()
         # Provenance is written before the decisions payload is validated, same as
         # every other refusal below (a tier with no motifs, mixed motif lengths):
         # a rejected compile still leaves a record of what was attempted (T-09).
         prov.write(out)
+        if decisions_bytes is not None:
+            try:
+                payload = json.loads(decisions_bytes)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CompileError(
+                    f"{decisions_path} is not valid JSON: {exc}"
+                ) from exc
         try:
             bundle = (
                 DecisionBundle.from_adjudication_artifact(payload)
@@ -939,7 +1001,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
         manifests: dict[str, LexiconManifest] = {}
         for tier in tiers:
             ordered = ordered_by_tier[tier]
-            h5_path = out / f"{tier}.h5"
+            h5_path = staging / f"{tier}.h5"
             _write_h5(h5_path, ordered, arrays)
             content_hash = lexicon_semantic_hash(
                 ordered, arrays,
@@ -968,7 +1030,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                 source_registry=str(Path(registry_dir).name),
                 sensitivity_triggers={k: v for k, v in triggers_by_cluster(decisions).items() if v},
             )
-            (out / f"{tier}.manifest.json").write_text(
+            (staging / f"{tier}.manifest.json").write_text(
                 json.dumps({**asdict(manifest), "index": index[tier],
                             "project": meta.project,
                             "cross_model_claims_restricted": meta.cross_model_claims_restricted},
@@ -982,15 +1044,22 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             except BackendMissing:
                 if verify == "require":
                     raise
+
+        rows = ["\t".join(["tier", "index", "pattern_tag", "node_id", "variant_id",
+                           "metacluster", "lexicon_content_hash"])]
+        for tier in tiers:
+            for row in index[tier]:
+                rows.append("\t".join([tier, str(row["index"]), row["pattern_tag"],
+                                       row["node_id"], row["variant_id"], row["metacluster"],
+                                       manifests[tier].lexicon_content_hash]))
+        (staging / "manifest.tsv").write_text("\n".join(rows) + "\n")
+
+        # Publication. Every refusal this function can raise has already had its
+        # chance, so nothing above this line was ever visible under `out`; from
+        # here the set appears tier by tier, each file by an atomic rename.
+        for name in sorted(path.name for path in staging.iterdir()):
+            os.replace(staging / name, out / name)
     finally:
         arrays.close()
-
-    rows = ["\t".join(["tier", "index", "pattern_tag", "node_id", "variant_id",
-                       "metacluster", "lexicon_content_hash"])]
-    for tier in tiers:
-        for row in index[tier]:
-            rows.append("\t".join([tier, str(row["index"]), row["pattern_tag"],
-                                   row["node_id"], row["variant_id"], row["metacluster"],
-                                   manifests[tier].lexicon_content_hash]))
-    (out / "manifest.tsv").write_text("\n".join(rows) + "\n")
+        shutil.rmtree(staging, ignore_errors=True)
     return manifests

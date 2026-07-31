@@ -292,13 +292,20 @@ def test_registered_on_defaults_to_unsigned_ppm(shared_ppm, short_overlap_target
 
 
 # --------------------------------------------------------------------- Step 5
-def _registry_arrays_h5(tmp_path, motifs: dict[str, dict[str, np.ndarray]]):
+def _registry_arrays_h5(tmp_path, motifs: dict[str, dict[str, np.ndarray]],
+                        cores: dict[str, list[int] | None] | None = None):
     """A minimal on-disk registry (registry.json + arrays.h5) with just enough
-    structure for align_registry to read: node_id, and per-node ppm/cwm arrays.
+    structure for align_registry to read: node_id, trimmed_core, and per-node
+    ppm/cwm arrays.
+
+    `trimmed_core` defaults to the whole matrix, which is the fixture arrays'
+    honest core: they carry no background padding to trim. `cores` overrides it
+    per node, including with None for a node that declares none at all.
     """
     import json
 
     h5py = pytest.importorskip("h5py")
+    cores = cores or {}
     reg_dir = tmp_path / "registry"
     reg_dir.mkdir()
     nodes = []
@@ -307,10 +314,12 @@ def _registry_arrays_h5(tmp_path, motifs: dict[str, dict[str, np.ndarray]]):
             grp = h5.create_group(node_id)
             for name, arr in arrays.items():
                 grp.create_dataset(name, data=arr)
+            full = next(iter(arrays.values())).shape[0]
             nodes.append({
                 "node_id": node_id, "model": "m", "readout": "r", "context": "c",
                 "metacluster": "pos", "denovo_pattern_id": node_id,
                 "variant_id": f"U_FAM_{len(nodes):02d}", "family_id": "FAM",
+                "trimmed_core": cores.get(node_id, [0, full]),
             })
     payload = {
         "registry_metadata": {
@@ -516,3 +525,245 @@ def test_align_cosine_keeps_zero_for_genuinely_orthogonal_windows():
     from motifmultiverse.align import _cosine
 
     assert _cosine(np.array([[1.0, 0, 0, 0]]), np.array([[0, 1.0, 0, 0]])) == 0.0
+
+
+# ------------------------------------------- registration is on the TRIMMED CORE
+def _informative_core(seed: int, length: int):
+    """A core with one dominant base per position -- real motif content."""
+    rng = np.random.default_rng(seed)
+    matrix = np.full((length, 4), 0.02)
+    for i in range(length):
+        matrix[i, rng.integers(0, 4)] = 0.94
+    return matrix / matrix.sum(axis=1, keepdims=True)
+
+
+def _padded_pattern(core, left_pad: int, right_pad: int, seed: int):
+    """A TF-MoDISco-shaped pattern: an informative core inside a fixed-width
+    window whose flanks are the near-uniform background EVERY pattern in a run
+    carries. This is what the discovery HDF5 actually contains, and it is why
+    registering on the window instead of the core measures shared padding.
+    """
+    rng = np.random.default_rng(seed)
+    window = rng.normal(0.25, 0.008, size=(left_pad + core.shape[0] + right_pad, 4))
+    window = window.clip(0.05)
+    window[left_pad:left_pad + core.shape[0]] = core
+    return window / window.sum(axis=1, keepdims=True)
+
+
+def test_align_registry_registers_on_the_core_not_the_padded_window(tmp_path):
+    """The same 8bp motif, padded into two 40bp windows, must register as an 8bp
+    identity -- not as a 35bp near-identity of the two windows' shared background.
+
+    Measured before the fix: `overlap_bp=35`, `ppm_similarity=0.9996`. The whole
+    registration was carried by flanks that say nothing about either motif, and
+    the bilateral overlap floor -- the module's own protection against a window
+    scoring high on content it does not have -- passed on the strength of that
+    same padding. `ingest` had already recorded where each core is; align simply
+    never asked.
+    """
+    core = _informative_core(7, 8)
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"a": {"ppm": _padded_pattern(core, 16, 16, 101)},
+         "b": {"ppm": _padded_pattern(core, 21, 11, 202)}},
+        cores={"a": [16, 24], "b": [21, 29]},
+    )
+    _, edges = align_registry(registry, tmp_path / "evidence", null_shuffles=3, seed=1)
+
+    assert len(edges) == 1
+    edge = edges[0]
+    assert edge.overlap_bp == 8, (
+        "registration covered more than the 8bp core, so it was scored on the "
+        "padded window rather than on the span ingest recorded as trimmed_core"
+    )
+    assert edge.overlap_frac_source == pytest.approx(1.0)
+    assert edge.overlap_frac_target == pytest.approx(1.0)
+    assert edge.ppm_similarity == pytest.approx(1.0, abs=1e-12)
+
+
+def test_align_registry_slices_the_cwm_to_the_same_core_as_the_ppm(tmp_path):
+    """Signed CWM similarity is measured AT the PPM's registration, so the two
+    matrices have to describe the same positions. A CWM read at full width
+    against a core-width PPM registration is not a sign statistic about the
+    motif -- it is a sign statistic about the padding, which is the failure this
+    module exists to prevent, one field over.
+    """
+    core = _informative_core(7, 8)
+    cwm = (core - 0.25) * 3.0
+    flank_noise = np.random.default_rng(5).normal(0, 0.4, size=(16, 4))
+    source_cwm = np.vstack([flank_noise, cwm, flank_noise])
+    # The flanks are NOT negated: only the core is a true sign flip, so a signed
+    # similarity of exactly -1 can only come from a core-width comparison.
+    target_cwm = np.vstack([flank_noise, -cwm, flank_noise])
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"a": {"ppm": _padded_pattern(core, 16, 16, 101), "cwm": source_cwm},
+         "b": {"ppm": _padded_pattern(core, 16, 16, 101), "cwm": target_cwm}},
+        cores={"a": [16, 24], "b": [16, 24]},
+    )
+    _, edges = align_registry(registry, tmp_path / "evidence", null_shuffles=3, seed=1)
+
+    assert len(edges) == 1
+    assert edges[0].signed_cwm_similarity == pytest.approx(-1.0, abs=1e-12)
+
+
+def test_align_registry_excludes_a_node_that_declares_no_trimmed_core(tmp_path):
+    """A registry that declares no core for a node is refused for that node's
+    pairs, not quietly registered on its padded window.
+
+    Falling back would put a padding-driven score into the edge table under the
+    same `registration_rule_version` as a trimmed one, where no downstream
+    reader could tell the two apart -- the same "recorded as if it were the real
+    measurement" failure the module docstring is about.
+    """
+    core = _informative_core(7, 8)
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"a": {"ppm": _padded_pattern(core, 16, 16, 101)},
+         "b": {"ppm": _padded_pattern(core, 16, 16, 101)}},
+        cores={"a": [16, 24], "b": None},
+    )
+    summary, edges = align_registry(registry, tmp_path / "evidence", null_shuffles=3, seed=1)
+
+    assert edges == []
+    assert summary.n_pairs_considered == 1
+    assert summary.n_pairs_excluded == 1
+
+
+def test_align_registry_separates_components_by_core_width_not_window_width(tmp_path):
+    """Four patterns in one 40bp window: two share an 8bp core, two share a 20bp
+    core, and the two cores are unrelated. That is one component of two and
+    another of two -- not one component of four.
+
+    Registered on the window, all four are 40bp long, so every pair clears the
+    bilateral overlap floor and single linkage hands adjudication ONE proposed
+    cluster containing every motif in the project. Measured on 29 real
+    ChromBPNet patterns (50bp windows, cores 4-30bp): 406 of 406 pairs
+    registered and every one of them landed in a single component. Registered on
+    the core, 8bp covers 0.4 of 20bp, the floor excludes the cross pairs, and
+    the two real groups survive as two.
+    """
+    from motifmultiverse.adjudicate import adjudicate_all, packaged_criteria_path
+    from motifmultiverse.schema.criteria import load_criteria
+
+    short, long = _informative_core(7, 8), _informative_core(9, 20)
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"s0": {"ppm": _padded_pattern(short, 16, 16, 101)},
+         "s1": {"ppm": _padded_pattern(short, 16, 16, 202)},
+         "l0": {"ppm": _padded_pattern(long, 10, 10, 303)},
+         "l1": {"ppm": _padded_pattern(long, 10, 10, 404)}},
+        cores={"s0": [16, 24], "s1": [16, 24], "l0": [10, 30], "l1": [10, 30]},
+    )
+    summary, edges = align_registry(registry, tmp_path / "evidence", null_shuffles=3, seed=1)
+
+    assert summary.n_pairs_considered == 6
+    assert {tuple(sorted((e.source_node_id, e.target_node_id))) for e in edges} == {
+        ("l0", "l1"), ("s0", "s1"),
+    }
+
+    decisions = adjudicate_all(
+        edges, [], [], load_criteria(packaged_criteria_path()), "test",
+    )
+    assert sorted(decision.node_ids for decision in decisions) == [
+        ("l0", "l1"), ("s0", "s1"),
+    ]
+
+
+# ----------------------------------------------- recorded limitations, pinned
+def test_align_emits_an_edge_for_every_registrable_pair_however_unremarkable(tmp_path):
+    """RECORDED LIMITATION, not an accident: registrability -- not similarity and
+    not the null -- decides which pairs reach adjudication.
+
+    Two unrelated cores of the same width clear the bilateral overlap floor, so
+    align emits an edge whose own null says the registration is unremarkable,
+    and `adjudicate_all` proposes them as a component on the strength of that
+    edge existing. That is unrestricted single linkage, and `docs/CONSTRAINTS.md`
+    already carries it as the open half of FP-05: "single linkage is admissible
+    only with a declared distance ceiling", enforcement PARTIAL, "the linkage
+    clause has no check".
+
+    Closing it here would mean choosing the ceiling -- a similarity or p-value
+    cut-off -- and FP-13 reserves exactly that parameter to the design, which is
+    why `adjudicate/criteria.v1.yaml` leaves TRUE_DUPLICATE and FRAGMENT_MATCH
+    `CRITERION_NOT_YET_DEFINED` rather than guess one. So the edge is recorded
+    WITH its p-value, connectivity only ever proposes, and the criterion is the
+    only thing that may gate a collapse. This test exists so that the gap is a
+    decision on the record rather than something a reader has to infer from an
+    edge table where nothing was ever filtered out.
+    """
+    from motifmultiverse.adjudicate import adjudicate_all, packaged_criteria_path
+    from motifmultiverse.schema.criteria import load_criteria
+
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"a": {"ppm": _padded_pattern(_informative_core(7, 12), 14, 14, 101)},
+         "b": {"ppm": _padded_pattern(_informative_core(9, 12), 14, 14, 202)}},
+        cores={"a": [14, 26], "b": [14, 26]},
+    )
+    _, edges = align_registry(registry, tmp_path / "evidence", null_shuffles=99, seed=1)
+
+    assert len(edges) == 1, "an unremarkable registration is still recorded"
+    assert edges[0].empirical_p_value > 0.05, (
+        "fixture no longer exercises the limitation: these two cores are "
+        "supposed to be unrelated enough that the null does not reject"
+    )
+    decisions = adjudicate_all(
+        edges, [], [], load_criteria(packaged_criteria_path()), "test",
+    )
+    assert [d.node_ids for d in decisions] == [("a", "b")], (
+        "component proposal reads edge presence only; an edge the null did not "
+        "single out still proposes a cluster"
+    )
+
+
+def test_align_null_re_registers_from_scratch_for_every_shuffle(tmp_path):
+    """RECORDED LIMITATION with a guarantee on the other side of it: the null
+    costs one full registration per shuffle per pair, and that cost is the
+    guarantee.
+
+    Counting registrations pins both halves. `align_registry` registers each
+    considered pair once; `calibrate_pair_null` then registers the observed pair
+    again plus once per shuffle, on freshly permuted data. Nothing is cached
+    across pairs and nothing is rescored at a remembered offset -- a null that
+    did either would answer "how similar are these two at one fixed alignment"
+    instead of "how surprising is it to find SOME alignment this good", and
+    would inflate every p-value in the table.
+
+    The price is quadratic in the registry and single-threaded, with no progress
+    output: measured on 29 real ChromBPNet patterns, one registration of a
+    4-30bp core costs about 135 microseconds, so a twelve-run 240-node registry
+    at the default 1000 shuffles extrapolates to roughly half a CPU-hour. That
+    is recorded rather than traded away, because every cheaper null on offer is
+    a weaker one.
+    """
+    import motifmultiverse.align as align_module
+
+    core = _informative_core(7, 12)
+    registry = _registry_arrays_h5(
+        tmp_path,
+        {"a": {"ppm": _padded_pattern(core, 14, 14, 101)},
+         "b": {"ppm": _padded_pattern(core, 14, 14, 202)},
+         "c": {"ppm": _padded_pattern(core, 14, 14, 303)}},
+        cores={"a": [14, 26], "b": [14, 26], "c": [14, 26]},
+    )
+    calls = []
+    real_register_pair = align_module.register_pair
+
+    def counting_register_pair(*args, **kwargs):
+        calls.append(1)
+        return real_register_pair(*args, **kwargs)
+
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(align_module, "register_pair", counting_register_pair)
+    try:
+        summary, edges = align_registry(
+            registry, tmp_path / "evidence", null_shuffles=7, seed=1,
+        )
+    finally:
+        monkey.undo()
+
+    assert summary.n_pairs_considered == 3 and len(edges) == 3
+    # 3 observed registrations in align_registry, then per registered pair one
+    # more observed registration inside calibrate_pair_null plus one per shuffle.
+    assert len(calls) == 3 + 3 * (1 + 7)

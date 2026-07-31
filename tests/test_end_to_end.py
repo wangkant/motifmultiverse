@@ -56,6 +56,13 @@ def _contrib(ppm: np.ndarray, strong_upto: int) -> np.ndarray:
     sharing a PPM but differing here are near-identical motifs that a medoid
     tie-break can still order -- which is what lets a duplicate pair resolve a
     representative instead of deferring for want of tie metadata.
+
+    `align` registers on the trimmed core, not on the padded window, so
+    `strong_upto` also sets the geometry every relationship below is designed
+    around: a pattern's registrable length is `strong_upto`, and the window it
+    sits in only changes how complete the registry says it is. Two patterns can
+    therefore be TRUE_DUPLICATE (identical cores) while still differing in
+    completeness, which is what the length-separated fixture relies on.
     """
     out = (ppm - 0.25) * 0.05
     out[:strong_upto] = (ppm[:strong_upto] - 0.25) * 2.0
@@ -84,21 +91,24 @@ def _project(tmp_path: Path, modisco: Path) -> Path:
 
 
 def _uniform_length_patterns() -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Three 20bp patterns: a complete one, a less complete near-duplicate, and a
-    sign flip of the first.
+    """Three 20bp patterns sharing one PPM: two identical, and a sign flip.
 
     All one length on purpose. `compile` refuses a lexicon whose patterns differ
     in length (the loader stacks them into one array), so the path that ends in a
-    compiled lexicon has to be uniform -- which in turn means `align`'s bilateral
-    overlap rule registers every pair and proposes ONE component. That is the
-    shape of a real single-width TF-MoDISco lexicon, not a limitation of the
-    fixture.
+    compiled lexicon has to be uniform.
+
+    Their cores are the full 20bp too, which is what makes every pair register
+    and puts all three in ONE component. A same-width TF-MoDISco lexicon does
+    NOT do this on its own: real patterns share a padded window width while
+    their cores differ, and `align` registers on the core, so width uniformity
+    alone joins nothing. Here the cores really are identical, so the single
+    component is the fixture's design rather than an artifact of the padding.
     """
     base = _ppm(20, 11)
     return {
-        "pattern_0": (base, _contrib(base, 18)),
-        "pattern_1": (base.copy(), _contrib(base, 12)),
-        "pattern_2": (base.copy(), -_contrib(base, 18)),
+        "pattern_0": (base, _contrib(base, 20)),
+        "pattern_1": (base.copy(), _contrib(base, 20)),
+        "pattern_2": (base.copy(), -_contrib(base, 20)),
     }
 
 
@@ -106,28 +116,33 @@ def _length_separated_patterns() -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Six patterns in three pairs that `align` cannot join to each other.
 
     The bilateral overlap floor (`overlap_bp >= 6` AND `>= 0.5` of *each* motif's
-    own length) is the only thing separating components, so the three pairs use
-    lengths 7 / (16,30) / 70: within a pair the registration clears the floor,
-    across pairs the shorter motif covers under half the longer one.
+    own length) is the only thing separating components, and `align` applies it
+    to the trimmed CORE, so the three pairs use core spans 7 / (16,30) / 70:
+    within a pair the registration clears the floor, across pairs the shorter
+    core covers under half the longer one.
 
-      A  7,  7   identical PPM, different core spans   -> TRUE_DUPLICATE
+      A  7,  7   identical core, different padding     -> TRUE_DUPLICATE
       B 30, 16   a fragment of its parent              -> FRAGMENT_MATCH
-      C 70, 70   identical PPM, negated CWM            -> TRUE_DUPLICATE, sign-flipped
+      C 70, 70   identical core, negated CWM           -> TRUE_DUPLICATE, sign-flipped
+
+    Each pair's two members sit in windows of different width, which is the only
+    way a TRUE_DUPLICATE can still order its medoid: identical cores are what
+    makes the pair a duplicate at all, and `motif_completeness` (core over
+    window) is then the one registry field that still separates them. Without
+    that the component ties on every dimension the registry can supply and defers
+    for want of tie metadata -- a real behaviour, but not the deferral this
+    fixture is here to show.
     """
-    a = _ppm(7, 11)
-    parent = _ppm(30, 22)
-    c = _ppm(70, 33)
+    a = _ppm(9, 11)
+    parent = _ppm(33, 22)
+    c = _ppm(72, 33)
     return {
-        "pattern_0": (a, _contrib(a, 6)),
-        "pattern_1": (a.copy(), _contrib(a, 4)),
-        "pattern_2": (parent, _contrib(parent, 24)),
-        "pattern_3": (parent[:16].copy(), _contrib(parent[:16].copy(), 12)),
-        # Pair C's two members differ in core span so the medoid tie resolves on
-        # motif_completeness. Without that they tie on every dimension the
-        # registry can supply and the component defers for want of tie metadata
-        # -- a real behaviour, but not the deferral this fixture is here to show.
-        "pattern_4": (c, _contrib(c, 60)),
-        "pattern_5": (c.copy(), -_contrib(c, 50)),
+        "pattern_0": (a[:7].copy(), _contrib(a[:7].copy(), 7)),
+        "pattern_1": (a.copy(), _contrib(a, 7)),
+        "pattern_2": (parent, _contrib(parent, 30)),
+        "pattern_3": (parent[:16].copy(), _contrib(parent[:16].copy(), 16)),
+        "pattern_4": (c[:70].copy(), _contrib(c[:70].copy(), 70)),
+        "pattern_5": (c.copy(), -_contrib(c, 70)),
     }
 
 
@@ -524,7 +539,8 @@ def _standalone_lexicon(tmp_path: Path) -> Path:
         h5.create_group("pos_patterns").create_group("pattern_0").create_dataset(
             "contrib_scores", data=array)
     content_hash = lexicon_semantic_hash(
-        [("pos_patterns", "pattern_0", {"node_id": "node-0"})],
+        [("pos_patterns", "pattern_0",
+          {"node_id": "node-0", "variant_id": "MA_FAM_01"})],
         {"node-0": {"cwm": array}},
         schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
         loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7})

@@ -860,3 +860,26 @@ def test_two_part_refuses_when_a_side_has_no_measured_peak():
         infer.two_part_summary(_usage(10), _unused(10, searched=False),
                                family_id="FAM_A",
                                usage_definition=infer.UsageDefinition.ANY_HIT)
+
+
+def test_wct_chunk_size_cannot_change_the_result_at_a_misaligned_block_count(monkeypatch):
+    """The twin above passes at G = 60 for the wrong reason.
+
+    numpy's bounded int8 generator hands out four values per 32-bit word and
+    throws the partial buffer away when the call returns, so splitting an
+    (n_bootstrap, G) draw into per-chunk draws only reproduces the single-call
+    bit stream when G is a multiple of four. G = 60 is; MIN_ESTIMABLE_BLOCKS = 30,
+    the smallest block count this estimator will accept at all, is not -- and at
+    G = 30 shrinking the chunk moved p from 0.7305389221556886 to
+    0.7005988023952096 on identical data and an identical seed. A p-value that
+    follows a memory constant is not a reproducible p-value, so the fixture here
+    is deliberately misaligned.
+    """
+    for g in (MIN_ESTIMABLE_BLOCKS, MIN_ESTIMABLE_BLOCKS + 3, 61):
+        assert g % 4 != 0, "the point of this fixture is a misaligned block count"
+        effects = _effects_dict(np.random.default_rng(2).normal(0.0, 1.0, size=g))
+        monkeypatch.setattr(infer, "_MAX_WEIGHTS_PER_CHUNK", 8_000_000)
+        one_chunk = wild_cluster_bootstrap_t(effects, n_bootstrap=500, seed=41)
+        monkeypatch.setattr(infer, "_MAX_WEIGHTS_PER_CHUNK", 7)  # forces chunk == 1
+        per_replicate = wild_cluster_bootstrap_t(effects, n_bootstrap=500, seed=41)
+        assert one_chunk == per_replicate, f"chunk size moved the p-value at G={g}"

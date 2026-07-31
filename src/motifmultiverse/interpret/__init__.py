@@ -63,7 +63,7 @@ __all__ = [
     "peak_universe", "health_report", "contrast_health_report", "compose",
     "estimate_effects", "two_part_effects", "interpret_query",
     "ESTIMATOR", "ESTIMATOR_PERCENTILE", "ESTIMATOR_BCA_WILD", "ESTIMATOR_CHOICES",
-    "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP",
+    "CAPABILITY", "DEFAULT_BLOCK_SIZE", "DEFAULT_BOOTSTRAP", "MIN_PERCENTILE_REPLICATES",
 ]
 
 #: The weaker of the two estimator paths: a percentile block bootstrap. It is
@@ -111,6 +111,18 @@ CAPABILITY = ESTIMATOR_CAPABILITY[Estimator(ESTIMATOR)]
 
 DEFAULT_BLOCK_SIZE = 1_000_000
 DEFAULT_BOOTSTRAP = 2000
+
+#: Fewest replicates a 95% percentile interval may be computed from, derived
+#: rather than chosen: the finest tail probability ``B`` replicates can resolve
+#: is ``1/(B+1)``, so a 2.5% tail needs ``B + 1 >= 1/0.025``, i.e. ``B >= 39``.
+#: Below it the two endpoints are the extreme replicates and the interval's real
+#: coverage is ``1 - 2/(B+1)``, not 0.95 -- at ``B = 1`` that is zero, and the
+#: estimator emitted ``[x, x]``: a zero-width 95% interval, printed beside its
+#: point estimate, which reads as infinite precision rather than as one draw.
+#: The percentile path is refused below this rather than degraded, for the same
+#: reason `infer` refuses below `MIN_ESTIMABLE_BLOCKS`: an interval that cannot
+#: be computed must not be reported narrower than one that can.
+MIN_PERCENTILE_REPLICATES = 39
 
 
 class InterpretError(ValueError):
@@ -366,6 +378,15 @@ class Peak:
     the same family cancel the mass to zero without erasing the occupancy, which
     is the scientific point of separating them. ``family_abs_coefficient_sum`` is
     the unsigned counterpart, so magnitude is not lost to cancellation either.
+
+    ``families_measured`` is the wider set: every family this peak's rows say
+    something about, whether or not anything was retained. Only
+    ``add_used_hit`` writes the three dictionaries above, so a family the caller
+    searched here and found nothing for leaves no trace in them -- and a family
+    with no trace is indistinguishable from a family that was never searched,
+    which is the absence-versus-zero distinction ``schema.Missingness`` exists
+    to keep. ``NO_SEQUENCE_MATCH`` and ``HIT_BELOW_FLOOR`` rows name their
+    family, so the measured zero is recorded here and can be reported as one.
     """
 
     region_id: str
@@ -374,6 +395,7 @@ class Peak:
     end: int
     block: tuple[str, int]
     searched: bool = True
+    families_measured: set[str] = field(default_factory=set)
     family_hit_count: dict[str, int] = field(default_factory=dict)
     family_coefficient_sum: dict[str, float] = field(default_factory=dict)
     family_abs_coefficient_sum: dict[str, float] = field(default_factory=dict)
@@ -433,6 +455,14 @@ def peak_universe(hits: Sequence[HitRecord], block_size: int) -> dict[str, Peak]
             block=first.block(block_size), searched=Missingness.NOT_SEARCHED not in states,
         )
         for h in rows:
+            # Every row that is a measurement records the family it measured,
+            # including the ones that retained nothing. The sentinel is excluded
+            # on purpose: an unnamed family is not a measured zero, and admitting
+            # it here would put `NA` in a composition table as though it were a
+            # family (the failure `HitRecord.__post_init__` refuses for USED rows).
+            if (h.missingness is not Missingness.NOT_SEARCHED
+                    and h.family_id != MISSING_SENTINEL):
+                peak.families_measured.add(h.family_id)
             if h.missingness is Missingness.USED:
                 peak.add_used_hit(h.family_id, float(h.hit_coefficient))
         peaks[region_id] = peak
@@ -479,8 +509,20 @@ def health_report(peaks: dict[str, Peak], submitted: Sequence[str],
     failures: list[str] = []
     if coverage is None or coverage < floors.min_intersection_coverage:
         shown = "undefined" if coverage is None else round(coverage, 6)
+        # Zero overlap is a different diagnosis from thin overlap, and saying
+        # only "below the floor" sends the reader to look for missing peaks.
+        # Region ids are matched by exact string equality, so not one submitted
+        # id being in the universe means the two sides are keyed differently --
+        # a 3-column BED read as `chr1:120939636-120940065` against a table that
+        # spells the same peak `peak_000001` reports 0.0 here and nothing else.
+        mismatch = (
+            " -- not one submitted id is in the frozen universe, which is a key mismatch "
+            "rather than thin coverage: ids are matched by exact string equality on "
+            "region_id, never by interval overlap"
+            if submitted_unique and not present else ""
+        )
         failures.append(
-            f"intersection_coverage={shown} < floor {floors.min_intersection_coverage}"
+            f"intersection_coverage={shown} < floor {floors.min_intersection_coverage}{mismatch}"
         )
     if len(blocks) < floors.min_blocks:
         failures.append(f"n_blocks={len(blocks)} < floor {floors.min_blocks}")
@@ -518,12 +560,21 @@ class ContrastHealth:
     query. ``comparator`` is ``None`` when no comparator was submitted at all
     (as opposed to one that was submitted and failed), so the two absences are
     not conflated.
+
+    ``n_shared_peaks`` counts peaks submitted on **both** sides, and it is here
+    because ``shared_blocks`` cannot stand in for it. On a real K562 substrate a
+    cluster measured against every peak in the universe and the same cluster
+    measured against the universe *minus itself* spanned 283 and 282 shared
+    blocks -- one apart -- while the first contrast put 8,277 peaks on both
+    sides of the difference and the second none. A reader who went looking for
+    the overlap in the block counts would have concluded there was none.
     """
 
     query: HealthReport
     comparator: HealthReport | None
     shared_blocks: int
     union_blocks: int
+    n_shared_peaks: int
     passed: bool
     floor_failures: list[str]
 
@@ -557,6 +608,7 @@ def contrast_health_report(peaks: dict[str, Peak], query_ids: Sequence[str],
         comparator=comparator_health,
         shared_blocks=len(q_blocks & c_blocks),
         union_blocks=len(q_blocks | c_blocks),
+        n_shared_peaks=len(set(q_ids) & set(c_ids)),
         passed=query_health.passed and (comparator_health is None or comparator_health.passed),
         floor_failures=failures,
     )
@@ -575,11 +627,25 @@ class FamilyComposition:
 
 
 def compose(peaks: dict[str, Peak], region_ids: Sequence[str]) -> list[FamilyComposition]:
-    """Per-family occupancy over the queried peaks. Descriptive: no interval, no test."""
+    """Per-family occupancy over the queried peaks. Descriptive: no interval, no test.
+
+    The rows are the families the query peaks were **measured for**, not the ones
+    that produced a hit. A family every query peak searched and found nothing for
+    is a measured zero and gets a row at ``peak_share`` 0.0; taking the family
+    list from ``family_hit_count`` instead dropped that row entirely, and a
+    missing row is indistinguishable from a family that was never searched.
+    Verified on a real K562 substrate: a 2,176-peak query with no CTCF and no
+    GATA hit emitted a ten-row composition beside a twelve-row effects table
+    (``estimate_effects`` unions the families over both sides, so it still
+    reported them), one record disagreeing with itself about how many families
+    exist.
+    """
     searched = [peaks[r] for r in dict.fromkeys(region_ids) if r in peaks and peaks[r].searched]
     if not searched:
         return []
-    families = sorted({fam for p in searched for fam in p.family_hit_count})
+    families = sorted({
+        fam for p in searched for fam in (*p.families_measured, *p.family_hit_count)
+    })
     out = []
     for fam in families:
         vals = [p.family_coefficient_sum.get(fam, 0.0) for p in searched]
@@ -655,6 +721,9 @@ def _effect_frame(peaks: dict[str, Peak], query_ids: Sequence[str],
     estimator cannot change *what is being estimated over* -- the block frame is
     the union of blocks either side touches, and it is the same union no matter
     which bootstrap consumes it.
+
+    A peak submitted on both sides is refused here, once, rather than in each
+    estimator: it is a property of the frame, not of how uncertainty is computed.
     """
     q_peaks = [peaks[r] for r in dict.fromkeys(query_ids) if r in peaks and peaks[r].searched]
     c_peaks = [peaks[r] for r in dict.fromkeys(comparator_ids) if r in peaks and peaks[r].searched]
@@ -662,6 +731,27 @@ def _effect_frame(peaks: dict[str, Peak], query_ids: Sequence[str],
         raise InterpretError(
             f"effects need searched peaks on both sides: query={len(q_peaks)}, "
             f"comparator={len(c_peaks)}"
+        )
+    # A peak on both sides is subtracted from itself, and nothing downstream can
+    # see it: the point estimate, the interval and every count stay in range, so
+    # the result is a plausible number that answers a question nobody asked.
+    # Measured on a real K562 substrate: one island against *all* peaks reported
+    # all twelve families at exactly 0.7560 of their value against all peaks
+    # minus that island -- the disjoint fraction of the comparator, 25,640/33,917
+    # -- with the interval shifted to match. `shared_blocks` did not show it
+    # either (283 overlapping vs 282 disjoint). At complete overlap, comparator
+    # == query, every effect is exactly 0.0 with a zero-width interval, which
+    # reads as "measured, and there is no difference".
+    shared = {p.region_id for p in q_peaks} & {p.region_id for p in c_peaks}
+    if shared:
+        example = ", ".join(sorted(shared)[:3])
+        raise InterpretError(
+            f"query and comparator share {len(shared)} peak(s) ({example}"
+            f"{', ...' if len(shared) > 3 else ''}). A peak on both sides of the difference "
+            "is subtracted from itself, which attenuates every family's effect by exactly "
+            "the comparator's disjoint fraction and shifts its interval to match, silently. "
+            "Submit the comparator with the query peaks removed; 'query vs everything' is "
+            "spelled 'query vs everything except the query'."
         )
     families = sorted({fam for p in (*q_peaks, *c_peaks) for fam in p.family_coefficient_sum})
 
@@ -714,6 +804,15 @@ def _effects_percentile(q_peaks: list[Peak], c_peaks: list[Peak], families: list
                         *, n_bootstrap: int, seed: int,
                         block_size: int) -> list[FamilyEffect]:
     """Percentile block bootstrap: a point estimate and an interval, and nothing else."""
+    if n_bootstrap < MIN_PERCENTILE_REPLICATES:
+        raise InterpretError(
+            f"n_bootstrap={n_bootstrap} is below the preregistered floor of "
+            f"{MIN_PERCENTILE_REPLICATES} for a 95% percentile interval: {n_bootstrap} "
+            f"replicates resolve a tail no finer than 1/{n_bootstrap + 1}, so both "
+            "endpoints are extreme replicates and the interval is not the 95% one it "
+            "would be labelled. Refusing to report an interval narrower than the "
+            "replicates support."
+        )
     rng = random.Random(seed)
     replicates: list[list[float]] = [[] for _ in families]
     for _ in range(n_bootstrap):
@@ -1070,6 +1169,21 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
             "the conditioning set of this selection cannot be verified: it cannot be shown that "
             "downstream information was not already visible when the peak set was chosen"
         )
+    if claim_scope is ClaimScope.SUBSTRATE_CIRCULAR:
+        # The one outcome the deprecated `output_mode` cannot express, so it is
+        # also the one a reader following that field will never be told about:
+        # a fully licensed FULL_INFERENCE run selected on `hit_coefficient`
+        # printed exactly what an EXTERNAL_STRUCTURE run printed. The note is
+        # not a caveat beside a suppressed number -- the number is licensed, and
+        # what the note names is what it may be a claim ABOUT.
+        selected_on = ", ".join(query.selection_feature_names) or "an attribution-derived feature"
+        notes.append(
+            f"claim_scope is SUBSTRATE_CIRCULAR: this peak set was selected on {selected_on}, "
+            "which is derived from the same attribution surface these numbers describe. The "
+            "statistical license is unaffected -- what is limited is what the result can be "
+            "evidence about: the model's own attribution surface, not structure external to "
+            "it. output_mode cannot represent this, so read claim_scope."
+        )
 
     peaks = peak_universe(hits, block_size)
     region_ids = list(query.region_ids)
@@ -1081,9 +1195,28 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
                 "CLUSTERED_WITH_SPLIT claims a held-out half but none was supplied. The grade's "
                 "entire licence is the split; without it the query is CLUSTERED_NO_SPLIT."
             )
+        # The split is applied to BOTH sides. Restricting only the query would
+        # contrast held-out peaks against a comparator the clustering had already
+        # seen, which is not the contrast the split licenses. The comparator's
+        # count is reported for the same reason: the filter used to be announced
+        # as a query-side restriction only, so a comparator it had emptied left
+        # no trace, and the run then failed with "a cross-condition effect needs
+        # a named baseline peak set" at a caller who had named one.
+        n_comparator_submitted = len(comparator_ids)
         region_ids = [r for r in region_ids if r in held_out]
         comparator_ids = [r for r in comparator_ids if r in held_out]
-        notes.append(f"inference restricted to the held-out half ({len(region_ids)} query peaks)")
+        notes.append(
+            f"inference restricted to the held-out half ({len(region_ids)} query peaks, "
+            f"{len(comparator_ids)} comparator peaks)"
+        )
+        if n_comparator_submitted and not comparator_ids:
+            raise InterpretError(
+                f"the held-out set retains none of the {n_comparator_submitted} comparator "
+                "peaks submitted. CLUSTERED_WITH_SPLIT restricts both sides of the contrast "
+                "to the held-out half, so a --held-out list naming only query peaks leaves "
+                "no baseline to difference against. Name the held-out half of the comparator "
+                "in it as well, or declare the selection at a grade that does not split."
+            )
 
     if not region_ids:
         raise InterpretError(

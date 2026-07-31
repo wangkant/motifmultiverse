@@ -13,6 +13,14 @@ registration defer before structural criteria are evaluated, preventing
 single-linkage transitivity from becoming evidence. Missing criterion evidence
 also always defers.
 
+**Recorded limitation.** Component proposal reads edge *presence* only: an
+alignment edge whose own null says the registration is unremarkable joins its
+two nodes exactly as a compelling one does. That is unrestricted single linkage,
+the open half of `FP-05`, and closing it means declaring the distance ceiling
+`FP-13` reserves to the design. Expect large proposed components on a real
+registry, and read them as proposals — the criterion gate below is what stands
+between a component and a collapse.
+
 ## The failure that produced it
 
 The earlier merge table contained only collapse rows. Three refusals existed as

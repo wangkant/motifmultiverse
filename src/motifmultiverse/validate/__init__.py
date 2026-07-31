@@ -496,16 +496,25 @@ def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityRe
         (str(row.peak_id), str(row.hit_id)): float(row.coefficient)
         for row in after_frame.itertuples(index=False)
     }
-    affected = sorted({
+    affected_peaks = {
         peak
         for peak, hit_id in set(before_coefficients) | set(after_coefficients)
         if before_coefficients.get((peak, hit_id)) != after_coefficients.get((peak, hit_id))
-    })
+    }
+    affected = sorted(affected_peaks)
     all_delta = [after_reconstruction[peak] - before_reconstruction[peak]
                  for peak in sorted(before_reconstruction)]
     affected_delta = [after_reconstruction[peak] - before_reconstruction[peak] for peak in affected]
-    affected_keys_before = {key for key in before_coefficients if key[0] in set(affected)}
-    affected_keys_after = {key for key in after_coefficients if key[0] in set(affected)}
+    # The affected-peak set is built once and reused. Writing `key[0] in
+    # set(affected)` inside these comprehensions looked equivalent but was not:
+    # the condition is re-evaluated for every hit, so the set was rebuilt from
+    # the sorted list once PER HIT ROW and the scan became quadratic in the hit
+    # table. A real-sized validation (80,000 hits over 16,000 affected peaks)
+    # took 99 seconds that way; the identical result now takes under a second.
+    # Nothing about the values changes -- only how many times the same set is
+    # constructed.
+    affected_keys_before = {key for key in before_coefficients if key[0] in affected_peaks}
+    affected_keys_after = {key for key in after_coefficients if key[0] in affected_peaks}
     affected_keys = affected_keys_before | affected_keys_after
     union = affected_keys_before | affected_keys_after
     hit_jaccard = None if not union else len(affected_keys_before & affected_keys_after) / len(union)
@@ -878,6 +887,16 @@ def write_stability_artifacts(
     provenance_json = _canonical_json(
         provenance.to_dict(), what="stability provenance",
     )
+    # The analysis mode travels with every emitted row. It is already committed
+    # to by the artifact identity, but only inside a SHA-256 -- so an EXPLORATORY
+    # run, whose "validation" peaks are permitted to be the decision peaks
+    # themselves, produced a stability_results.parquet that no reader could tell
+    # apart from a clean held-out one. AnalysisMode.EXPLORATORY exists precisely
+    # to record nonconfirmatory reuse (assert_split_compatibility tells a caller
+    # to declare it); a record that never reaches the artifact is a waiver, not a
+    # record, so the declared mode is written in plain text beside the numbers it
+    # qualifies.
+    analysis_mode = validation.mode.value
     metadata = {
         b"motifmultiverse.artifact_id": artifact_id.encode(),
         b"motifmultiverse.schema_version": STABILITY_SCHEMA_VERSION.encode(),
@@ -886,6 +905,7 @@ def write_stability_artifacts(
         b"motifmultiverse.decision_artifact_id": decision.artifact_id.encode(),
         b"motifmultiverse.validation_artifact_id": validation.artifact_id.encode(),
         b"motifmultiverse.lexicon_identity": lexicon.lexicon_identity.encode(),
+        b"motifmultiverse.analysis_mode": analysis_mode.encode(),
     }
     rows: list[dict[str, Any]] = []
     for result in result_list:
@@ -899,6 +919,7 @@ def write_stability_artifacts(
             "decision_artifact_id": decision.artifact_id,
             "validation_artifact_id": validation.artifact_id,
             "lexicon_identity": lexicon.lexicon_identity,
+            "analysis_mode": analysis_mode,
             "provenance": provenance_json,
         })
         rows.append(row)
@@ -921,7 +942,8 @@ def write_stability_artifacts(
         pa.field("backend_result_id", pa.string()), pa.field("lexicon_identity", pa.string()),
         pa.field("schema_version", pa.string()), pa.field("artifact_id", pa.string()),
         pa.field("split_manifest_checksum", pa.string()), pa.field("decision_artifact_id", pa.string()),
-        pa.field("validation_artifact_id", pa.string()), pa.field("provenance", pa.string()),
+        pa.field("validation_artifact_id", pa.string()), pa.field("analysis_mode", pa.string()),
+        pa.field("provenance", pa.string()),
     ], metadata=metadata)
     try:
         table = pa.Table.from_pylist(rows, schema=arrow_schema)
@@ -929,7 +951,7 @@ def write_stability_artifacts(
         verification_path = stage / "backend_verification.tsv"
         fields = ["backend", "backend_version", "status", "detail", "backend_result_id",
                   "lexicon_identity", "schema_version", "artifact_id", "split_manifest_checksum",
-                  "decision_artifact_id", "validation_artifact_id", "provenance"]
+                  "decision_artifact_id", "validation_artifact_id", "analysis_mode", "provenance"]
         with verification_path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t")
             writer.writeheader()
@@ -939,6 +961,7 @@ def write_stability_artifacts(
                     "split_manifest_checksum": manifest.checksum,
                     "decision_artifact_id": decision.artifact_id,
                     "validation_artifact_id": validation.artifact_id,
+                    "analysis_mode": analysis_mode,
                     "provenance": provenance_json,
                 })
         (stage / "provenance.json").write_text(
