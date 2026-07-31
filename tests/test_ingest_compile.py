@@ -98,7 +98,9 @@ def test_ingest_writes_arrays_and_provenance(tmp_path):
     assert (out / "registry.json").exists() and (out / "arrays.h5").exists()
     prov = json.loads((out / "provenance.json").read_text())[0]
     assert prov["subcommand"] == "ingest"
-    assert set(prov["inputs"]) == {"project.json", "a.h5"}
+    # h5 inputs are keyed by the config's analysis_id, not by basename -- see
+    # test_ingest_records_one_checksum_per_analysis_even_when_the_files_share_a_name
+    assert set(prov["inputs"]) == {"project.json", "modelA_r1:a.h5"}
     assert prov["redaction_policy"] == "basenames_only_except_command"
     meta, records, arrays = ingest.load_registry(out)
     try:
@@ -816,3 +818,32 @@ def test_compile_consumes_the_schema_validated_merge_decisions_emitted_by_adjudi
     )
 
     assert manifests["core"].n_motifs == 4
+
+
+# --- regression: several discovery runs, all named modisco.h5 ------------------
+# The real layout is <cluster>/modisco.h5 -- the filename is a TF-MoDISco
+# convention, not a choice. Keying provenance by basename recorded ONE checksum
+# for the whole project and attributed it to whichever file was read last, so a
+# record that looked complete described a different run than the one that ran.
+def test_ingest_records_one_checksum_per_analysis_even_when_the_files_share_a_name(tmp_path):
+    analyses = []
+    for cluster in ("promoter_cl5", "distal_cl8"):
+        d = tmp_path / cluster
+        d.mkdir()
+        # distinct pattern counts -> distinct bytes -> distinct checksums
+        n_pos = 3 if cluster == "promoter_cl5" else 2
+        analyses.append({
+            "id": f"cbp_{cluster}", "model": "cbp", "readout": "r1", "union_id": "CBP",
+            "context": "promoter",
+            "modisco_h5": str(_modisco(d / "modisco.h5", n_pos=n_pos)),
+        })
+    out = tmp_path / "registry"
+    ingest.ingest_project(_project(tmp_path, analyses=analyses), out)
+
+    prov = json.loads((out / "provenance.json").read_text())[0]
+    h5_keys = {k for k in prov["inputs"] if k.endswith("modisco.h5")}
+    assert h5_keys == {"cbp_promoter_cl5:modisco.h5", "cbp_distal_cl8:modisco.h5"}, (
+        f"one checksum per discovery run expected, got {sorted(prov['inputs'])}"
+    )
+    assert len({prov["inputs"][k] for k in h5_keys}) == 2, "two files, two checksums"
+    assert not any(k.startswith("/") for k in prov["inputs"]), "keys must stay relative"

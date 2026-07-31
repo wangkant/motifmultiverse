@@ -42,6 +42,7 @@ from typing import Any
 from motifmultiverse import guards, infer
 from motifmultiverse.schema import (
     ESTIMATOR_CAPABILITY,
+    HIT_TABLE_COLUMNS,
     IMPLEMENTED_ESTIMATORS,
     MISSING_SENTINEL,
     ClaimScope,
@@ -157,6 +158,32 @@ def _coerce_row(row: dict[str, Any]) -> HitRecord:
     )
 
 
+def _require_hit_table_columns(present: list[str], path: Path) -> None:
+    """Refuse a hit table that does not carry every declared column.
+
+    ``schema.HIT_TABLE_COLUMNS`` is the documented contract (``interpret/README.md``
+    says the table has "columns from ``schema.HIT_TABLE_COLUMNS``") but nothing used
+    to check it on read. Two failures followed, and both are worse than a refusal:
+
+    * a table with no ``family_id`` was accepted and every row took the sentinel,
+      so every family-level share, effect and CI was computed for one fabricated
+      family named ``NA`` -- a plausible number that is wrong, which is the exact
+      category this tool exists to prevent;
+    * a table with a missing or renamed positional column raised a bare
+      ``KeyError`` out of ``_coerce_row``, i.e. a traceback and an exit code
+      outside the documented contract, in the module whose stated principle is
+      that a bad input produces a sentence.
+    """
+    missing = [c for c in HIT_TABLE_COLUMNS if c not in present]
+    if missing:
+        raise InterpretError(
+            f"{path} is missing required hit-table column(s): {', '.join(missing)}. "
+            f"A frozen hit table must carry all of {', '.join(HIT_TABLE_COLUMNS)}; "
+            "absent columns cannot be defaulted because the default is "
+            "indistinguishable from a real value."
+        )
+
+
 def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:
     """Read a frozen hit table (``.tsv``/``.txt`` or ``.parquet``).
 
@@ -172,10 +199,14 @@ def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:
                 "reading a parquet hit table needs pandas + pyarrow; "
                 "install them or supply the table as TSV"
             ) from exc
-        rows: Iterable[dict[str, Any]] = pd.read_parquet(p).to_dict("records")
+        frame = pd.read_parquet(p)
+        _require_hit_table_columns(list(frame.columns), p)
+        rows: Iterable[dict[str, Any]] = frame.to_dict("records")
     else:
         with open(p, newline="", encoding="utf-8") as fh:
-            rows = list(csv.DictReader(fh, delimiter="\t"))
+            reader = csv.DictReader(fh, delimiter="\t")
+            _require_hit_table_columns(list(reader.fieldnames or []), p)
+            rows = list(reader)
     records = [_coerce_row(dict(r)) for r in rows]
     if not records:
         raise InterpretError(f"{p} contains no rows")

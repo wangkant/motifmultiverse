@@ -1097,3 +1097,63 @@ def test_two_part_is_suppressed_with_the_effects_it_sits_beside():
     assert result.two_part_effects is None
     assert result.composition is not None            # query-only reading stands
     assert any("comparator" in f for f in result.floor_failures)
+
+
+# --- regression: a hit table must carry every declared column ------------------
+# `interpret/README.md` promises "columns from schema.HIT_TABLE_COLUMNS" but the
+# reader never checked. A table without `family_id` was accepted and every row
+# took the sentinel, so every family share/effect/CI was computed for one
+# fabricated family named "NA"; a renamed column raised a bare KeyError, i.e. a
+# traceback out of the module whose principle is that bad input gets a sentence.
+def _hit_row_fields():
+    return dict(
+        region_id="peak_1", chrom="chr1", start="100", end="200",
+        variant_id="v1", family_id="F1", hit_coefficient="0.5",
+        missingness="used", input_scale="10", lexicon_id="lex",
+        substrate_id="c" * 64,
+    )
+
+
+def _write_hit_table(path, drop=None, rename=None):
+    from motifmultiverse.schema import HIT_TABLE_COLUMNS
+
+    full = _hit_row_fields()
+    cols = [c for c in HIT_TABLE_COLUMNS if c != drop]
+    header = [(rename or {}).get(c, c) for c in cols]
+    path.write_text("\t".join(header) + "\n" + "\t".join(full[c] for c in cols) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("dropped", ["family_id", "hit_coefficient", "substrate_id"])
+def test_read_hit_table_refuses_a_missing_declared_column(tmp_path, dropped):
+    from motifmultiverse.interpret import InterpretError, read_hit_table
+
+    p = _write_hit_table(tmp_path / "hits.tsv", drop=dropped)
+    with pytest.raises(InterpretError, match="missing required hit-table column"):
+        read_hit_table(p)
+
+
+def test_read_hit_table_names_the_missing_column(tmp_path):
+    from motifmultiverse.interpret import InterpretError, read_hit_table
+
+    p = _write_hit_table(tmp_path / "hits.tsv", drop="family_id")
+    with pytest.raises(InterpretError) as excinfo:
+        read_hit_table(p)
+    assert "family_id" in str(excinfo.value)
+
+
+def test_read_hit_table_refuses_a_renamed_column_with_a_sentence_not_a_keyerror(tmp_path):
+    from motifmultiverse.interpret import InterpretError, read_hit_table
+
+    p = _write_hit_table(tmp_path / "hits.tsv", rename={"chrom": "chromosome"})
+    with pytest.raises(InterpretError, match="missing required hit-table column"):
+        read_hit_table(p)
+
+
+def test_read_hit_table_accepts_a_complete_table(tmp_path):
+    from motifmultiverse.interpret import read_hit_table
+
+    p = _write_hit_table(tmp_path / "hits.tsv")
+    records = read_hit_table(p)
+    assert len(records) == 1
+    assert records[0].family_id == "F1"

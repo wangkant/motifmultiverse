@@ -71,10 +71,39 @@ class ProvenanceRecord:
                 "python": platform.python_version(),
             }
 
-    def add_input(self, path: str | os.PathLike[str], root: str | os.PathLike[str] | None = None) -> None:
+    def add_input(self, path: str | os.PathLike[str], root: str | os.PathLike[str] | None = None,
+                  key: str | None = None) -> None:
+        """Record one input by checksum, under a key that *distinguishes* it.
+
+        Keys stay relative, per the redaction note above: to ``root`` when given,
+        else the basename. They are never absolute and never contain a home
+        directory -- which is also why the basename is *not* silently qualified
+        with its parent when it collides. ``/home/<user>/modisco.h5`` would then
+        record the username, trading a lost input for a leaked one.
+
+        A basename does not always identify an input. ``modisco.h5`` is the
+        standard TF-MoDISco filename, so ``ingest`` over several discovery
+        outputs used to record exactly one checksum and attach it to whichever
+        file was read last: a record naming one input while describing several.
+        The recorder now refuses that instead of overwriting. Callers that read
+        several same-named files pass ``root`` (keys become project-relative) or
+        an explicit ``key`` -- ``ingest`` uses the config's own ``analysis_id``,
+        which identifies the discovery run better than any path does. A
+        provenance record that loses an input describes nothing, and a recorder
+        that guesses at the difference describes something else.
+        """
         p = Path(path)
-        key = str(p.relative_to(root)) if root else p.name
-        self.inputs[key] = sha256_file(p)
+        digest = sha256_file(p)
+        if key is None:
+            key = str(p.relative_to(root)) if root else p.name
+        previous = self.inputs.get(key)
+        if previous is not None and previous != digest:
+            raise ValueError(
+                f"provenance key {key!r} already names a different input "
+                f"(sha256 {previous[:12]}... vs {digest[:12]}...). Pass root= so "
+                "the recorded keys distinguish these files."
+            )
+        self.inputs[key] = digest
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

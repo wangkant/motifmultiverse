@@ -177,7 +177,11 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
         h5_path = Path(str(analysis["modisco_h5"]))
         if not h5_path.exists():
             raise IngestError(f"{analysis_id}: {h5_path} does not exist")
-        prov.add_input(h5_path)
+        # Keyed by analysis_id, not by basename: `modisco.h5` is the standard
+        # TF-MoDISco filename, so a project with several discovery runs recorded
+        # one checksum under one key and attributed it to whichever file was read
+        # last. The config's own id is unique by construction and leaks no path.
+        prov.add_input(h5_path, key=f"{analysis_id}:{h5_path.name}")
         # An analysis may declare which metaclusters it looked for at all.
         declared = analysis.get("search_metaclusters") or {}
         searched = {g: bool(declared.get(g, True)) for g in MODISCO_GROUPS}

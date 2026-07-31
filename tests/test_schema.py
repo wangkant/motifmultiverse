@@ -238,3 +238,62 @@ def test_analyses_list_is_unbounded():
 def test_duplicate_analysis_ids_rejected():
     with pytest.raises(SchemaError):
         AnalysisConfig("p", [{"id": "a", "model": "A"}, {"id": "a", "model": "B"}])
+
+
+# --- regression: provenance must not lose an input to a basename collision ----
+# `modisco.h5` is the standard TF-MoDISco filename, so `ingest` over several
+# discovery outputs used to record ONE checksum and attach it to whichever file
+# was read last. The recorder now refuses rather than overwrites; callers that
+# read several same-named files pass root= or an explicit key=. Qualifying the
+# basename with its parent was tried and rejected: /home/<user>/modisco.h5 would
+# then record the username, trading a lost input for a leaked one.
+def _two_modisco(tmp_path):
+    a = tmp_path / "promoter_cl5" / "modisco.h5"
+    b = tmp_path / "distal_cl8" / "modisco.h5"
+    for q, payload in ((a, b"AAA"), (b, b"BBB")):
+        q.parent.mkdir(parents=True, exist_ok=True)
+        q.write_bytes(payload)
+    return a, b
+
+
+def test_add_input_refuses_a_basename_collision_instead_of_losing_one(tmp_path):
+    from motifmultiverse.provenance import ProvenanceRecord
+
+    a, b = _two_modisco(tmp_path)
+    rec = ProvenanceRecord(command="x", subcommand="ingest")
+    rec.add_input(a)
+    with pytest.raises(ValueError, match="already names a different input"):
+        rec.add_input(b)
+
+
+def test_add_input_root_distinguishes_same_basename(tmp_path):
+    from motifmultiverse.provenance import ProvenanceRecord, sha256_file
+
+    a, b = _two_modisco(tmp_path)
+    rec = ProvenanceRecord(command="x", subcommand="ingest")
+    rec.add_input(a, root=tmp_path)
+    rec.add_input(b, root=tmp_path)
+    assert set(rec.inputs) == {"promoter_cl5/modisco.h5", "distal_cl8/modisco.h5"}
+    assert set(rec.inputs.values()) == {sha256_file(a), sha256_file(b)}
+    assert not any(k.startswith("/") for k in rec.inputs)
+
+
+def test_add_input_explicit_key_distinguishes_same_basename(tmp_path):
+    from motifmultiverse.provenance import ProvenanceRecord
+
+    a, b = _two_modisco(tmp_path)
+    rec = ProvenanceRecord(command="x", subcommand="ingest")
+    rec.add_input(a, key="cbp_promoter:modisco.h5")
+    rec.add_input(b, key="cbp_distal:modisco.h5")
+    assert len(rec.inputs) == 2
+    assert len(set(rec.inputs.values())) == 2
+
+
+def test_add_input_is_idempotent_for_the_same_file(tmp_path):
+    from motifmultiverse.provenance import ProvenanceRecord
+
+    a, _ = _two_modisco(tmp_path)
+    rec = ProvenanceRecord(command="x", subcommand="ingest")
+    rec.add_input(a)
+    rec.add_input(a)
+    assert len(rec.inputs) == 1
