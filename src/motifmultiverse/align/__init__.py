@@ -216,10 +216,21 @@ def _reverse_complement(mat: Any):
 
 
 def _cosine(a: Any, b: Any) -> float:
+    """Cosine of two motif windows.
+
+    Hot path: the null calibration re-registers every pair against freshly
+    shuffled data, so this runs once per (pair x shuffle x candidate window). A
+    profile of a 29-pattern registry put 110,313 calls here and 220,626 inside
+    ``np.linalg.norm``, which spends most of its time dispatching rather than
+    computing -- these vectors are a few dozen floats. ``sqrt(v @ v)`` is the same
+    quantity for a real 1-D vector, without the dispatch. The arithmetic is
+    unchanged, and test_align_cosine_matches_the_linalg_norm_formulation pins that.
+    """
     import numpy as np
 
     flat_a, flat_b = a.ravel(), b.ravel()
-    norm_a, norm_b = float(np.linalg.norm(flat_a)), float(np.linalg.norm(flat_b))
+    norm_a = math.sqrt(float(flat_a @ flat_a))
+    norm_b = math.sqrt(float(flat_b @ flat_b))
     if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
     value = float(np.dot(flat_a, flat_b) / (norm_a * norm_b))

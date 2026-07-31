@@ -1043,12 +1043,19 @@ HIT_TABLE_COLUMNS = (
 )
 
 
-@dataclass
+@dataclass(slots=True)
 class HitRecord:
     """One row of a frozen hit table.
 
     The four-state rule is enforced here rather than left to the caller: an
     undefined coefficient is ``None``, never ``0.0``. A zero is a measurement.
+
+    ``slots=True`` is a capacity decision, not a style one. A frozen hit table is
+    one row per (peak, variant): a genome-wide universe against a 20-variant
+    lexicon is millions of these, and a plain dataclass carries a ``__dict__`` per
+    instance. Together with the interning in ``interpret._coerce_row`` this is
+    what keeps a real table inside memory -- see that function for the measured
+    numbers.
     """
 
     region_id: str

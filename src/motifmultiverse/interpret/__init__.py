@@ -34,9 +34,10 @@ import json
 import math
 import os
 import random
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from sys import intern
 from typing import Any
 
 from motifmultiverse import guards, infer
@@ -140,20 +141,33 @@ def _resolve_estimator(name: str) -> str:
 # Reading
 # --------------------------------------------------------------------------- #
 def _coerce_row(row: dict[str, Any]) -> HitRecord:
+    """Build one HitRecord, sharing the strings that repeat down the column.
+
+    A frozen hit table is one row per (peak, variant), and most of its string
+    columns are near-constant: on a real K562 substrate of 576,589 rows,
+    ``substrate_id`` and ``lexicon_id`` had **one** distinct value each, ``chrom``
+    15, ``variant_id`` 17, ``family_id`` 12. Storing a separate 64-character
+    ``substrate_id`` object per row is 576,589 copies of the same digest.
+
+    ``sys.intern`` makes each distinct value one object. With ``slots=True`` on
+    HitRecord this took the same table from 824 MB to the figure quoted in
+    interpret/README.md; the point is not the constant factor but the ceiling --
+    a genome-wide table has to fit at all.
+    """
     coeff = row.get("hit_coefficient")
     if coeff in ("", None, MISSING_SENTINEL):
         coeff = None
     return HitRecord(
-        region_id=str(row["region_id"]),
-        chrom=str(row["chrom"]),
+        region_id=intern(str(row["region_id"])),
+        chrom=intern(str(row["chrom"])),
         start=int(row["start"]),
         end=int(row["end"]),
         missingness=Missingness(str(row["missingness"])),
         input_scale=int(row["input_scale"]),
-        lexicon_id=str(row["lexicon_id"]),
-        substrate_id=str(row.get("substrate_id") or MISSING_SENTINEL),
-        variant_id=str(row.get("variant_id") or MISSING_SENTINEL),
-        family_id=str(row.get("family_id") or MISSING_SENTINEL),
+        lexicon_id=intern(str(row["lexicon_id"])),
+        substrate_id=intern(str(row.get("substrate_id") or MISSING_SENTINEL)),
+        variant_id=intern(str(row.get("variant_id") or MISSING_SENTINEL)),
+        family_id=intern(str(row.get("family_id") or MISSING_SENTINEL)),
         hit_coefficient=None if coeff is None else float(coeff),
     )
 
@@ -232,13 +246,25 @@ def read_hit_table(path: str | os.PathLike[str]) -> list[HitRecord]:
             ) from exc
         frame = pd.read_parquet(p)
         _require_hit_table_columns(list(frame.columns), p)
-        rows: Iterable[dict[str, Any]] = frame.to_dict("records")
+        # Column lists, then one transient dict per row. `to_dict("records")`
+        # would materialise every row at once and hold it alongside the records
+        # being built from it.
+        columns = {name: frame[name].tolist() for name in HIT_TABLE_COLUMNS}
+        del frame
+        records = [
+            _coerce_row({name: values[i] for name, values in columns.items()})
+            for i in range(len(next(iter(columns.values()), ())))
+        ]
+        del columns
     else:
         with open(p, newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh, delimiter="\t")
             _require_hit_table_columns(list(reader.fieldnames or []), p)
-            rows = list(reader)
-    records = [_coerce_row(dict(r)) for r in rows]
+            # Streamed on purpose. `list(reader)` held one dict per row and
+            # `_coerce_row(dict(r))` then copied each one, so a table briefly
+            # existed three times over: on a real 576,589-row substrate that was
+            # the difference between fitting and not.
+            records = [_coerce_row(row) for row in reader]
     if not records:
         raise InterpretError(f"{p} contains no rows")
     scales = {r.input_scale for r in records}

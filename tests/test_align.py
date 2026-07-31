@@ -442,3 +442,38 @@ def test_cli_align_runs_end_to_end(tmp_path, capsys, shared_ppm, short_overlap_t
     assert df.iloc[0]["seed"] == 2
     printed = capsys.readouterr().out
     assert "alignment_edges.parquet" in printed or "written" in printed
+
+
+# --- the cosine fast path must be the same arithmetic --------------------------
+def test_align_cosine_matches_the_linalg_norm_formulation():
+    """`_cosine` replaced np.linalg.norm with sqrt(v @ v) for speed.
+
+    A profile of a 29-pattern registry put 110,313 calls in `_cosine` and 220,626
+    inside np.linalg.norm, which on vectors of a few dozen floats spends its time
+    dispatching. The two formulations are the same quantity; this pins that, so a
+    later "optimisation" cannot quietly change the number instead of the cost.
+    """
+    np = pytest.importorskip("numpy")
+
+    from motifmultiverse.align import _cosine
+
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        n = int(rng.integers(1, 24))
+        a = rng.normal(size=(n, 4))
+        b = rng.normal(size=(n, 4))
+        fa, fb = a.ravel(), b.ravel()
+        reference = float(np.dot(fa, fb) / (np.linalg.norm(fa) * np.linalg.norm(fb)))
+        reference = max(-1.0, min(1.0, reference))
+        assert _cosine(a, b) == pytest.approx(reference, abs=1e-12)
+
+
+def test_align_cosine_still_returns_zero_for_a_zero_vector():
+    np = pytest.importorskip("numpy")
+
+    from motifmultiverse.align import _cosine
+
+    zero = np.zeros((4, 4))
+    other = np.ones((4, 4))
+    assert _cosine(zero, other) == 0.0
+    assert _cosine(other, zero) == 0.0
