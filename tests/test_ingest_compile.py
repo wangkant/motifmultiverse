@@ -707,6 +707,54 @@ def test_the_content_hash_is_deterministic_and_tracks_membership(tmp_path):
     assert c["sensitivity"].lexicon_content_hash == a["core"].lexicon_content_hash
 
 
+def test_manifest_tsv_binds_each_row_to_the_lexicon_hash_of_its_OWN_tier(tmp_path):
+    """One table, three tiers, one hash column -- and nothing checked which hash.
+
+    `manifest.tsv` is the join table: a hit table records a
+    `lexicon_content_hash`, and this is where a reader resolves it to the motif
+    rows that hash stands for. Every existing test reads the per-tier
+    `*.manifest.json`, so writing the loop variable's hash into every row --
+    binding all three tiers to whichever tier the loop ended on -- left the suite
+    green.
+
+    The three tiers exist so a conclusion can be tested against a wider or
+    narrower lexicon, which means their hashes differ exactly when the tiers do.
+    A reader joining a core hit table's hash to this table then finds no rows at
+    all, while `sensitivity`'s hash pulls out `core`'s motifs under
+    `sensitivity`'s identity -- the citation resolving to the wrong lexicon, in
+    the one file whose job is to make that citation resolvable.
+
+    The MODERATE-confidence collapse is the fixture
+    `test_the_content_hash_is_deterministic_and_tracks_membership` already uses to
+    force `core` and `sensitivity` apart; without it all three tiers would share a
+    hash and this test would pass on the defect.
+    """
+    registry = _registry(tmp_path)
+    _, nodes, arrays = ingest.load_registry(registry)
+    arrays.close()
+    decisions = tmp_path / "d.json"
+    decisions.write_text(json.dumps(_adjudication_payload(decisions=[{
+        "cluster_id": "c1", "decision": "collapse",
+        "members": [nodes[0]["node_id"], nodes[1]["node_id"]],
+        "representative": nodes[0]["node_id"], "merge_confidence": "MODERATE",
+        "rationale": "moderate", "decided_by": "test"}])))
+
+    out = tmp_path / "lex"
+    manifests = compile_mod.compile_lexicons(registry, out, decisions_path=decisions)
+
+    distinct = {m.lexicon_content_hash for m in manifests.values()}
+    assert len(distinct) > 1, "the fixture must make at least two tiers differ"
+
+    header, *body = [line.split("\t")
+                     for line in (out / "manifest.tsv").read_text().splitlines() if line]
+    tier_at, hash_at = header.index("tier"), header.index("lexicon_content_hash")
+    for row in body:
+        tier = row[tier_at]
+        assert row[hash_at] == manifests[tier].lexicon_content_hash, (
+            f"a {tier} row cites the hash of another tier's lexicon"
+        )
+
+
 def test_trim_threshold_changes_lexicon_identity(tmp_path):
     registry = _registry(tmp_path)
     a = compile_mod.compile_lexicons(registry, tmp_path / "a", trim_threshold=0.2)
