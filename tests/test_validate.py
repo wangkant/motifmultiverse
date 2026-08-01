@@ -9,7 +9,12 @@ import pytest
 
 import motifmultiverse.adjudicate as adjudicate
 from motifmultiverse.provenance import ProvenanceRecord
-from motifmultiverse.schema import SchemaError, SplitRole, peak_split_manifest_checksum
+from motifmultiverse.schema import (
+    SPLIT_MANIFEST_SCHEMA_VERSION,
+    SchemaError,
+    SplitRole,
+    peak_split_manifest_checksum,
+)
 from motifmultiverse.validate import (
     DEVICE_NULL_ABS_COEFFICIENT_DELTA,
     AnalysisMode,
@@ -190,6 +195,44 @@ def test_split_manifest_public_checksum_helper_rejects_malformed_direct_inputs()
         peak_split_manifest_checksum("1", {1: SplitRole.DISCOVERY})
     with pytest.raises(SchemaError, match="SplitRole"):
         peak_split_manifest_checksum("1", {"p": "DISCOVERY"})
+
+
+def test_the_split_checksum_seals_the_ROLE_and_not_only_the_set_of_peak_ids():
+    """A seal that covers the peak IDs but not their roles seals nothing that matters.
+
+    Every existing exercise of this checksum varies the peak-ID set, so the digest
+    would keep passing them all while covering only half of what it claims. Held
+    out the other way: dropping `role` from the hashed payload leaves the entire
+    suite green and ruff clean.
+
+    What that would ship is the whole point of the mechanism. Move one peak from
+    VALIDATION to DISCOVERY in a committed `--split-manifest` and leave the
+    recorded checksum alone: `PeakSplitManifest.__post_init__` recomputes the
+    digest, gets the recorded value back and accepts the manifest as sealed. The
+    split artifacts then bind to it, `_canonical_artifact_id` folds in the
+    unchanged checksum, and `write_stability_artifacts` stamps it into the parquet
+    footer. The published result claims held-out validation on a peak that was
+    used to make the decision -- the exact axis `HELD_OUT_INFERENCE` is granted on
+    -- and every checksum on the artifact agrees the split was never touched.
+
+    So the assertion holds the peak-ID SET fixed and varies only the roles.
+    """
+    honest = {"p-1": SplitRole.DISCOVERY, "p-42": SplitRole.VALIDATION}
+    moved = {"p-1": SplitRole.DISCOVERY, "p-42": SplitRole.DISCOVERY}
+    swapped = {"p-1": SplitRole.VALIDATION, "p-42": SplitRole.DISCOVERY}
+
+    digest = peak_split_manifest_checksum(SPLIT_MANIFEST_SCHEMA_VERSION, honest)
+    assert peak_split_manifest_checksum(SPLIT_MANIFEST_SCHEMA_VERSION, moved) != digest
+    assert peak_split_manifest_checksum(SPLIT_MANIFEST_SCHEMA_VERSION, swapped) != digest
+
+    # And the seal must refuse the tampered assignments under the honest digest,
+    # which is the shape the defect actually takes on disk.
+    with pytest.raises(SchemaError, match="checksum"):
+        PeakSplitManifest(
+            schema_version=SPLIT_MANIFEST_SCHEMA_VERSION,
+            assignments=moved,
+            checksum=digest,
+        )
 
 
 def test_split_artifacts_are_created_against_the_exact_manifest_and_canonical_identity():
@@ -764,6 +807,46 @@ def test_a_coefficient_that_moved_past_the_tolerance_is_still_affected():
     ])
 
     assert evaluate_stability("decision:redistribution", before, after).n_affected_peaks == 1
+
+
+@pytest.mark.parametrize("direction, moved_to", [("up", 1.4), ("down", 0.6)])
+def test_a_coefficient_is_affected_whichever_WAY_it_moved(direction, moved_to):
+    """`abs` is in the rule's own name, and only one side of it was ever exercised.
+
+    The persisted rule reads `hit_set_change|abs_coefficient_delta>3.63e-07`. Every
+    other test here moves a shared coefficient UP, so dropping the `abs` --
+    comparing a signed delta instead -- left the whole suite green and ruff clean.
+
+    What that ships is an under-count in the ordinary direction. A merge moves mass
+    ONTO the survivor and OFF the collapsed motif's shared hits, so the peaks that
+    lost mass are exactly the ones a signed comparison stops counting.
+    `n_affected_peaks` collapses; below MIN_AFFECTED_PEAKS the record flips to
+    LOW_RISK_RARE_NOT_VALIDATED with a "frequency-limited" power statement -- the
+    artifact reporting that the merge touched too little to validate, while every
+    affected peak lost mass. `affected_coefficient_share`, which `criteria.v1`
+    names as TRUE_DUPLICATE required evidence, is understated with it, so
+    adjudication reads the merge as safer than the data say. Nothing raises: every
+    field stays inside its validated range.
+
+    A signed comparison is not even a coherent alternative rule. `left` and `right`
+    are chosen by `len()`, so which direction it tests depends on which table has
+    more rows -- a peak's classification would depend on data outside that peak.
+    """
+    before = pd.DataFrame([
+        {"peak_id": "moved", "hit_id": "kept", "coefficient": 1.0, "reconstruction": 0.0},
+        {"peak_id": "untouched", "hit_id": "kept", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+    after = pd.DataFrame([
+        {"peak_id": "moved", "hit_id": "kept", "coefficient": moved_to, "reconstruction": 1.0},
+        {"peak_id": "untouched", "hit_id": "kept", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+
+    result = evaluate_stability("decision:direction", before, after)
+
+    assert result.n_affected_peaks == 1, (
+        f"a shared coefficient that moved {direction} was not counted as affected"
+    )
+    assert result.affected_coefficient_share > 0.0
     assert evaluate_stability(
         "decision:redistribution", before, after, coefficient_tolerance=None,
     ).n_affected_peaks == 0

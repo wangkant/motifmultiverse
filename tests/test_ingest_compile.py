@@ -1193,6 +1193,55 @@ def test_lexicon_identity_covers_the_variant_id_downstream_binds_to(tmp_path):
     assert seen["MA"]["hash"] != seen["MB"]["hash"]
 
 
+@pytest.mark.parametrize("field, other_value", [
+    ("trim_threshold", 0.5),
+    ("motif_type", "pfm"),
+    ("include_rc", True),
+    ("loader_backend", "other-caller"),
+    ("loader_parameters", {"motif_lambda_default": 0.9}),
+])
+def test_every_loader_setting_the_identity_names_actually_changes_the_identity(field, other_value):
+    """The docstring names the settings that must not collide; nothing checked them.
+
+    `lexicon_semantic_hash` states the rule it exists to enforce: two lexicons
+    built from byte-identical motif arrays but compiled to be read back under
+    different loader settings -- a different `trim_threshold`, `motif_type`,
+    `include_rc` or `loader_parameters` -- load differently and must not collide
+    on identity. The variant_id half of that promise has the test above. The
+    loader-configuration half had none: dropping any one key from the hashed
+    metadata blob left the whole suite green.
+
+    `include_rc` is the sharpest. Compile one registry twice, reverse-complement
+    matching off and on: the real loader calls hits on the minus strand in one and
+    not the other, so they are different instruments. With the key absent from the
+    blob both manifests carry the same `lexicon_content_hash`, so
+    `compute_substrate_id` gives both frozen runs the same substrate identity, a
+    hit table citing that hash under FP-11 no longer names which lexicon produced
+    it, and `_load_and_verify` still passes -- it recomputes through this same
+    function using `manifest.include_rc`, so the artifact verifies itself as
+    intact while its identity has stopped distinguishing what it exists to
+    distinguish.
+
+    Parametrised over every setting the docstring names, so a key dropped from the
+    blob fails on the row that names it rather than on none of them.
+    """
+    ordered = [("pos_patterns", "pattern_0",
+                {"node_id": "node-0", "variant_id": "UA_FAM_A_0"})]
+    arrays = {"node-0": {"cwm": np.zeros((MOTIF_LEN, 4))}}
+    settings = dict(schema_version="1.0", trim_threshold=0.3, motif_type="cwm",
+                    include_rc=False, loader_backend="finemo",
+                    loader_parameters={"motif_lambda_default": 0.7})
+
+    baseline = compile_mod.lexicon_semantic_hash(ordered, arrays, **settings)
+    varied = compile_mod.lexicon_semantic_hash(
+        ordered, arrays, **{**settings, field: other_value})
+
+    assert baseline != varied, (
+        f"{field} never reaches lexicon_content_hash: two lexicons the loader reads "
+        f"differently share one identity"
+    )
+
+
 def test_lexicon_identity_refuses_a_pattern_that_names_no_variant_id():
     """Silently hashing the tag alone is how two variant assignments collided."""
     with pytest.raises(compile_mod.CompileError, match="variant_id"):
