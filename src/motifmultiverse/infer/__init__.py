@@ -207,10 +207,10 @@ def bca_paired_block_interval(
             "refusing to report an acceleration estimate computed from too little data."
         )
 
-    theta_dot = sum(jackknife_values) / len(jackknife_values)
+    theta_dot = math.fsum(jackknife_values) / len(jackknife_values)
     deviations = [theta_dot - v for v in jackknife_values]
-    numerator = sum(d ** 3 for d in deviations)
-    denominator = sum(d ** 2 for d in deviations) ** 1.5
+    numerator = math.fsum(d ** 3 for d in deviations)
+    denominator = math.fsum(d ** 2 for d in deviations) ** 1.5
     a_hat = (numerator / (6.0 * denominator)) if denominator > 0 else 0.0
 
     # Bootstrap replicates: draw whole blocks with replacement, never peaks.
@@ -549,7 +549,7 @@ class TwoPartEffect:
 
 
 def _mean_of(values: Sequence[float]) -> float:
-    return sum(values) / len(values)
+    return math.fsum(values) / len(values)
 
 
 def _usage_predicate(definition: UsageDefinition, threshold: UsageThreshold | None):

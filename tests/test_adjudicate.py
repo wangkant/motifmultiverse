@@ -614,6 +614,37 @@ def test_choose_medoid_breaks_similarity_ties_in_the_declared_order(metadata, ex
     ) == expected
 
 
+def test_the_medoid_does_not_depend_on_the_order_the_members_were_listed_in():
+    """A tie the declared order exists to resolve was being resolved by float noise.
+
+    `choose_medoid`'s own comment promises determinism -- "`max` ... retains the
+    first item on an exact tie, so lexical order makes the smallest ID
+    deterministic". That held only if the mean similarities that tie are bit-equal,
+    and under a naive left-to-right `sum` they were not: the accumulation runs over
+    `members`, i.e. the caller's listing order, so the last bit of a mean depended
+    on the order the caller happened to pass.
+
+    These six similarities are ordinary two-decimal values, and `node-a`, `node-b`
+    and `node-d` have the same mean similarity exactly. Under the naive sum the
+    winner was `node-a` when the members were listed a,b,c,d and `node-d` when they
+    were listed d,c,b,a -- a different published cluster representative for the
+    same cluster, decided by nothing. `math.fsum` is correctly rounded and
+    order-independent, so the three genuinely tie and the declared lexical
+    tie-break -- the mechanism that is supposed to decide this -- actually runs.
+    """
+    from motifmultiverse import adjudicate
+
+    similarities = {
+        ("node-a", "node-b"): 0.43, ("node-a", "node-c"): 0.67,
+        ("node-a", "node-d"): 0.32, ("node-b", "node-c"): 0.27,
+        ("node-b", "node-d"): 0.72, ("node-c", "node-d"): 0.38,
+    }
+    forwards = adjudicate.choose_medoid(["node-a", "node-b", "node-c", "node-d"], similarities)
+    backwards = adjudicate.choose_medoid(["node-d", "node-c", "node-b", "node-a"], similarities)
+
+    assert forwards == backwards == "node-a"
+
+
 # ---------------------------------------------------------------------------
 # Task 12: adjudication schema, evidence protocol, and executable gates.
 # ---------------------------------------------------------------------------

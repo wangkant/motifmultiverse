@@ -761,7 +761,7 @@ def _register_and_calibrate(
         "source_node_id": source_node_id, "target_node_id": target_node_id,
         "null_shuffles": null_shuffles, "seed": seed,
         "empirical_p_value": p_value,
-        "null_mean": sum(null_scores) / len(null_scores),
+        "null_mean": math.fsum(null_scores) / len(null_scores),
         "null_min": min(null_scores), "null_max": max(null_scores),
         "observed_ppm_similarity": evidence.ppm_similarity,
         "registration_rule_version": evidence.registration_rule_version,

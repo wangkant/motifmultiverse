@@ -718,7 +718,7 @@ def compose(peaks: dict[str, Peak], region_ids: Sequence[str]) -> list[FamilyCom
             n_peaks_with_family=n_with,
             n_peaks_searched=len(searched),
             peak_share=n_with / len(searched),
-            mean_coefficient_per_peak=sum(vals) / len(vals),
+            mean_coefficient_per_peak=math.fsum(vals) / len(vals),
         ))
     return sorted(out, key=lambda c: -c.mean_coefficient_per_peak)
 
@@ -764,7 +764,7 @@ class FamilyEffect:
 
 
 def _mean(vals: Sequence[float]) -> float:
-    return sum(vals) / len(vals) if vals else float("nan")
+    return math.fsum(vals) / len(vals) if vals else float("nan")
 
 
 def _bh(p_values: Sequence[float]) -> list[float]:
@@ -1037,7 +1037,7 @@ def _effects_bca_wild(q_peaks: list[Peak], c_peaks: list[Peak], families: list[s
                 query_values[b] = q_vals
             if c_vals:
                 comparator_values[b] = c_vals
-            block_effects[b] = (g / n_q) * sum(q_vals) - (g / n_c) * sum(c_vals)
+            block_effects[b] = (g / n_q) * math.fsum(q_vals) - (g / n_c) * math.fsum(c_vals)
 
         ci = infer.bca_paired_block_interval(
             query_values, comparator_values, statistic=_mean_difference,
@@ -1109,7 +1109,7 @@ def _peak_usage(peak: Peak, family_id: str) -> infer.PeakUsage:
         hit_count=peak.family_hit_count.get(family_id, 0),
         coefficient_sum=peak.family_coefficient_sum.get(family_id, 0.0),
         abs_coefficient_sum=peak.family_abs_coefficient_sum.get(family_id, 0.0),
-        peak_abs_coefficient_sum=sum(peak.family_abs_coefficient_sum.values()),
+        peak_abs_coefficient_sum=math.fsum(peak.family_abs_coefficient_sum.values()),
     )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -289,7 +290,7 @@ def choose_medoid(
     metadata = node_metadata or {}
 
     def rank(node_id: str) -> tuple[float, float, float, float, float]:
-        mean_similarity = sum(
+        mean_similarity = math.fsum(
             _pair_similarity(node_id, other, pairwise_similarity)
             for other in members
             if other != node_id
@@ -366,7 +367,7 @@ def _missing_authoritative_tie_metadata(
     if len(members) < 2:
         return {}
     means = {
-        member: sum(
+        member: math.fsum(
             _pair_similarity(member, other, pairwise_similarity)
             for other in members
             if other != member

@@ -1651,3 +1651,29 @@ def test_the_ledger_records_both_denominators_and_conflates_neither():
     )
     assert ledger.retained_coverage == ledger.n_retained / ledger.n_opportunities
     assert ledger.retained_coverage != ledger.n_retained / ledger.n_searched
+
+
+def test_a_reported_mean_does_not_depend_on_the_order_the_values_arrive_in():
+    """Every reported effect, CI endpoint and composition mean moved with the interpreter.
+
+    `validate.evaluate_stability` was fixed in fc461d4 for exactly this: builtin
+    `sum` accumulates left to right, Python 3.12 switched it to Neumaier
+    compensated summation and 3.11 did not, so a value summed with `sum` is not
+    the same value on the two interpreters the classifiers claim. That fix
+    covered one function; the accumulators feeding `interpret`'s reported numbers
+    were still naive, and it was measured rather than argued -- one `interpret`
+    run over identical input and seed reported `effect` and both `ci` endpoints
+    as 0.7999999999999999 on 3.11 and 0.8 on 3.12. CI runs both interpreters and
+    compares nothing, so nothing saw it.
+
+    `math.fsum` is correctly rounded, which makes it order-independent, which is
+    what makes it interpreter-independent. This pins the property in-process: the
+    same values in two orders must give the same mean, and it must be the exactly
+    rounded one. Under the naive sum the two orders below differ.
+    """
+    from motifmultiverse.interpret import _mean
+
+    values = [1e16, 1.0, -1e16, 1.0]
+
+    assert _mean(values) == _mean(list(reversed(values)))
+    assert _mean(values) == 0.5, "the exact mean of [1e16, 1, -1e16, 1] is 2/4"

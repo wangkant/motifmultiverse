@@ -166,11 +166,11 @@ def _core_ic(ppm: Any, start: int, end: int) -> float | None:
     total = 0.0
     for row in list(ppm)[start:end]:
         probs = [float(v) for v in row]
-        s = sum(probs)
+        s = math.fsum(probs)
         if s <= 0:
             continue
         probs = [v / s for v in probs]
-        entropy = -sum(p * math.log2(p) for p in probs if p > 0)
+        entropy = -math.fsum(p * math.log2(p) for p in probs if p > 0)
         total += 2.0 - entropy
     return total
 
