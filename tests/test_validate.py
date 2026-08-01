@@ -11,6 +11,7 @@ import motifmultiverse.adjudicate as adjudicate
 from motifmultiverse.provenance import ProvenanceRecord
 from motifmultiverse.schema import SchemaError, SplitRole, peak_split_manifest_checksum
 from motifmultiverse.validate import (
+    DEVICE_NULL_ABS_COEFFICIENT_DELTA,
     AnalysisMode,
     BackendUnavailable,
     BackendVerification,
@@ -655,7 +656,7 @@ def test_stability_coefficient_cancellation_and_none_similarity_semantics():
         {"peak_id": "p", "hit_id": "new", "coefficient": 0.0, "reconstruction": 1.0},
     ])
     changed = evaluate_stability("decision:control", before, after)
-    assert changed.family_coefficient_share == 0.0
+    assert changed.affected_coefficient_share == 0.0
     assert changed.hit_jaccard == 0.0
     assert changed.coefficient_conservation is None
     unchanged = evaluate_stability("decision:control", before, before)
@@ -678,7 +679,245 @@ def test_stability_coefficient_share_uses_absolute_mass_under_real_signed_cancel
     result = evaluate_stability("decision:signed-cancellation", before, after)
 
     assert after.loc[after["peak_id"] == "affected", "coefficient"].sum() == 0.0
-    assert result.family_coefficient_share == 0.5
+    assert result.affected_coefficient_share == 0.5
+
+
+def _refit_hit_table(*, changed: int, total: int, after: bool, jitter: float = 1e-09):
+    """A hit table shaped like a real iterative caller's re-fit.
+
+    `changed` peaks genuinely change: one hit is replaced and the surviving
+    coefficients move by 0.5. EVERY other peak keeps its exact hit set and moves
+    only by `jitter` -- which is what FiNeMo does to the ~93,000 hits a single
+    dropped motif never touched, and which is three orders of magnitude below the
+    measured device-null coefficient floor (`DEVICE_NULL_ABS_COEFFICIENT_DELTA`).
+    """
+    rows = []
+    for number in range(total):
+        genuinely_changed = after and number < changed
+        moved = after and number >= changed
+        for index, name in enumerate(("a", "b", "c")):
+            hit_id = "c-merged" if (genuinely_changed and name == "c") else name
+            coefficient = 1.0 + index
+            if genuinely_changed:
+                coefficient += 0.5
+            elif moved:
+                coefficient += jitter
+            rows.append({
+                "peak_id": f"peak-{number:04d}",
+                "hit_id": hit_id,
+                "coefficient": coefficient,
+                "reconstruction": 1.0 if genuinely_changed else 0.0,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_affected_set_is_not_every_coefficient_that_moved_in_the_last_bits():
+    """Exact float inequality made a re-fit look like a merge effect.
+
+    `before != after` counted a peak as affected when any coefficient differed at
+    all. A hit caller re-fits competitively when the lexicon changes, so on the
+    thirteen-analysis case study 20% of the hits a merge never touched still
+    differed -- by a median of 0.0 and a 99th percentile of 4.1e-06 -- and the
+    affected set inflated about fivefold. Dropping `neg_patterns.pattern_18` (327
+    hits in 276 of 2,639 peaks) reported 2,121 affected peaks; the hit set changed
+    in 360 and 414 peaks cleared the measured device-null floor.
+
+    Both definitions stay reachable and both are named on the result. Exact
+    inequality is `coefficient_tolerance=0.0` -- still available, no longer the
+    silent default.
+    """
+    before = _refit_hit_table(changed=40, total=400, after=False)
+    after = _refit_hit_table(changed=40, total=400, after=True)
+
+    default = evaluate_stability("decision:refit", before, after)
+    hit_set_only = evaluate_stability(
+        "decision:refit", before, after, coefficient_tolerance=None,
+    )
+    exact = evaluate_stability("decision:refit", before, after, coefficient_tolerance=0.0)
+
+    assert default.n_affected_peaks == 40
+    assert hit_set_only.n_affected_peaks == 40
+    assert exact.n_affected_peaks == 400          # the pristine behaviour, on demand
+    assert default.n_affected_hits == 40 * 4      # a, b, c and c-merged
+    assert exact.n_affected_hits == 40 * 4 + 360 * 3
+    assert default.affected_definition == (
+        f"hit_set_change|abs_coefficient_delta>{DEVICE_NULL_ABS_COEFFICIENT_DELTA:g}")
+    assert hit_set_only.affected_definition == "hit_set_change"
+    assert exact.affected_definition == "hit_set_change|abs_coefficient_delta>0.0"
+
+
+def test_a_coefficient_that_moved_past_the_tolerance_is_still_affected():
+    """The narrower definition is not "hit identity only" by the back door.
+
+    A peak whose hit set is untouched but whose coefficient genuinely moved is
+    affected under the default, and is excluded only when the caller explicitly
+    asks for `coefficient_tolerance=None`. Without this the fix would trade a
+    fivefold over-count for an under-count that hides real redistribution.
+    """
+    before = pd.DataFrame([
+        {"peak_id": "redistributed", "hit_id": "kept", "coefficient": 1.0, "reconstruction": 0.0},
+        {"peak_id": "untouched", "hit_id": "kept", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+    after = pd.DataFrame([
+        {"peak_id": "redistributed", "hit_id": "kept", "coefficient": 1.4, "reconstruction": 1.0},
+        {"peak_id": "untouched", "hit_id": "kept", "coefficient": 2.0, "reconstruction": 0.0},
+    ])
+
+    assert evaluate_stability("decision:redistribution", before, after).n_affected_peaks == 1
+    assert evaluate_stability(
+        "decision:redistribution", before, after, coefficient_tolerance=None,
+    ).n_affected_peaks == 0
+
+
+def test_the_status_label_is_no_longer_diluted_by_peaks_that_only_wobbled():
+    """The module's own dilution failure, one level down.
+
+    `paired_delta_reconstruction_affected` is a median over the affected set, so
+    padding that set with peaks whose delta is exactly zero drives the median to
+    zero and prints STABLE_AFFECTED_SUBSET. On the case study this was not
+    hypothetical: pairs 2, 5 and 6 were labelled STABLE over 753, 772 and 921
+    "affected" peaks of which 172, 144 and 173 had actually changed, and all
+    three become CHANGED once the set is the peaks that changed.
+    """
+    before = _refit_hit_table(changed=40, total=400, after=False)
+    after = _refit_hit_table(changed=40, total=400, after=True)
+
+    default = evaluate_stability("decision:dilution", before, after)
+    exact = evaluate_stability("decision:dilution", before, after, coefficient_tolerance=0.0)
+
+    assert exact.paired_delta_reconstruction_affected == 0.0
+    assert exact.status == "STABLE_AFFECTED_SUBSET"
+    assert default.paired_delta_reconstruction_affected == 1.0
+    assert default.status == "CHANGED_AFFECTED_SUBSET"
+
+
+def test_the_recorded_definition_is_the_one_that_produced_the_numbers():
+    """The string is a re-derivation instruction, not a label.
+
+    Parsing `affected_definition` back out and re-running under exactly that
+    tolerance has to reproduce the record, or the field documents a rule other
+    than the one applied.
+    """
+    from motifmultiverse.validate import _parse_affected_definition
+
+    before = _refit_hit_table(changed=40, total=400, after=False)
+    after = _refit_hit_table(changed=40, total=400, after=True)
+
+    for tolerance in (None, 0.0, DEVICE_NULL_ABS_COEFFICIENT_DELTA, 1e-03):
+        result = evaluate_stability(
+            "decision:roundtrip", before, after, coefficient_tolerance=tolerance,
+        )
+        recovered = _parse_affected_definition(result.affected_definition)
+        assert recovered == tolerance
+        replayed = evaluate_stability(
+            "decision:roundtrip", before, after, coefficient_tolerance=recovered,
+        )
+        assert replayed == result
+
+
+@pytest.mark.parametrize("definition", [
+    "",
+    "   ",
+    "everything_that_moved",
+    "hit_set_change|abs_coefficient_delta>",
+    "hit_set_change|abs_coefficient_delta>loose",
+    "hit_set_change|abs_coefficient_delta>nan",
+    "hit_set_change|abs_coefficient_delta>inf",
+    "hit_set_change|abs_coefficient_delta>-1e-06",
+])
+def test_a_stability_result_refuses_an_affected_definition_no_reader_can_decode(definition):
+    with pytest.raises(SchemaError, match="affected_definition"):
+        StabilityResult(
+            decision_id="d", n_affected_peaks=40, n_affected_hits=40,
+            affected_coefficient_share=0.5, paired_delta_reconstruction_affected=1.0,
+            paired_delta_reconstruction_all=0.0, hit_jaccard=None,
+            coefficient_conservation=None, status="CHANGED_AFFECTED_SUBSET",
+            power_statement="descriptive", affected_definition=definition,
+        )
+
+
+@pytest.mark.parametrize("tolerance", [-1e-09, float("nan"), float("inf"), True, "0.1"])
+def test_evaluate_stability_refuses_a_tolerance_that_is_not_a_tolerance(tolerance):
+    with pytest.raises(SchemaError, match="coefficient_tolerance"):
+        evaluate_stability(
+            "decision:bad-tolerance", _hit_table(), _hit_table(merged=True),
+            coefficient_tolerance=tolerance,
+        )
+
+
+def test_run_backend_validation_records_the_definition_it_compared_backends_under():
+    """Two backends are only comparable under one stated affected-set rule."""
+    binding = LexiconBinding(
+        lexicon_identity="lexicons:" + "0" * 64,
+        entries=(("core", "a" * 64, "b" * 64, "c" * 64),),
+    )
+    results, _ = run_backend_validation(
+        binding, "decision:definition", [_AvailableBackend()], coefficient_tolerance=None,
+    )
+    assert [row.affected_definition for row in results] == ["hit_set_change"]
+
+    with pytest.raises(SchemaError, match="coefficient_tolerance"):
+        run_backend_validation(
+            binding, "decision:definition", [_AvailableBackend()], coefficient_tolerance=-1.0,
+        )
+
+
+def test_the_affected_definition_reaches_the_persisted_artifact(tmp_path):
+    """A number whose definition lives only in a function signature is unreadable.
+
+    `n_affected_peaks` moves by up to 5x with the definition, so the parquet row
+    that carries it carries the rule beside it.
+    """
+    (
+        binding, manifest, decision, validation, provenance, results, verification,
+    ) = _valid_artifact_bundle(tmp_path)
+    result_path, _ = write_stability_artifacts(
+        tmp_path / "definition", results, verification, manifest=manifest,
+        decision=decision, validation=validation, provenance=provenance, lexicon=binding,
+    )
+
+    frame = pd.read_parquet(result_path)
+    assert list(frame["affected_definition"]) == [
+        f"hit_set_change|abs_coefficient_delta>{DEVICE_NULL_ABS_COEFFICIENT_DELTA:g}"
+    ]
+    assert "affected_coefficient_share" in frame.columns
+    assert "family_coefficient_share" not in frame.columns
+
+
+def test_the_coefficient_share_field_is_named_for_the_subset_it_actually_measures():
+    """It is affected-peak mass over total mass, and never was a family share.
+
+    The standardized backend table is (peak_id, hit_id, coefficient,
+    reconstruction): no family_id, no variant_id, no marker for the collapsed
+    node. The per-family quantity the old name claimed is not computable from
+    these inputs, so the name was corrected to the arithmetic rather than the
+    arithmetic left disagreeing with the name. `criteria.v1.yaml` names this
+    field as TRUE_DUPLICATE evidence, so the two must agree.
+    """
+    from motifmultiverse.schema.criteria import load_criteria
+    from motifmultiverse.validate import _REQUIRED_COLUMNS
+
+    before = pd.DataFrame([
+        {"peak_id": "affected", "hit_id": "GATA::v1", "coefficient": 1.0, "reconstruction": 0.0},
+        {"peak_id": "quiet", "hit_id": "GATA::v2", "coefficient": 3.0, "reconstruction": 0.0},
+    ])
+    after = pd.DataFrame([
+        {"peak_id": "affected", "hit_id": "GATA::v1", "coefficient": 1.0, "reconstruction": 1.0},
+        {"peak_id": "affected", "hit_id": "GATA::v3", "coefficient": 1.0, "reconstruction": 1.0},
+        {"peak_id": "quiet", "hit_id": "GATA::v2", "coefficient": 3.0, "reconstruction": 0.0},
+    ])
+
+    result = evaluate_stability("decision:share", before, after)
+
+    # Affected mass / total mass -- 2 of 5 -- and NOT any grouping of the GATA
+    # family the hit_id strings above happen to spell out.
+    assert result.affected_coefficient_share == 0.4
+    assert not hasattr(result, "family_coefficient_share")
+    assert "family_id" not in _REQUIRED_COLUMNS and "variant_id" not in _REQUIRED_COLUMNS
+
+    criteria = load_criteria(adjudicate.packaged_criteria_path())
+    assert "affected_coefficient_share" in criteria["TRUE_DUPLICATE"].required_evidence
+    assert "family_coefficient_share" not in criteria["TRUE_DUPLICATE"].required_evidence
 
 
 @pytest.mark.parametrize(

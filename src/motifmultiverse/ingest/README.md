@@ -65,6 +65,27 @@ never read.
 three distinct models are present, so the N ≥ 3 rule travels with the data instead
 of being something a later step has to remember to ask.
 
+### Analyses that share one attribution array
+
+`shared_attribution_groups: [[a, b], [c, d]]` declares which analyses read **one**
+attribution array. They are one observation, not two, and the registry carries the
+declaration plus the derived `n_attribution_sources` — one per group, one per
+ungrouped analysis. A group naming an unknown id, naming an analysis already in
+another group, or naming fewer than two analyses is refused: a one-member group
+changes no count, so it is a declaration that cannot alter anything.
+
+Omitting the key records **never declared** and leaves `n_attribution_sources`
+`null`. That is not a claim of independence, and `len(analyses)` may not be
+substituted for it — the difference between the two is the reason the field is
+recorded at all.
+
+**Nothing downstream reads either field yet**, and this page says so rather than
+implying otherwise. `MotifNode.cross_context_recurrence` is the data model's one
+count-of-corroboration field; it is always `None` today and `adjudicate` already
+uses it as a medoid tie-break. Whatever eventually populates it must count distinct
+attribution sources, and `n_attribution_sources` is where that denominator comes
+from.
+
 ### Ordering is not established here
 
 Patterns are read in the file's own key order, which is **not** the hit caller's

@@ -31,7 +31,7 @@ def _nodes(n: int = 6) -> list[MotifNode]:
             node_id=f"n{i}", model="modelA", readout="r1", context="promoter",
             metacluster="pos", denovo_pattern_id=f"pattern_{i}",
             variant_id=f"UA_FAM_{i:02d}", family_id="FAM",
-            motif_length=12, seqlet_count=250,
+            motif_length=12, trimmed_core=[0, 12], seqlet_count=250,
             annotation_matches={"tomtom_q": 0.001},
         )
         for i in range(n)
@@ -316,7 +316,7 @@ def test_short_motif_flag_passes():
 
 
 @pytest.mark.parametrize("field,value", [
-    ("motif_length", 5), ("seqlet_count", 40),
+    ("trimmed_core", [4, 9]), ("seqlet_count", 40),
 ])
 def test_short_motif_flag_FALSIFIED_by_unflagged_weak_motif(field, value):
     ns = _nodes()
@@ -328,6 +328,75 @@ def test_short_motif_flag_FALSIFIED_by_unflagged_weak_tomtom_q():
     ns = _nodes()
     ns[1].annotation_matches = {"tomtom_q": 0.4}
     assert not guards.short_motif_flag(ns).passed
+
+
+def _padded_node(**over):
+    """A node in the shape tfmodisco-lite actually emits: fixed padded window.
+
+    `motif_length` is the discovery window (50 on every one of the 139 nodes of
+    the thirteen-analysis case study), and the motif is the `trimmed_core` span
+    inside it.
+    """
+    payload = {
+        "variant_id": "UA_FAM_00", "motif_length": 50, "trimmed_core": [25, 45],
+        "seqlet_count": 400, "annotation_matches": {},
+        "low_confidence_annotation": False,
+    }
+    payload.update(over)
+    return payload
+
+
+def test_short_motif_flag_FALSIFIED_by_a_short_core_inside_a_padded_window():
+    """The defect: on real tfmodisco-lite output the short clause never fired.
+
+    `motif_length` is 50 for every node the case study registry contains, so a
+    threshold of 6 on it could not be crossed by any input the ingest stage can
+    produce -- while 40 of those 139 nodes declare a core of 6bp or less. Reading
+    the padded window instead of the core passes this node.
+    """
+    node = _padded_node(trimmed_core=[25, 29])   # a 4bp core in a 50bp window
+    assert not guards.short_motif_flag([node]).passed
+
+
+def test_short_motif_flag_reads_a_carried_trimmed_core_length():
+    """AnnotationCandidate carries the width; the guard must read it, not the window."""
+    node = _padded_node(trimmed_core=None, trimmed_core_length=4)
+    assert not guards.short_motif_flag([node]).passed
+
+
+def test_short_motif_flag_treats_a_zero_width_core_as_short_not_as_absent():
+    """A core that trimmed to nothing is the weakest motif there is, not a missing one."""
+    node = _padded_node(trimmed_core=[30, 30])
+    assert not guards.short_motif_flag([node]).passed
+
+
+def test_short_motif_flag_never_substitutes_the_padded_window_for_the_core():
+    """The padded window is not a width. A wide core must clear the clause whatever
+    `motif_length` says, or the guard is still reading the window."""
+    node = _padded_node(motif_length=5, trimmed_core=None, trimmed_core_length=12)
+    result = guards.short_motif_flag([node])
+    assert result.passed, result.detail
+
+
+def test_short_motif_flag_says_when_no_node_declared_a_core_to_measure():
+    """A run where the clause could not fire must not read like one where it did."""
+    result = guards.short_motif_flag([_padded_node(trimmed_core=None),
+                                      _padded_node(variant_id="UA_FAM_01",
+                                                   trimmed_core=None)])
+    assert result.passed
+    assert "2 of 2 node(s) declare no trimmed core" in result.detail
+    assert guards.short_motif_flag([_padded_node()]).detail == (
+        "every short / weak / low-support motif is flagged"
+    )
+
+
+def test_short_motif_flag_FALSIFIED_by_a_non_numeric_trimmed_core():
+    """MISSING_SENTINEL in the span must be reported, never compared or crashed on."""
+    from motifmultiverse.schema import MISSING_SENTINEL
+
+    result = guards.short_motif_flag([_padded_node(trimmed_core=MISSING_SENTINEL)])
+    assert not result.passed
+    assert "non-numeric trimmed core" in result.detail
 
 
 # -------------------------------------------------------- single_family_layer
@@ -947,6 +1016,7 @@ def test_estimability_floor_still_has_no_interval_and_no_reference_to_read_it_ag
 
     from motifmultiverse.guards import GUARDS_AWAITING_INPUT
     from motifmultiverse.validate import (
+        AFFECTED_BY_HIT_SET_CHANGE,
         MIN_AFFECTED_PEAKS,
         StabilityResult,
         ValidationError,
@@ -983,10 +1053,13 @@ def test_estimability_floor_still_has_no_interval_and_no_reference_to_read_it_ag
     with pytest.raises(ValidationError):
         StabilityResult(
             decision_id="d", n_affected_peaks=MIN_AFFECTED_PEAKS - 1, n_affected_hits=1,
-            family_coefficient_share=0.5, paired_delta_reconstruction_affected=1.0,
+            affected_coefficient_share=0.5, paired_delta_reconstruction_affected=1.0,
             paired_delta_reconstruction_all=0.0, hit_jaccard=None,
             coefficient_conservation=None, status="CHANGED_AFFECTED_SUBSET",
             power_statement="descriptive",
+            # Valid, so the refusal below is still the N floor and not a
+            # malformed affected_definition standing in for it.
+            affected_definition=AFFECTED_BY_HIT_SET_CHANGE,
         )
 
 

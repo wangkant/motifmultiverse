@@ -2,8 +2,10 @@
 
 The all-peak reconstruction summary is retained as a diagnostic only.  A merge
 can change a small subset while the all-peak median is zero, so every decision
-is evaluated and labelled on the subset whose hit identities or coefficients
-actually changed.
+is evaluated and labelled on the subset whose hit identities changed, or whose
+coefficients moved by more than a declared tolerance.  Which of those two
+definitions produced a given number is recorded on the result itself
+(``StabilityResult.affected_definition``): the count is meaningless without it.
 """
 from __future__ import annotations
 
@@ -42,7 +44,8 @@ from .base import (
 )
 
 __all__ = [
-    "AnalysisMode", "BackendUnavailable", "BackendVerification", "CrossFitFold",
+    "AFFECTED_BY_HIT_SET_CHANGE", "AnalysisMode", "BackendUnavailable", "BackendVerification",
+    "CrossFitFold", "DEFAULT_COEFFICIENT_TOLERANCE", "DEVICE_NULL_ABS_COEFFICIENT_DELTA",
     "DecisionSplitArtifact", "LexiconBinding", "PeakSplitManifest", "SPLIT_ARTIFACT_SCHEMA_VERSION",
     "STABILITY_SCHEMA_VERSION", "StabilityBackend", "StabilityProvenance", "StabilityResult", "SplitRole",
     "ValidationError", "ValidationSplitArtifact", "assert_artifact_split_compatibility",
@@ -53,14 +56,58 @@ __all__ = [
     "write_stability_artifacts",
 ]
 
-STABILITY_SCHEMA_VERSION = "1"
+#: Bumped to "2" when `family_coefficient_share` was renamed to
+#: `affected_coefficient_share` (the old name claimed a per-family quantity the
+#: arithmetic never computed) and `affected_definition` was added. A rename is
+#: the one shape change a reader cannot detect from the data, so leaving this at
+#: "1" would have made a pre-rename artifact and a post-rename artifact
+#: indistinguishable by the only field that exists to distinguish them.
+STABILITY_SCHEMA_VERSION = "2"
 STABILITY_PROVENANCE_CONTRACT_VERSION = "stability-provenance-1"
 MIN_AFFECTED_PEAKS = 30
+
+#: The affected set defined purely by hit identity: a hit present on one side and
+#: absent on the other.  No tolerance, no arithmetic on coefficients.
+AFFECTED_BY_HIT_SET_CHANGE = "hit_set_change"
+
+#: Measured noise floor for "this COEFFICIENT moved", at this hit caller's own
+#: precision.  Re-calling one identical 139-motif lexicon over the same 2,639
+#: peaks on GPU and on CPU left 93,661 shared (peak, hit) keys, of which 99.85%
+#: were bit-identical; the largest |coefficient delta| across all of them was
+#: 3.63e-07.  A device swap is not a merge, so nothing at or below that can be
+#: attributed to collapsing a motif.
+#:
+#: The first version of this constant read 2.32e-06 and cited the same device
+#: null -- but that figure is the largest per-peak *reconstruction NLL* delta,
+#: not a coefficient delta, and this constant is compared against coefficients.
+#: A number whose grounding cites the wrong column is the defect class this
+#: package exists to catch, arriving inside the fix for another one.  Re-grounded
+#: on the coefficient measurement it costs about 27% more affected peaks (on the
+#: nine real pairs: 507/303/528/729/266/334/137/415/372 rather than
+#: 471/242/414/641/193/243/115/359/307); no status flip and no conclusion changes,
+#: which is worth stating precisely because it means the wrong figure was not
+#: caught by its consequences.
+#:
+#: It is a measurement, not a preference.  It is stated here so that the default
+#: below cites something, and it is written verbatim into every result it
+#: produces (``affected_definition``) so no reader has to come back here to find
+#: out what "affected" meant.
+DEVICE_NULL_ABS_COEFFICIENT_DELTA = 3.63e-07
+
+#: Default for ``evaluate_stability(coefficient_tolerance=...)``.  Exact float
+#: inequality was the previous behaviour and is available as ``0.0``; it counted
+#: every last-bit wobble of an iterative caller as a merge effect and inflated
+#: the affected set about fivefold on real data.  ``None`` selects
+#: ``AFFECTED_BY_HIT_SET_CHANGE`` -- hit identity only, no tolerance at all.
+DEFAULT_COEFFICIENT_TOLERANCE: float | None = DEVICE_NULL_ABS_COEFFICIENT_DELTA
+
+_AFFECTED_DELTA_PREFIX = f"{AFFECTED_BY_HIT_SET_CHANGE}|abs_coefficient_delta>"
 _REQUIRED_COLUMNS = ("peak_id", "hit_id", "coefficient", "reconstruction")
 _PERSISTED_RESULT_COLUMNS = (
-    "decision_id", "n_affected_peaks", "n_affected_hits", "family_coefficient_share",
+    "decision_id", "n_affected_peaks", "n_affected_hits", "affected_coefficient_share",
     "paired_delta_reconstruction_affected", "paired_delta_reconstruction_all", "hit_jaccard",
-    "coefficient_conservation", "status", "power_statement", "affected_interval", "schema_version",
+    "coefficient_conservation", "status", "power_statement", "affected_definition",
+    "affected_interval", "schema_version",
     "artifact_id", "split_manifest_checksum", "decision_artifact_id", "validation_artifact_id",
     "provenance",
 )
@@ -305,18 +352,30 @@ def load_lexicon_binding(lexicons: str | Path) -> LexiconBinding:
 
 @dataclass(frozen=True)
 class StabilityResult:
-    """Versioned, affected-subset evidence for one downstream decision."""
+    """Versioned, affected-subset evidence for one downstream decision.
+
+    ``affected_coefficient_share`` is the fraction of POST-MERGE absolute
+    coefficient mass that sits in the affected peaks.  It is a property of the
+    affected subset, not of a motif family; see the note on the field where it
+    is computed for why the family quantity is not available here.
+
+    ``affected_definition`` states which rule produced ``n_affected_peaks``,
+    ``n_affected_hits`` and ``affected_coefficient_share``.  Every one of those
+    three numbers changes by several-fold depending on the rule, so a record
+    that carries them without it is not interpretable.
+    """
 
     decision_id: str
     n_affected_peaks: int
     n_affected_hits: int
-    family_coefficient_share: float
+    affected_coefficient_share: float
     paired_delta_reconstruction_affected: float | None
     paired_delta_reconstruction_all: float
     hit_jaccard: float | None
     coefficient_conservation: float | None
     status: str
     power_statement: str
+    affected_definition: str
     affected_interval: tuple[float, float] | None = None
     backend: str = ""
     backend_version: str = ""
@@ -335,9 +394,12 @@ class StabilityResult:
             raise ValidationError(
                 f"stability schema_version must be {STABILITY_SCHEMA_VERSION!r}"
             )
-        _finite("family_coefficient_share", self.family_coefficient_share)
-        if not 0.0 <= self.family_coefficient_share <= 1.0:
-            raise ValidationError("stability family_coefficient_share must be in [0, 1]")
+        _finite("affected_coefficient_share", self.affected_coefficient_share)
+        if not 0.0 <= self.affected_coefficient_share <= 1.0:
+            raise ValidationError("stability affected_coefficient_share must be in [0, 1]")
+        # Parsing, not a presence check: a definition string that no reader can
+        # decode back into a rule records nothing.
+        _parse_affected_definition(self.affected_definition)
         _finite("paired_delta_reconstruction_all", self.paired_delta_reconstruction_all)
         for name in (
             "paired_delta_reconstruction_affected", "hit_jaccard", "coefficient_conservation",
@@ -429,6 +491,50 @@ def _finite(name: str, value: object) -> float:
     return float(value)
 
 
+def _coefficient_tolerance(value: object) -> float | None:
+    """Validate a caller-supplied affected-set tolerance; ``None`` means hit identity only."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValidationError("coefficient_tolerance must be a real number or None")
+    tolerance = float(value)
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ValidationError("coefficient_tolerance must be finite and non-negative")
+    return tolerance
+
+
+def _affected_definition(tolerance: float | None) -> str:
+    """Render the affected-set rule as the exact string persisted with the numbers."""
+    if tolerance is None:
+        return AFFECTED_BY_HIT_SET_CHANGE
+    return f"{_AFFECTED_DELTA_PREFIX}{tolerance!r}"
+
+
+def _parse_affected_definition(text: object) -> float | None:
+    """Recover the tolerance a recorded definition names, refusing anything unreadable."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValidationError("stability affected_definition must be a non-empty string")
+    if text == AFFECTED_BY_HIT_SET_CHANGE:
+        return None
+    if not text.startswith(_AFFECTED_DELTA_PREFIX):
+        raise ValidationError(
+            "stability affected_definition must be "
+            f"{AFFECTED_BY_HIT_SET_CHANGE!r} or {_AFFECTED_DELTA_PREFIX!r} followed by a "
+            f"tolerance; got {text!r}"
+        )
+    try:
+        tolerance = float(text[len(_AFFECTED_DELTA_PREFIX):])
+    except ValueError as exc:
+        raise ValidationError(
+            f"stability affected_definition does not name a numeric tolerance: {text!r}"
+        ) from exc
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ValidationError(
+            f"stability affected_definition tolerance must be finite and non-negative: {text!r}"
+        )
+    return tolerance
+
+
 def normalize_backend_output(output: Any, *, backend: str):
     """Require one exact semantic schema before any backend is compared.
 
@@ -477,10 +583,34 @@ def _peak_reconstruction(frame, backend: str) -> dict[str, float]:
     return {str(peak): float(value) for peak, value in grouped["min"].items()}
 
 
-def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityResult:
-    """Evaluate a merge on affected peaks and retain the all-peak dilution diagnostic."""
+def evaluate_stability(
+    decision_id: str,
+    before: Any,
+    after: Any,
+    *,
+    coefficient_tolerance: float | None = DEFAULT_COEFFICIENT_TOLERANCE,
+) -> StabilityResult:
+    """Evaluate a merge on affected peaks and retain the all-peak dilution diagnostic.
+
+    A peak is affected when its hit set changed -- a hit present on one side and
+    absent on the other -- or, when ``coefficient_tolerance`` is not ``None``,
+    when a hit shared by both sides moved by more than that tolerance.  The rule
+    that was applied is returned on the result as ``affected_definition``.
+
+    This used to be exact float inequality (``before != after``), which is
+    ``coefficient_tolerance=0.0``.  A real iterative hit caller re-fits every
+    coefficient when the lexicon changes, so on the thirteen-analysis case study
+    20% of the hits a merge never touched still differed in their last bits and
+    the affected set inflated about fivefold: dropping one motif with 330 hits in
+    276 of 2,639 peaks reported 2,121 affected peaks, against 360 peaks whose hit
+    set genuinely changed and 420 at the measured device-null floor.  Anything
+    computed over the affected subset -- the reconstruction delta, the status,
+    ``affected_coefficient_share`` -- inherited that.
+    """
     import numpy as np
 
+    tolerance = _coefficient_tolerance(coefficient_tolerance)
+    affected_definition = _affected_definition(tolerance)
     before_frame = normalize_backend_output(before, backend="before")
     after_frame = normalize_backend_output(after, backend="after")
     before_reconstruction = _peak_reconstruction(before_frame, "before")
@@ -496,11 +626,23 @@ def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityRe
         (str(row.peak_id), str(row.hit_id)): float(row.coefficient)
         for row in after_frame.itertuples(index=False)
     }
-    affected_peaks = {
-        peak
-        for peak, hit_id in set(before_coefficients) | set(after_coefficients)
-        if before_coefficients.get((peak, hit_id)) != after_coefficients.get((peak, hit_id))
-    }
+    # Hit identity first: a key on one side only is a change no tolerance can
+    # excuse.  This half needs no threshold and is always applied.
+    affected_peaks = {peak for peak, _hit in set(before_coefficients) ^ set(after_coefficients)}
+    if tolerance is not None:
+        # Then shared keys that moved past the declared tolerance.  Iterating the
+        # smaller side and looking the other up keeps this linear in the hit
+        # table, like the membership scan below.
+        left, right = (
+            (before_coefficients, after_coefficients)
+            if len(before_coefficients) <= len(after_coefficients)
+            else (after_coefficients, before_coefficients)
+        )
+        affected_peaks.update(
+            key[0]
+            for key, value in left.items()
+            if key in right and abs(value - right[key]) > tolerance
+        )
     affected = sorted(affected_peaks)
     all_delta = [after_reconstruction[peak] - before_reconstruction[peak]
                  for peak in sorted(before_reconstruction)]
@@ -526,6 +668,16 @@ def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityRe
         right = np.asarray([after_coefficients[key] for key in shared], dtype=float)
         conservation_value = float(np.corrcoef(left, right)[0, 1])
         conservation = conservation_value if math.isfinite(conservation_value) else None
+    # The share of POST-MERGE absolute coefficient mass that lands in the
+    # affected peaks.  This was called `family_coefficient_share`, which claimed
+    # a per-family quantity: the collapsed member's mass over its family's total.
+    # It never computed that and cannot -- the standardized backend table is
+    # (peak_id, hit_id, coefficient, reconstruction), carrying no family or
+    # variant identity and no marker for which node was collapsed, and
+    # normalize_backend_output refuses to infer either. The name was renamed to
+    # what the arithmetic below actually produces rather than the arithmetic
+    # changed to a quantity this function has no inputs for; FP-11's family-level
+    # "dominant variant's coefficient share" stays unclaimed and unshadowed.
     denominator = sum(abs(value) for value in after_coefficients.values())
     numerator = sum(abs(after_coefficients[key]) for key in affected_keys_after)
     share = 0.0 if denominator == 0 else numerator / denominator
@@ -553,7 +705,8 @@ def evaluate_stability(decision_id: str, before: Any, after: Any) -> StabilityRe
         decision_id=decision_id,
         n_affected_peaks=n_affected,
         n_affected_hits=len(affected_keys),
-        family_coefficient_share=float(share),
+        affected_coefficient_share=float(share),
+        affected_definition=affected_definition,
         paired_delta_reconstruction_affected=(
             None if not affected_delta else float(np.median(affected_delta))
         ),
@@ -569,10 +722,18 @@ def run_backend_validation(
     lexicons: LexiconBinding,
     decision_id: str,
     backends: Sequence[StabilityBackend],
+    *,
+    coefficient_tolerance: float | None = DEFAULT_COEFFICIENT_TOLERANCE,
 ) -> tuple[tuple[StabilityResult, ...], tuple[BackendVerification, ...]]:
-    """Run independent adapters without converting a missing optional one to success."""
+    """Run independent adapters without converting a missing optional one to success.
+
+    ``coefficient_tolerance`` is forwarded to :func:`evaluate_stability` and is
+    recorded on every result it produces, so two backends compared here are
+    always compared under the same, stated affected-set definition.
+    """
     if not isinstance(lexicons, LexiconBinding):
         raise ValidationError("backend validation requires a validated LexiconBinding")
+    _coefficient_tolerance(coefficient_tolerance)
     results: list[StabilityResult] = []
     verification: list[BackendVerification] = []
     for backend in backends:
@@ -591,7 +752,9 @@ def run_backend_validation(
                 "lexicon_identity": lexicons.lexicon_identity,
             }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
             result = replace(
-                evaluate_stability(decision_id, before, after),
+                evaluate_stability(
+                    decision_id, before, after, coefficient_tolerance=coefficient_tolerance,
+                ),
                 backend=name,
                 backend_version=version,
                 backend_result_id=backend_result_id,
@@ -783,6 +946,24 @@ def _publish_directory_noreplace(stage: Path, destination: Path) -> None:
     import ctypes
     import errno
 
+    # `tempfile.mkdtemp` makes the staging directory 0700 so a half-written
+    # artifact is nobody else's business *while it is being written*. That mode
+    # belongs to the staging step, not to the result -- publishing is a rename,
+    # or a symlink to that very directory, so whatever mode staging chose is the
+    # mode collaborators find. Under a 0755 parent it produced a `validation/`
+    # nobody but the owner could enter, holding 0644 files that were therefore
+    # unreachable, and in the symlink form a `cp -r` that copied the link rather
+    # than the results. So the directory about to be published takes the mode a
+    # plain `mkdir` here would have given it, and the artifact is exactly as
+    # readable as the rest of the run that produced it.
+    #
+    # Read-and-restore is the only way to ask for the umask. The value parked in
+    # the window is the restrictive one, so anything another thread creates
+    # during it is private rather than exposed.
+    umask = os.umask(0o077)
+    os.umask(umask)
+    os.chmod(stage, 0o777 & ~umask)
+
     def publish_symlink() -> None:
         try:
             os.symlink(
@@ -933,11 +1114,12 @@ def write_stability_artifacts(
     result_path = stage / "stability_results.parquet"
     arrow_schema = pa.schema([
         pa.field("decision_id", pa.string()), pa.field("n_affected_peaks", pa.int64()),
-        pa.field("n_affected_hits", pa.int64()), pa.field("family_coefficient_share", pa.float64()),
+        pa.field("n_affected_hits", pa.int64()), pa.field("affected_coefficient_share", pa.float64()),
         pa.field("paired_delta_reconstruction_affected", pa.float64()),
         pa.field("paired_delta_reconstruction_all", pa.float64()), pa.field("hit_jaccard", pa.float64()),
         pa.field("coefficient_conservation", pa.float64()), pa.field("status", pa.string()),
-        pa.field("power_statement", pa.string()), pa.field("affected_interval", pa.string()),
+        pa.field("power_statement", pa.string()), pa.field("affected_definition", pa.string()),
+        pa.field("affected_interval", pa.string()),
         pa.field("backend", pa.string()), pa.field("backend_version", pa.string()),
         pa.field("backend_result_id", pa.string()), pa.field("lexicon_identity", pa.string()),
         pa.field("schema_version", pa.string()), pa.field("artifact_id", pa.string()),

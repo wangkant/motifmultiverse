@@ -211,7 +211,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--criteria", default=None,
                    help="versioned executable criterion registry "
                         "(default: the criteria.v1.yaml packaged with adjudicate)")
-    a.add_argument("--review", default="review.yaml", help="human review file to emit")
+    a.add_argument("--review", default="review.yaml",
+                   help="human review file to emit. It is one of this subcommand's three "
+                        "output artifacts, so a RELATIVE path is resolved against --out "
+                        "and not against the current directory: `--review "
+                        "probe/review.yaml --out probe` writes probe/probe/review.yaml. "
+                        "Pass an absolute path to put the review anywhere else")
     a.add_argument("--out", default="evidence/", help="output directory")
     a.set_defaults(func=_run_adjudicate)
 
@@ -256,7 +261,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--fimo-heldout", action="store_true", help="held-out FIMO coverage")
     a.add_argument("--finemo-pilot", action="store_true", help="FiNeMo pilot instance calling")
     a.add_argument("--matched-peaks", action="store_true", help="matched-peak controls")
-    a.add_argument("--out", default="validation/", help="output directory")
+    a.add_argument("--out", default="validation/",
+                   help="output directory. It must NOT already exist: the stability "
+                        "artifacts are published in one no-clobber filesystem operation, "
+                        "so a second run into a directory that is already there refuses "
+                        "(exit 4) rather than overwrite it or merge into it. Name a fresh "
+                        "directory for each run")
     a.set_defaults(func=_run_validate)
 
     a = sub.add_parser(
@@ -511,6 +521,12 @@ def _run_align(ns: argparse.Namespace) -> int:
               f"p={e.empirical_p_value:.4f}")
     print(f"written: {summary.edges_path}")
     print(f"written: {summary.null_summary_path}")
+    # All four, not two. The stage started writing the run summary and the
+    # excluded-pair table so that a reader could recover the denominator; naming
+    # only half of them leaves the other half to be discovered by `ls`.
+    for path in (summary.run_summary_path, summary.excluded_pairs_path):
+        if path:
+            print(f"written: {path}")
     return 0
 
 

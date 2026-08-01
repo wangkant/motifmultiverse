@@ -569,27 +569,47 @@ def stratum_parity(cells: Iterable[Mapping[str, Any]]) -> GuardResult:
 def short_motif_flag(nodes: Sequence[Any]) -> GuardResult:
     """Short / weakly-supported motifs must carry ``low_confidence_annotation``.
 
-    The thresholds are annotate/README.md's: PWM <= 6 bp, or TomTom q > 0.05, or
+    The thresholds are annotate/README.md's: core <= 6 bp, or TomTom q > 0.05, or
     seqlet count < 100.
 
-    Two ways this used to pass what it exists to catch:
+    **The short clause is measured on the trimmed core, never on the padded
+    pattern window.** This guard used to read ``motif_length``, and on
+    tfmodisco-lite output that is the fixed window every pattern is emitted at,
+    padded with near-uniform background -- see ``align/__init__.py``, which
+    refuses to register on it for the same reason. Run end to end on thirteen
+    real analyses, ``motif_length`` was 50 for every one of the 139 registry
+    nodes, so ``<= 6`` could not fire once; over the same registry 40 of those
+    139 nodes declare a contribution-bearing core of 6bp or less. The clause was
+    shipping as protection against a population it could not see.
 
-    * ``(motif_length or 99) <= 6`` reads a legitimate **zero** as absent, so the
-      weakest possible motif -- length 0, zero seqlets -- was not short and not
+    The width is read from ``trimmed_core_length`` where a caller carries it
+    (``schema.annotation.AnnotationCandidate``), otherwise derived from the
+    half-open ``trimmed_core`` span the registry declares (``schema.MotifNode``),
+    so the same guard serves both without either side re-deriving the rule.
+
+    Three ways this has passed what it exists to catch, all still closed:
+
+    * ``(motif_length or 99) <= 6`` read a legitimate **zero** as absent, so the
+      weakest possible motif -- width 0, zero seqlets -- was not short and not
       low-support, and passed unflagged. Missing and zero are different claims;
-      ``or`` cannot tell them apart.
+      ``or`` cannot tell them apart. A zero-width core is still short here.
     * a non-numeric value, including this package's own ``MISSING_SENTINEL``,
       raised ``TypeError: '<=' not supported between 'str' and 'int'`` out of the
       guard. A guard that crashes on a value its own schema produces is not
       reporting on the data, it is reporting on itself.
-
-    Absent (``None``) is still not an offence: no measurement is not evidence of a
-    short motif. It is reported separately so it cannot be mistaken for a pass.
+    * the width being unmeasurable on every node read as a clean pass. Absent
+      (``None``) is still not an offence -- no measurement is not evidence of a
+      short motif -- but the count of nodes that declared no core is now carried
+      in the passing detail, so a run in which the clause could not fire says so
+      where the verdict is read (``guard_outcomes.json``) instead of looking
+      exactly like a run in which it fired and found nothing.
     """
     gid = "short_motif_flag"
 
     def g(n: Any, k: str) -> Any:
-        return getattr(n, k) if hasattr(n, k) else n.get(k)
+        if hasattr(n, k):
+            return getattr(n, k)
+        return n.get(k) if isinstance(n, Mapping) else None
 
     def number(value: Any) -> float | None:
         if value is None:
@@ -598,15 +618,41 @@ def short_motif_flag(nodes: Sequence[Any]) -> GuardResult:
             return math.nan          # unmeasurable -> reported, never compared
         return float(value)
 
+    def core_width(n: Any) -> float | None:
+        """The declared contribution-bearing width: value, None, or NaN.
+
+        ``motif_length`` is deliberately never consulted, not even as a
+        fallback: substituting the padded window for a missing core is the
+        reading this guard was fixed to stop, and a fallback would put it back
+        under the same guard_id where no reader could tell which one applied.
+        """
+        declared = g(n, "trimmed_core_length")
+        if declared is not None:
+            return number(declared)
+        span = g(n, "trimmed_core")
+        if span is None:
+            return None
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            return math.nan
+        start, end = number(span[0]), number(span[1])
+        if start is None or end is None or math.isnan(start) or math.isnan(end):
+            return math.nan
+        return math.nan if end < start else end - start
+
     offenders: list[Any] = []
     unusable: list[Any] = []
+    unmeasured = 0
+    total = 0
     for n in nodes:
-        length, seqlets = number(g(n, "motif_length")), number(g(n, "seqlet_count"))
+        total += 1
+        width, seqlets = core_width(n), number(g(n, "seqlet_count"))
         q = number((g(n, "annotation_matches") or {}).get("tomtom_q"))
-        if any(v is not None and math.isnan(v) for v in (length, seqlets, q)):
+        if any(v is not None and math.isnan(v) for v in (width, seqlets, q)):
             unusable.append(g(n, "variant_id"))
             continue
-        short = length is not None and length <= 6
+        if width is None:
+            unmeasured += 1
+        short = width is not None and width <= 6
         few = seqlets is not None and seqlets < 100
         weak_q = q is not None and q > 0.05
         if (short or weak_q or few) and not g(n, "low_confidence_annotation"):
@@ -614,12 +660,18 @@ def short_motif_flag(nodes: Sequence[Any]) -> GuardResult:
     if unusable:
         return _fail(
             gid,
-            f"{len(unusable)} node(s) carry a non-numeric motif_length / seqlet_count / "
+            f"{len(unusable)} node(s) carry a non-numeric trimmed core / seqlet_count / "
             f"tomtom_q, so the threshold cannot be applied: {unusable[:5]}",
         )
     if offenders:
         return _fail(gid, f"unflagged low-confidence annotations: {offenders[:5]}")
-    return _ok(gid, "every short / weak / low-support motif is flagged")
+    detail = "every short / weak / low-support motif is flagged"
+    if unmeasured:
+        detail += (
+            f"; {unmeasured} of {total} node(s) declare no trimmed core, so the <=6bp "
+            "clause was not applied to them"
+        )
+    return _ok(gid, detail)
 
 
 def single_family_layer(strata: Iterable[Mapping[str, Any]]) -> GuardResult:

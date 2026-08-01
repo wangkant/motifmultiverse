@@ -866,11 +866,15 @@ def test_align_registry_writes_byte_identical_tables_at_every_worker_count(tmp_p
     assert serial_summary.n_edges == parallel_summary.n_edges == len(serial_edges)
     assert serial_summary.n_edges > 1, "fixture registers too few pairs to distribute"
     assert serial_edges == parallel_edges
-    for name in ("alignment_edges.parquet", "alignment_null_summary.tsv"):
+    for name in ALIGN_ARTIFACTS:
         assert (serial_out / name).read_bytes() == (parallel_out / name).read_bytes(), (
             f"{name} differs between worker counts"
         )
     assert serial_summary.workers == 1 and parallel_summary.workers == 3
+    assert "workers" not in _read_run_summary(serial_out), (
+        "the run summary records the worker count, so two runs of the same "
+        "registry now differ in a file for a reason that changes no number in it"
+    )
 
 
 def test_align_registry_really_runs_a_pool_at_the_requested_worker_count(tmp_path):
@@ -972,7 +976,7 @@ def test_align_registry_is_byte_identical_under_the_spawn_start_method(tmp_path)
     )
     assert completed.returncode == 0, completed.stderr
 
-    for name in ("alignment_edges.parquet", "alignment_null_summary.tsv"):
+    for name in ALIGN_ARTIFACTS:
         assert (serial_out / name).read_bytes() == (spawned_out / name).read_bytes(), (
             f"{name} differs between an in-process serial run and a spawn-method "
             "parallel run"
@@ -1107,3 +1111,364 @@ def test_align_records_the_registry_bytes_it_read(
     assert inputs, "align recorded no inputs"
     assert {key.split(":", 1)[1] for key in inputs} >= {"registry.json"}
     assert all(len(digest) == 64 for digest in inputs.values())
+
+
+# ------------------------------------- the denominator, recoverable from files
+#: Every file `align_registry` promises a reader, and every one of them must be
+#: byte-identical at every worker count -- the two new ones included, which is
+#: why nothing about scheduling is written into either.
+ALIGN_ARTIFACTS = (
+    "alignment_edges.parquet",
+    "alignment_null_summary.tsv",
+    "alignment_excluded_pairs.tsv",
+    "alignment_run_summary.json",
+)
+
+
+def _read_run_summary(out: Path) -> dict:
+    import json
+
+    return json.loads((out / "alignment_run_summary.json").read_text(encoding="utf-8"))
+
+
+def _read_excluded_pairs(out: Path) -> list[dict[str, str]]:
+    import csv
+
+    with (out / "alignment_excluded_pairs.tsv").open(newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh, delimiter="\t"))
+
+
+def _mixed_registry(tmp_path):
+    """Five nodes covering every way this stage can drop a pair.
+
+    `wide0` and `wide1` share a 12bp core width and register. `short` declares a
+    4bp core, which no offset can stretch over half of a 12bp one, so both of its
+    pairs with the wide nodes die at the bilateral overlap floor. `no_ppm` has a
+    CWM and no PPM; `no_core` has a PPM and declares no trimmed core, so neither
+    contributes matrices and every pair either touches is excluded a stage
+    earlier. Ten pairs: 1 edge, 2 floor exclusions, 7 node exclusions -- three
+    numbers a reader must be able to recover from the output directory.
+    """
+    return _registry_arrays_h5(
+        tmp_path,
+        {
+            "wide0": {"ppm": _padded_pattern(_informative_core(31, 12), 14, 14, 601)},
+            "wide1": {"ppm": _padded_pattern(_informative_core(32, 12), 14, 14, 602)},
+            "short": {"ppm": _padded_pattern(_informative_core(33, 4), 14, 14, 603)},
+            "no_ppm": {"cwm": (_padded_pattern(
+                _informative_core(34, 12), 14, 14, 604) - 0.25) * 3.0},
+            "no_core": {"ppm": _padded_pattern(_informative_core(35, 12), 14, 14, 605)},
+        },
+        cores={"wide0": [14, 26], "wide1": [14, 26], "short": [14, 18],
+               "no_ppm": [14, 26], "no_core": None},
+    )
+
+
+def test_align_writes_a_denominator_that_closes_on_disk(tmp_path):
+    """5,171 edges with no recorded denominator is 5,171 of an unknown number.
+
+    Run on thirteen real TF-MoDISco outputs, this stage considered 9,591 pairs,
+    registered 5,171 and excluded 4,420 -- and `AlignmentRunSummary` was returned,
+    printed, and written to no file, so `evidence/` could not say whether the edge
+    table was all of what was looked at or half of it. An excluded pair and a pair
+    that was never considered were indistinguishable on disk, which is the
+    absence-versus-refusal distinction this package enforces everywhere else,
+    missing from the one stage whose output is a subset of its input.
+
+    So the counts are written where a reader of the output directory will find
+    them, and this pins that they close: considered = edges + excluded, in the
+    file, against the rows of the two tables it is the denominator for.
+    """
+    registry = _mixed_registry(tmp_path)
+    out = tmp_path / "evidence"
+    summary, edges = align_registry(registry, out, null_shuffles=3, seed=1)
+
+    payload = _read_run_summary(out)
+    excluded = _read_excluded_pairs(out)
+    edge_rows = pd.read_parquet(out / "alignment_edges.parquet")
+
+    assert payload["n_pairs_considered"] == 10
+    assert payload["n_pairs_considered"] == payload["n_edges"] + payload["n_pairs_excluded"]
+    assert payload["n_edges"] == len(edge_rows) == len(edges) == 1
+    assert payload["n_pairs_excluded"] == len(excluded) == 9
+    assert payload["n_nodes"] == 5
+    assert payload["n_pairs_excluded_by_reason"] == {
+        "node_not_registrable": 7, "no_offset_meets_overlap_floor": 2,
+    }
+    assert payload["n_nodes_by_status"] == {
+        "registrable": 3, "no_ppm_array": 1, "no_declared_trimmed_core": 1,
+    }
+    # The file and the returned object must not be able to disagree.
+    assert (summary.n_pairs_considered, summary.n_edges, summary.n_pairs_excluded) == (
+        payload["n_pairs_considered"], payload["n_edges"], payload["n_pairs_excluded"],
+    )
+    assert payload["seed"] == summary.seed == 1
+    assert payload["null_shuffles"] == summary.null_shuffles == 3
+    assert payload["registration_rule_version"] == summary.registration_rule_version
+    # The names, not absolute paths: the artifact must not depend on where the
+    # run happened to be written.
+    assert payload["edges_file"] == "alignment_edges.parquet"
+    assert payload["excluded_pairs_file"] == "alignment_excluded_pairs.tsv"
+
+
+def test_excluded_pairs_are_exactly_the_complement_of_the_edge_table(tmp_path):
+    """The denominator is only recoverable if the two tables partition the pairs.
+
+    A count in a JSON file that no table accounts for row by row is a number a
+    reader has to trust. Together the edge table and the excluded table must be
+    every pair of nodes in the registry, each exactly once and in exactly one of
+    them -- so `n_pairs_considered` is a fact about files rather than an
+    assertion about a loop that already finished.
+    """
+    import json
+    from itertools import combinations
+
+    registry = _mixed_registry(tmp_path)
+    out = tmp_path / "evidence"
+    align_registry(registry, out, null_shuffles=3, seed=1)
+
+    edge_rows = pd.read_parquet(out / "alignment_edges.parquet")
+    registered = [
+        tuple(sorted(pair)) for pair in zip(
+            edge_rows["source_node_id"], edge_rows["target_node_id"], strict=True)
+    ]
+    excluded = [
+        tuple(sorted((row["source_node_id"], row["target_node_id"])))
+        for row in _read_excluded_pairs(out)
+    ]
+    node_ids = [
+        node["node_id"] for node in
+        json.loads((registry / "registry.json").read_text())["nodes"]
+    ]
+
+    assert len(set(registered)) == len(registered), "a pair is registered twice"
+    assert len(set(excluded)) == len(excluded), "a pair is excluded twice"
+    assert not set(registered) & set(excluded), "a pair is both registered and excluded"
+    assert set(registered) | set(excluded) == {
+        tuple(sorted(pair)) for pair in combinations(node_ids, 2)
+    }, "the two tables together are not every pair of nodes in the registry"
+
+
+def test_every_excluded_pair_carries_a_reason_a_reader_can_recheck(tmp_path):
+    """"Excluded" is not a reason, and a reason nobody can check is a label.
+
+    Each excluded row says which of the two stages dropped the pair, the
+    registrability of each endpoint, and the trimmed-core length each side
+    brought. With the overlap floor recorded in the run summary that is enough to
+    re-derive `no_offset_meets_overlap_floor` from the row: the largest overlap
+    any offset can reach is the shorter of the two cores, so the reader can
+    confirm it clears neither `min_overlap_bp` nor `min_overlap_frac` of both.
+    The same floor is checked against the pair that DID register, so the recorded
+    numbers are pinned as the ones that were actually applied rather than a pair
+    of constants copied in alongside.
+    """
+    registry = _mixed_registry(tmp_path)
+    out = tmp_path / "evidence"
+    align_registry(registry, out, null_shuffles=3, seed=1)
+
+    payload = _read_run_summary(out)
+    floor_bp, floor_frac = payload["min_overlap_bp"], payload["min_overlap_frac"]
+    assert (floor_bp, floor_frac) == (DEFAULT_MIN_OVERLAP_BP, DEFAULT_MIN_OVERLAP_FRAC)
+
+    reasons = set()
+    for row in _read_excluded_pairs(out):
+        reasons.add(row["exclusion_reason"])
+        if row["exclusion_reason"] == "no_offset_meets_overlap_floor":
+            assert row["source_node_status"] == "registrable"
+            assert row["target_node_status"] == "registrable"
+            source_bp, target_bp = int(row["source_core_bp"]), int(row["target_core_bp"])
+            best = min(source_bp, target_bp)
+            assert not (best >= floor_bp
+                        and best / source_bp >= floor_frac
+                        and best / target_bp >= floor_frac), (
+                f"{row['source_node_id']} ({source_bp}bp) and "
+                f"{row['target_node_id']} ({target_bp}bp) are recorded as failing a "
+                f"floor of {floor_bp}bp / {floor_frac} that their own core lengths "
+                "clear -- the row's reason and the row's numbers disagree"
+            )
+        else:
+            assert row["exclusion_reason"] == "node_not_registrable"
+            statuses = {row["source_node_status"], row["target_node_status"]}
+            assert statuses - {"registrable"}, (
+                "a pair excluded for an unregistrable node names no unregistrable "
+                "endpoint"
+            )
+            assert statuses <= {"registrable", "no_ppm_array", "no_declared_trimmed_core"}
+            if row["source_node_status"] != "registrable":
+                assert row["source_core_bp"] == "", "a node with no core reported one"
+            if row["target_node_status"] != "registrable":
+                assert row["target_core_bp"] == "", "a node with no core reported one"
+    assert reasons == {"node_not_registrable", "no_offset_meets_overlap_floor"}
+
+    edge = pd.read_parquet(out / "alignment_edges.parquet").iloc[0]
+    assert edge["overlap_bp"] >= floor_bp
+    assert edge["overlap_frac_source"] >= floor_frac
+    assert edge["overlap_frac_target"] >= floor_frac
+
+
+def test_run_summary_records_the_overlap_floor_that_decided_the_split(tmp_path):
+    """`no_offset_meets_overlap_floor` names a threshold, so the threshold is written.
+
+    The floor is a parameter of the call, not a constant of the module, and until
+    it was recorded the reason on an excluded row referred to a number the reader
+    had no way to learn. Loosening it here moves two pairs from excluded to
+    registered, and both files move with it -- which is what makes the recorded
+    floor the one that was applied rather than a decorative copy of the default.
+    """
+    registry = _mixed_registry(tmp_path)
+    strict_out, loose_out = tmp_path / "strict", tmp_path / "loose"
+
+    strict, _ = align_registry(registry, strict_out, null_shuffles=3, seed=1)
+    loose, _ = align_registry(registry, loose_out, null_shuffles=3, seed=1,
+                              min_overlap_bp=4, min_overlap_frac=0.3)
+
+    strict_payload, loose_payload = _read_run_summary(strict_out), _read_run_summary(loose_out)
+    assert strict_payload["min_overlap_bp"] == DEFAULT_MIN_OVERLAP_BP
+    assert strict_payload["min_overlap_frac"] == DEFAULT_MIN_OVERLAP_FRAC
+    assert loose_payload["min_overlap_bp"] == 4
+    assert loose_payload["min_overlap_frac"] == 0.3
+    assert (loose.min_overlap_bp, loose.min_overlap_frac) == (4, 0.3)
+
+    assert strict_payload["n_edges"] == 1
+    assert strict_payload["n_pairs_excluded_by_reason"]["no_offset_meets_overlap_floor"] == 2
+    assert loose_payload["n_edges"] == 3
+    assert loose_payload["n_pairs_excluded_by_reason"]["no_offset_meets_overlap_floor"] == 0
+    # The node-level exclusions are unmoved: the floor is not what dropped them.
+    for payload in (strict_payload, loose_payload):
+        assert payload["n_pairs_excluded_by_reason"]["node_not_registrable"] == 7
+        assert payload["n_pairs_considered"] == 10
+
+
+def test_excluded_pairs_table_is_written_even_when_nothing_was_excluded(tmp_path):
+    """Nothing excluded and no record of exclusions are different claims.
+
+    A zero-row file with its header says the run looked and excluded none; a
+    missing file says the run did not record exclusions. If the table only
+    appeared when it was non-empty, a reader could never tell those apart from
+    the directory -- the same absence-versus-refusal collapse that made the
+    missing denominator a defect in the first place.
+    """
+    registry = _parallel_registry(tmp_path, n_nodes=3)
+    out = tmp_path / "evidence"
+    summary, edges = align_registry(registry, out, null_shuffles=3, seed=1)
+
+    assert summary.n_pairs_excluded == 0 and len(edges) == 3
+    path = out / "alignment_excluded_pairs.tsv"
+    assert path.exists(), "no exclusions, so no record that exclusions were tracked"
+    assert _read_excluded_pairs(out) == []
+    assert path.read_text(encoding="utf-8").splitlines()[0].split("\t")[:3] == [
+        "source_node_id", "target_node_id", "exclusion_reason",
+    ]
+
+    payload = _read_run_summary(out)
+    assert payload["n_pairs_excluded"] == 0
+    # The whole vocabulary, including the reasons this run never used: a reason
+    # absent from the payload would read as "not counted", not as "none".
+    assert payload["n_pairs_excluded_by_reason"] == {
+        "node_not_registrable": 0, "no_offset_meets_overlap_floor": 0,
+    }
+    assert payload["n_nodes_by_status"] == {
+        "registrable": 3, "no_ppm_array": 0, "no_declared_trimmed_core": 0,
+    }
+
+
+def test_excluded_pairs_are_byte_identical_at_every_worker_count(tmp_path):
+    """Floor exclusions come back through the pool, so their order must not.
+
+    The registry here excludes two of its three jobs at the overlap floor, and
+    those exclusions are discovered in whatever order the workers finish. Rows
+    keyed by finish time would give a table whose bytes moved run to run with
+    every fact in it unchanged -- the failure the edge table's ordering rule
+    already exists to prevent, reintroduced in the file that is its complement.
+    """
+    registry = _mixed_registry(tmp_path)
+    serial_out, parallel_out = tmp_path / "serial", tmp_path / "parallel"
+
+    serial, _ = align_registry(registry, serial_out, null_shuffles=5, seed=3, workers=1)
+    parallel, _ = align_registry(registry, parallel_out, null_shuffles=5, seed=3, workers=2)
+
+    assert serial.n_pairs_excluded == parallel.n_pairs_excluded == 9
+    floor_rows = [row for row in _read_excluded_pairs(serial_out)
+                  if row["exclusion_reason"] == "no_offset_meets_overlap_floor"]
+    assert len(floor_rows) == 2, "fixture no longer exercises the parallel path"
+    for name in ALIGN_ARTIFACTS:
+        assert (serial_out / name).read_bytes() == (parallel_out / name).read_bytes(), (
+            f"{name} differs between worker counts"
+        )
+
+
+def test_align_refuses_to_publish_a_denominator_that_does_not_close(tmp_path):
+    """A denominator that cannot be reconciled with its rows must not be written.
+
+    `_run_pairs` reassembles outcomes by index and drops any slot it never
+    filled, so a scheduling bug that lost a job would shrink both numerators
+    while `n_pairs_considered` stayed where it was -- publishing a summary whose
+    arithmetic silently no longer holds. The check is not arithmetic by
+    construction, and this is what proves it: one outcome is discarded, and the
+    stage refuses rather than writing a table with a denominator that overstates
+    what it accounted for.
+    """
+    import motifmultiverse.align as align_module
+
+    registry = _parallel_registry(tmp_path, n_nodes=4)
+    real_run_pairs = align_module._run_pairs
+
+    def losing_one_outcome(jobs, matrices, **kwargs):
+        return real_run_pairs(jobs, matrices, **kwargs)[:-1]
+
+    out = tmp_path / "evidence"
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(align_module, "_run_pairs", losing_one_outcome)
+    try:
+        with pytest.raises(AlignmentError, match="accounting"):
+            align_registry(registry, out, null_shuffles=3, seed=1)
+    finally:
+        monkey.undo()
+
+    assert not (out / "alignment_run_summary.json").exists(), (
+        "a summary was written whose considered count does not equal its own "
+        "edges plus its own excluded rows"
+    )
+    assert not (out / "alignment_edges.parquet").exists()
+    assert not (out / "alignment_excluded_pairs.tsv").exists()
+
+
+def test_the_guard_outcome_still_carries_no_denominator(tmp_path):
+    """The half of the old decision that was right, kept.
+
+    The comment that refused to write the counts was refusing one specific
+    placement: a denominator smuggled into a guard-outcome sentence lands in the
+    artifact nobody would look for it in, as prose rather than as a field. That
+    part still holds -- the counts went to a file of their own instead, and the
+    guard record must remain a statement about whether the sign question was
+    asked. Two runs over registries with different numbers of nodes, pairs and
+    exclusions must leave the identical sentence behind.
+
+    Green before the fix as well as after: it exists to keep the fix from
+    creating the defect the original comment was written to prevent.
+    """
+    import json
+
+    from motifmultiverse import guard_log
+
+    small_root, mixed_root = tmp_path / "small", tmp_path / "mixed"
+    small_root.mkdir()
+    mixed_root.mkdir()
+    small = _parallel_registry(small_root, n_nodes=2)
+    mixed = _mixed_registry(mixed_root)
+    small_out, mixed_out = tmp_path / "small_evidence", tmp_path / "mixed_evidence"
+
+    small_summary, _ = align_registry(small, small_out, null_shuffles=3, seed=1)
+    mixed_summary, _ = align_registry(mixed, mixed_out, null_shuffles=3, seed=1)
+    assert (small_summary.n_pairs_considered, small_summary.n_pairs_excluded) == (1, 0)
+    assert (mixed_summary.n_pairs_considered, mixed_summary.n_pairs_excluded) == (10, 9)
+
+    def sentence(out: Path) -> tuple[str, str]:
+        record = json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())[0]
+        return record["subject"], record["detail"]
+
+    assert sentence(small_out) == sentence(mixed_out), (
+        "the guard outcome varies with how many pairs the run kept, so a "
+        "denominator has been written into the record of whether the sign "
+        "question was asked -- the one place this stage decided it must not go"
+    )

@@ -207,6 +207,137 @@ def test_ingest_keeps_registry_identities_unique_across_shared_union_contexts(tm
     assert all(node.cross_context_recurrence is None for node in nodes)
 
 
+# -------------------------------------------- analyses that share one attribution
+#
+# `shared_attribution_groups` was documented in `config/project.example.yaml`,
+# with a paragraph on why a corroboration count must use the number of distinct
+# sources -- and `grep` found the identifier nowhere else. A user who set it got
+# nothing, silently. The case study is the case that needed it: thirteen analyses,
+# one ChromBPNet model, one counts-head DeepSHAP readout.
+def _two_analyses(tmp_path):
+    return [{"id": f"a{i}", "model": "m", "readout": "r", "union_id": "U",
+             "context": f"c{i}", "modisco_h5": str(_modisco(tmp_path / f"{i}.h5",
+                                                            n_pos=1, n_neg=0))}
+            for i in range(2)]
+
+
+def test_shared_attribution_groups_reach_the_registry(tmp_path):
+    """Declared sharing survives ingest and the registry.json round trip."""
+    project = _project(tmp_path, analyses=_two_analyses(tmp_path),
+                       shared_attribution_groups=[["a0", "a1"]])
+    meta, _ = ingest.ingest_project(project, tmp_path / "registry")
+    assert meta.shared_attribution_groups == [["a0", "a1"]]
+    # Two analyses, one attribution array: one source, not two.
+    assert meta.n_attribution_sources == 1
+
+    reloaded, _, arrays = ingest.load_registry(tmp_path / "registry")
+    arrays.close()
+    assert reloaded.shared_attribution_groups == [["a0", "a1"]]
+    assert reloaded.n_attribution_sources == 1
+    on_disk = json.loads((tmp_path / "registry" / "registry.json").read_text())
+    assert on_disk["registry_metadata"]["n_attribution_sources"] == 1
+
+
+def test_declaring_nothing_shared_is_not_the_same_as_declaring_nothing(tmp_path):
+    """`[]` is a claim; an absent key is not. Silence must not become a count."""
+    declared = _project(tmp_path, analyses=_two_analyses(tmp_path),
+                        shared_attribution_groups=[])
+    meta, _ = ingest.ingest_project(declared, tmp_path / "declared")
+    assert meta.shared_attribution_groups == [] and meta.n_attribution_sources == 2
+
+    silent = _project(tmp_path, analyses=_two_analyses(tmp_path))
+    meta, _ = ingest.ingest_project(silent, tmp_path / "silent")
+    assert meta.shared_attribution_groups is None
+    # NOT 2. Nothing was declared, so the number of distinct sources is unknown,
+    # and len(analyses) would be an invented claim of independence.
+    assert meta.n_attribution_sources is None
+
+
+def test_a_shared_attribution_group_of_one_is_refused(tmp_path):
+    """The shape the shipped example carried: a declaration that changes nothing."""
+    project = _project(tmp_path, analyses=_two_analyses(tmp_path),
+                       shared_attribution_groups=[["a0"]])
+    with pytest.raises(SchemaError, match="declares nothing"):
+        ingest.ingest_project(project, tmp_path / "registry")
+
+
+def test_a_shared_attribution_group_naming_an_unknown_analysis_is_refused(tmp_path):
+    project = _project(tmp_path, analyses=_two_analyses(tmp_path),
+                       shared_attribution_groups=[["a0", "a7"]])
+    with pytest.raises(SchemaError, match="not a declared analysis id"):
+        ingest.ingest_project(project, tmp_path / "registry")
+
+
+def test_an_analysis_cannot_share_two_attribution_arrays(tmp_path):
+    analyses = _two_analyses(tmp_path)
+    analyses.append({"id": "a2", "model": "m", "readout": "r", "union_id": "U",
+                     "context": "c2",
+                     "modisco_h5": str(_modisco(tmp_path / "2.h5", n_pos=1, n_neg=0))})
+    project = _project(tmp_path, analyses=analyses,
+                       shared_attribution_groups=[["a0", "a1"], ["a1", "a2"]])
+    with pytest.raises(SchemaError, match="at most one shared group"):
+        ingest.ingest_project(project, tmp_path / "registry")
+
+
+def test_a_flat_list_of_analysis_ids_is_refused(tmp_path):
+    """`[a, b]` (one group, flattened) must not be read as two groups of one."""
+    project = _project(tmp_path, analyses=_two_analyses(tmp_path),
+                       shared_attribution_groups=["a0", "a1"])
+    with pytest.raises(SchemaError, match=r"\[\[a, b\]\], not \[a, b\]"):
+        ingest.ingest_project(project, tmp_path / "registry")
+
+
+def test_the_source_count_is_derived_not_declared():
+    """Same rule as cross_model_claims_restricted: the constructor checks it."""
+    with pytest.raises(SchemaError, match="derived from the declared groups"):
+        RegistryMetadata(project="p", peak_universe_id="u",
+                         analyses=[{"id": "a0", "model": "m"}, {"id": "a1", "model": "m"}],
+                         n_models=1, cross_model_claims_restricted=True,
+                         metacluster_states={}, trim_threshold=0.3,
+                         shared_attribution_groups=[["a0", "a1"]],
+                         n_attribution_sources=2)
+
+
+def test_thirteen_analyses_over_one_attribution_source_count_as_one(tmp_path):
+    """The case study's shape: 13 discovery contexts, one model, one readout.
+
+    `registry: 139 motif nodes from 13 analyses` is what the run printed. The
+    thirteen are thirteen Leiden slices of ONE DeepSHAP attribution over one peak
+    universe, so a corroboration count over them has one source to divide by.
+    """
+    analyses = [{"id": f"cl{i}", "model": "cbp", "readout": "counts", "union_id": "CBPK562",
+                 "context": f"leiden_cl{i}",
+                 "modisco_h5": str(_modisco(tmp_path / f"cl{i}.h5", n_pos=1, n_neg=0))}
+                for i in range(13)]
+    project = _project(tmp_path, analyses=analyses,
+                       shared_attribution_groups=[[f"cl{i}" for i in range(13)]])
+    meta, nodes = ingest.ingest_project(project, tmp_path / "registry")
+    assert len(meta.analyses) == 13
+    assert meta.n_attribution_sources == 1
+    # And the count-of-corroboration field is still unpopulated -- the thing the
+    # denominator is being recorded for has not arrived yet.
+    assert all(node.cross_context_recurrence is None for node in nodes)
+
+
+def test_the_shipped_example_project_config_is_read_not_only_documented():
+    """`config/project.example.yaml` must not document a field nothing reads."""
+    from pathlib import Path
+
+    import motifmultiverse
+
+    root = Path(motifmultiverse.__file__).resolve().parents[2]
+    example = root / "config" / "project.example.yaml"
+    if not example.exists():
+        pytest.skip("config/ not present in this installation")
+    raw = ingest.read_project(example)
+    assert "shared_attribution_groups" in raw, "the example still documents the field"
+    cfg = ingest.validate_project(raw)
+    # The example's own value must survive validation -- the version that shipped
+    # (`- [modelB_readout1]`) does not, which is how a never-read field stays wrong.
+    assert cfg.shared_attribution_groups == raw["shared_attribution_groups"]
+    assert cfg.n_attribution_sources == len(cfg.analyses)
+
+
 def test_union_id_must_be_declared_not_derived(tmp_path):
     analyses = [{"id": "a1", "model": "m", "readout": "r", "context": "promoter",
                  "modisco_h5": str(_modisco(tmp_path / "a.h5"))}]

@@ -93,7 +93,9 @@ class ConfiguredAnnotationBackend:
                     score=_optional_float(match.get("score")),
                     q_value=_optional_float(match.get("q_value")),
                     aligned_span=_optional_int(match.get("aligned_span")),
-                    motif_length=node.motif_length, seqlet_count=node.seqlet_count,
+                    motif_length=node.motif_length,
+                    trimmed_core_length=_declared_core_length(node),
+                    seqlet_count=node.seqlet_count,
                     provenance={
                         "database_path": self.database_path.name,
                         "legacy_label": match.get("legacy_label", match["proposed_family_id"]),
@@ -103,6 +105,26 @@ class ConfiguredAnnotationBackend:
                 raise AnnotationBackendError(f"invalid {self.name} match: {exc}") from exc
             candidates.append(candidate)
         return candidates
+
+
+def _declared_core_length(node: MotifNode) -> int | None:
+    """The width of the node's declared trimmed core, or None if it declares none.
+
+    Derived here because this is where the node is in hand. The core is the only
+    meaningful width of a tfmodisco-lite pattern -- ``motif_length`` is the fixed,
+    background-padded window every pattern is emitted at -- so it, not the window,
+    is what ``schema.annotation.low_confidence_annotation`` measures its short
+    clause on. None is a declaration that no core was recorded, never a licence to
+    substitute the window.
+    """
+    core = node.trimmed_core
+    if not isinstance(core, (list, tuple)) or len(core) != 2:
+        return None
+    try:
+        start, end = int(core[0]), int(core[1])
+    except (TypeError, ValueError):
+        return None
+    return end - start if end >= start else None
 
 
 def _optional_float(value: Any) -> float | None:

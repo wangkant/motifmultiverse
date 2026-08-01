@@ -1008,10 +1008,14 @@ def _section_unknown(interp: dict[str, Any], provenance: Any,
     ]
     lines += _guard_outcomes_bullet(guard_record)
     lines += [
-        "- Alignment denominators: `align.AlignmentRunSummary` (`n_nodes`, `n_pairs_considered`, "
-        "`n_edges`, `n_pairs_excluded`) is returned from `align.run` and printed to stdout by "
-        "`cli._run_align`, and written to no file. An alignment edge table therefore has no "
-        "recorded denominator on disk, and this report would say so rather than count its rows.",
+        "- Alignment denominators are on disk, and this report does not read them yet: "
+        "`align` writes `alignment_run_summary.json` (`n_nodes`, `n_pairs_considered`, "
+        "`n_edges`, `n_pairs_excluded`, seed, null shuffles, registration rule) and "
+        "`alignment_excluded_pairs.tsv` (one row per excluded pair with its reason) beside the "
+        "edge table. This bullet used to say they were written to no file. That was true when "
+        "it was written and stopped being true without the sentence changing, which is the "
+        "failure mode a *what this does not know* section is least able to afford. What is "
+        "still unrecorded is `workers`, which moves wall clock and nothing else.",
         "",
     ]
     return lines

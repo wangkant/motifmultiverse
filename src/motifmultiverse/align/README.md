@@ -80,7 +80,15 @@ registration only. `align_registry` trims every matrix to the node's declared
 TF-MoDISco pads a fixed-width pattern window with. `calibrate_pair_null` re-runs
 the full search on every
 shuffle. `align_registry` (exported as `run`) registers every pair in a
-registry, calibrates each pair's null, and writes `alignment_edges.parquet` +
-`alignment_null_summary.tsv`, with `null_shuffles`/`seed`/`registered_on`/the
-registration rule version carried on every edge. See `docs/ROADMAP.md` and
-`tests/test_align.py`.
+registry, calibrates each pair's null, and writes four files:
+`alignment_edges.parquet` and `alignment_null_summary.tsv` for the pairs that
+registered, and `alignment_run_summary.json` + `alignment_excluded_pairs.tsv` for
+the ones that did not. `null_shuffles`/`seed`/`registered_on`/the registration
+rule version are carried on every edge.
+
+The last two exist because an edge table alone has no denominator. On the
+thirteen-analysis case study 9,591 pairs were considered and 5,171 registered —
+without the excluded 4,420 written down, a pair that failed the bilateral overlap
+floor is indistinguishable from one that was never considered, which is the
+absence-versus-refusal distinction this package enforces everywhere else. See
+`docs/ROADMAP.md` and `tests/test_align.py`.

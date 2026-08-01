@@ -940,18 +940,40 @@ def _read_annotation_candidates(path: Path) -> list[AnnotationCandidate]:
 def _read_stability_results(path: Path) -> list[StabilityEvidence]:
     import pandas as pd
 
+    # Imported here rather than at module scope: `validate` imports `adjudicate`
+    # types, so a top-level import the other way closes the cycle.
+    from motifmultiverse.validate import STABILITY_SCHEMA_VERSION
+
     if not path.exists():
         return []
     try:
-        return [
-            SimpleNamespace(**{
-                key: _none_if_missing(value)
-                for key, value in row.items()
-            })
-            for row in pd.read_parquet(path).to_dict("records")
-        ]
+        rows = pd.read_parquet(path).to_dict("records")
     except (OSError, TypeError, ValueError) as exc:
         raise AdjudicationError(f"{path} is not valid stability evidence: {exc}") from exc
+
+    # A version this release does not know is refused, loudly, before any
+    # criterion reads it. Without this the failure is silent and worse than a
+    # crash: `_stability_values` resolves an unknown field name to None and drops
+    # it, so a pre-rename artifact (carrying `family_coefficient_share`, not
+    # `affected_coefficient_share`) contributes NOTHING to a TRUE_DUPLICATE
+    # criterion and the pair simply defers, with no message saying why. Its
+    # sibling artifact -- the annotation candidates -- already refuses a stale
+    # shape by name; two rename-driven incompatibilities behaving oppositely in
+    # one release is how a reader learns to trust neither.
+    for index, row in enumerate(rows):
+        recorded = row.get("schema_version")
+        if recorded is not None and str(recorded) != STABILITY_SCHEMA_VERSION:
+            raise AdjudicationError(
+                f"{path} row {index} was written under stability schema {recorded!r} and "
+                f"this release reads {STABILITY_SCHEMA_VERSION!r}. Field names changed "
+                "between them, so the criteria would read absent columns as absent "
+                "evidence and defer without saying so. Re-run `validate` against this "
+                "release rather than reading the old artifact."
+            )
+    return [
+        SimpleNamespace(**{key: _none_if_missing(value) for key, value in row.items()})
+        for row in rows
+    ]
 
 
 def _read_node_metadata(registry_dir: str | Path) -> tuple[Path, dict[str, dict[str, Any]]]:

@@ -509,13 +509,13 @@ criteria:
     relationship: TRUE_DUPLICATE
     required_evidence:
       - paired_delta_reconstruction_affected
-      - family_coefficient_share
+      - affected_coefficient_share
       - ppm_similarity
     predicates:
       - field: paired_delta_reconstruction_affected
         operator: le
         value: 0.5
-      - field: family_coefficient_share
+      - field: affected_coefficient_share
         operator: ge
         value: 0.5
       - field: ppm_similarity

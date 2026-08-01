@@ -107,7 +107,7 @@ def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBack
         guards.short_motif_flag([
             {
                 "variant_id": candidate.candidate_id,
-                "motif_length": candidate.motif_length,
+                "trimmed_core_length": candidate.trimmed_core_length,
                 "seqlet_count": candidate.seqlet_count,
                 "annotation_matches": (
                     {"tomtom_q": candidate.q_value}
@@ -129,7 +129,8 @@ def annotate_nodes(nodes: Sequence[MotifNode], backends: Sequence[AnnotationBack
 
 _CANDIDATE_COLUMNS = [
     "candidate_id", "node_id", "proposed_family_id", "source", "source_version",
-    "matched_motif_id", "score", "q_value", "aligned_span", "motif_length", "seqlet_count",
+    "matched_motif_id", "score", "q_value", "aligned_span", "motif_length",
+    "trimmed_core_length", "seqlet_count",
     "low_confidence_annotation", "chance_occurrence_probability", "observed_to_null_ratio",
     "provenance", "schema_version",
 ]
@@ -137,7 +138,8 @@ _CANDIDATE_DTYPES = {
     "candidate_id": "string", "node_id": "string", "proposed_family_id": "string",
     "source": "string", "source_version": "string", "matched_motif_id": "string",
     "score": "float64", "q_value": "float64", "aligned_span": "Int64",
-    "motif_length": "int64", "seqlet_count": "Int64", "low_confidence_annotation": "bool",
+    "motif_length": "int64", "trimmed_core_length": "Int64",
+    "seqlet_count": "Int64", "low_confidence_annotation": "bool",
     "chance_occurrence_probability": "float64", "observed_to_null_ratio": "float64",
     "provenance": "string", "schema_version": "string",
 }

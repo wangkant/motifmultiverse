@@ -38,6 +38,7 @@ __all__ = [
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
     "HIT_TABLE_COLUMNS", "PeakSetQuery", "HealthFloors",
     "MetaclusterState", "RegistryMetadata", "REGISTRY_SCHEMA_VERSION", "LexiconManifest",
+    "normalise_shared_attribution_groups", "count_attribution_sources",
     "LEXICON_MANIFEST_SCHEMA_VERSION", "UNION_ID_RE",
     "Estimator", "IMPLEMENTED_ESTIMATORS", "InferenceCapability", "ESTIMATOR_CAPABILITY",
     "MergeConfidence",
@@ -710,6 +711,82 @@ class MetaclusterState(StrEnum):
 REGISTRY_SCHEMA_VERSION = "1"
 
 
+def normalise_shared_attribution_groups(
+    groups: Any,
+    analysis_ids: Sequence[str],
+    *,
+    where: str = "shared_attribution_groups",
+) -> list[list[str]] | None:
+    """Check a declaration that some analyses share ONE attribution array.
+
+    ``None`` means the project never declared anything, and that is deliberately
+    *not* the same as ``[]``. ``[]`` says "checked, nothing is shared"; ``None``
+    says nothing at all, and a reader must not turn silence into a count of
+    independent observations.
+
+    A group of fewer than two analyses is refused rather than accepted and
+    ignored: it leaves ``count_attribution_sources`` unchanged, so it is a
+    declaration that cannot alter any number -- the shape of dead field this
+    package exists to keep out.
+    """
+    if groups is None:
+        return None
+    if isinstance(groups, (str, bytes)) or not isinstance(groups, (list, tuple)):
+        raise SchemaError(
+            f"{where} must be a list of groups, each naming two or more analysis ids; "
+            f"got {type(groups).__name__}"
+        )
+    known = list(dict.fromkeys(str(a) for a in analysis_ids))
+    seen: dict[str, int] = {}
+    out: list[list[str]] = []
+    for index, group in enumerate(groups):
+        if isinstance(group, (str, bytes)) or not isinstance(group, (list, tuple)):
+            raise SchemaError(
+                f"{where}[{index}] must be a list of analysis ids, not "
+                f"{type(group).__name__}. One group is one shared attribution array, "
+                "so a set of two sharing analyses is written [[a, b]], not [a, b]."
+            )
+        ids = [str(a) for a in group]
+        if len(ids) < 2:
+            raise SchemaError(
+                f"{where}[{index}] names {len(ids)} analyses. A group declares that its "
+                "members share ONE attribution array, so a group of fewer than two "
+                "changes no source count and declares nothing. Delete it, or name the "
+                "analysis it shares its attribution array with."
+            )
+        for analysis_id in ids:
+            if analysis_id not in known:
+                raise SchemaError(
+                    f"{where}[{index}] names {analysis_id!r}, which is not a declared "
+                    f"analysis id. Declared ids: {known}"
+                )
+            if analysis_id in seen:
+                raise SchemaError(
+                    f"{where}: {analysis_id!r} appears in group {seen[analysis_id]} and "
+                    f"group {index}. An analysis reads one attribution array, so it "
+                    "belongs to at most one shared group."
+                )
+            seen[analysis_id] = index
+        out.append(ids)
+    return out
+
+
+def count_attribution_sources(
+    analysis_ids: Sequence[str], groups: Sequence[Sequence[str]] | None,
+) -> int | None:
+    """Distinct attribution sources: one per declared group, one per ungrouped analysis.
+
+    ``None`` in, ``None`` out. With nothing declared the number of distinct
+    sources is *unknown*, and returning ``len(analysis_ids)`` would be inventing
+    the independence the declaration exists to deny.
+    """
+    if groups is None:
+        return None
+    grouped = {str(a) for group in groups for a in group}
+    unique = list(dict.fromkeys(str(a) for a in analysis_ids))
+    return len(list(groups)) + len([a for a in unique if a not in grouped])
+
+
 @dataclass
 class RegistryMetadata:
     """What ``ingest`` emits alongside the motif nodes.
@@ -718,6 +795,18 @@ class RegistryMetadata:
     travels **with the data** so a downstream step does not have to remember to
     ask. It is derived, not supplied, and the constructor refuses a value that
     disagrees with ``n_models``.
+
+    ``shared_attribution_groups`` / ``n_attribution_sources`` travel the same way,
+    and here is the honest note at the point of definition: **no step in this
+    package reads them yet.** They are recorded, not consumed. What they exist for
+    is ``MotifNode.cross_context_recurrence`` -- the one count-of-corroboration
+    field in the data model, today always ``None`` and already used by
+    ``adjudicate`` as a medoid tie-break. When something finally populates it, its
+    denominator must be the number of distinct attribution *sources*, not the
+    number of analyses, and ``n_attribution_sources`` is the only place that
+    number can come from. Recording it now is what makes the eventual check
+    possible; ``None`` (never declared) is not a licence to substitute
+    ``len(analyses)``.
     """
 
     project: str
@@ -728,6 +817,13 @@ class RegistryMetadata:
     metacluster_states: dict[str, dict[str, str]]
     trim_threshold: float
     schema_version: str = REGISTRY_SCHEMA_VERSION
+    #: As declared in the project config: each entry names two or more analyses
+    #: that read ONE attribution array. ``None`` = never declared (unknown), which
+    #: is a different claim from ``[]`` = declared, nothing shared.
+    shared_attribution_groups: list[list[str]] | None = None
+    #: Derived from the field above, never declared. ``None`` while the groups are
+    #: undeclared, because silence is not evidence of independence.
+    n_attribution_sources: int | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != REGISTRY_SCHEMA_VERSION:
@@ -739,6 +835,19 @@ class RegistryMetadata:
             raise SchemaError(
                 f"cross_model_claims_restricted={self.cross_model_claims_restricted} "
                 f"contradicts n_models={self.n_models}; it is derived, not declared"
+            )
+        analysis_ids = [str(a.get("id")) for a in self.analyses]
+        self.shared_attribution_groups = normalise_shared_attribution_groups(
+            self.shared_attribution_groups, analysis_ids,
+        )
+        expected_sources = count_attribution_sources(
+            analysis_ids, self.shared_attribution_groups,
+        )
+        if self.n_attribution_sources != expected_sources:
+            raise SchemaError(
+                f"n_attribution_sources={self.n_attribution_sources} contradicts "
+                f"shared_attribution_groups (expected {expected_sources}); it is "
+                "derived from the declared groups, not declared on its own"
             )
         for analysis_id, states in self.metacluster_states.items():
             for group, state in states.items():
@@ -1216,6 +1325,11 @@ class AnalysisConfig:
     analyses: list[dict[str, Any]]
     peak_universe_id: str = MISSING_SENTINEL
     input_scale: int | None = None
+    #: Groups of analyses that read ONE attribution array, exactly as declared in
+    #: the project config. Two analyses over one attribution array are one
+    #: observation, and ``None`` (nothing declared) leaves that unknown rather
+    #: than assuming they are independent.
+    shared_attribution_groups: list[list[str]] | None = None
 
     def __post_init__(self) -> None:
         if len(self.analyses) < 1:
@@ -1223,6 +1337,18 @@ class AnalysisConfig:
         ids = [a.get("id") for a in self.analyses]
         if len(set(ids)) != len(ids):
             raise SchemaError(f"analysis ids must be unique: {ids}")
+        self.shared_attribution_groups = normalise_shared_attribution_groups(
+            self.shared_attribution_groups, [str(i) for i in ids],
+        )
+
+    @property
+    def analysis_ids(self) -> list[str]:
+        return [str(a.get("id")) for a in self.analyses]
+
+    @property
+    def n_attribution_sources(self) -> int | None:
+        """Distinct attribution sources, or ``None`` while nothing was declared."""
+        return count_attribution_sources(self.analysis_ids, self.shared_attribution_groups)
 
     @property
     def n_models(self) -> int:

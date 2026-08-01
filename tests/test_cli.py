@@ -1389,3 +1389,262 @@ def test_a_run_refused_by_a_guard_still_records_which_guard_refused_it(tmp_path,
     assert [row["guard_id"] for row in failed] == ["single_scale"]
     assert failed[0]["detail"] == "injected: two input scales"
     assert json.loads((out / "run_status.json").read_text())["status"] == "REFUSED"
+
+
+# --------------------------------------------------------------------------
+# Output-path friction: what a second person on the machine finds afterwards.
+# --------------------------------------------------------------------------
+
+
+def _validate_inputs(tmp_path):
+    """Build the smallest real `validate` input set and return argv without --out.
+
+    A trimmed copy of the fixture in
+    `test_validate_cli_writes_split_bound_stability_and_backend_artifacts`. It is
+    separate rather than shared because these tests run `validate` twice over the
+    same inputs, which that test does not, and because a fixture edited for one
+    of them must not silently move the other.
+    """
+    import h5py
+    import numpy as np
+
+    from motifmultiverse.compile import lexicon_semantic_hash
+    from motifmultiverse.schema.substrate import CallerSpecification
+    from motifmultiverse.substrate import build_manifest as build_substrate_manifest
+    from motifmultiverse.substrate import write_manifest as write_substrate_manifest
+
+    root = tmp_path / "validate-inputs"
+    lexicons = root / "lexicons"
+    lexicons.mkdir(parents=True)
+    with h5py.File(lexicons / "core.h5", "w") as h5:
+        h5.create_group("pos_patterns").create_group("pattern_0").create_dataset(
+            "contrib_scores", data=np.asarray([[1.0, 0.0, 0.0, 0.0]])
+        )
+    content_hash = lexicon_semantic_hash(
+        [("pos_patterns", "pattern_0", {"node_id": "node-0", "variant_id": "MA_FAM_01"})],
+        {"node-0": {"cwm": np.asarray([[1.0, 0.0, 0.0, 0.0]])}},
+        schema_version="1.0", trim_threshold=0.3, motif_type="cwm", include_rc=False,
+        loader_backend="finemo", loader_parameters={"motif_lambda_default": 0.7},
+    )
+    (lexicons / "core.manifest.json").write_text(json.dumps({
+        "tier": "core", "lexicon_content_hash": content_hash, "n_motifs": 1,
+        "pattern_order": ["pos_patterns.pattern_0"], "node_ids": ["node-0"],
+        "index": [{
+            "index": 0, "pattern_tag": "pos_patterns.pattern_0", "node_id": "node-0",
+            "variant_id": "MA_FAM_01", "metacluster": "pos",
+        }],
+        "schema_version": "1.0", "trim_threshold": 0.3, "motif_type": "cwm",
+        "include_rc": False, "loader_backend": "finemo",
+        "loader_parameters": {"motif_lambda_default": 0.7},
+        "comparisons": {}, "source_registry": "registry", "sensitivity_triggers": {},
+        "project": "test-project", "cross_model_claims_restricted": True,
+    }), encoding="utf-8")
+    substrate = build_substrate_manifest(
+        peak_universe_hash="a" * 64,
+        n_regions=2,
+        caller_specification=CallerSpecification(
+            caller_name="finemo", caller_version="0.test",
+            lexicon_content_hash=content_hash,
+            parameters={"motif_type": "cwm"},
+            preprocessing_contract_hash="b" * 64,
+        ),
+        input_files={"peaks.bed": "c" * 64},
+        created_at="2026-07-26T12:00:00Z",
+    )
+    substrate_path = write_substrate_manifest(substrate, root / "substrate.manifest.json")
+    before = root / "before" / "hits.parquet"
+    after = root / "after" / "hits.parquet"
+    before.parent.mkdir()
+    after.parent.mkdir()
+    pd.DataFrame([{
+        "peak_id": "p-validation", "hit_id": "old", "coefficient": 1.0,
+        "reconstruction": 0.0, "substrate_id": substrate.substrate_id,
+    }]).to_parquet(before, index=False)
+    pd.DataFrame([{
+        "peak_id": "p-validation", "hit_id": "new", "coefficient": 2.0,
+        "reconstruction": 1.0, "substrate_id": substrate.substrate_id,
+    }]).to_parquet(after, index=False)
+    manifest = build_peak_split_manifest(
+        {"p-discovery": "DISCOVERY", "p-validation": "VALIDATION"}
+    )
+    manifest_path = root / "split-manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": manifest.schema_version,
+        "assignments": {key: value.value for key, value in manifest.assignments.items()},
+        "checksum": manifest.checksum,
+    }), encoding="utf-8")
+    decision = DecisionSplitArtifact.create(
+        manifest=manifest, decision_id="decision:friction",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation"}),
+    )
+    provisional = ValidationSplitArtifact.create(
+        manifest=manifest, decision_id="decision:friction", result_id="pending",
+        decision_peak_ids=frozenset({"p-discovery"}),
+        validation_peak_ids=frozenset({"p-validation"}),
+    )
+    decision_path = root / "decision-split.json"
+    validation_path = root / "validation-split.json"
+    decision_path.write_text(json.dumps(decision.to_dict()), encoding="utf-8")
+    validation_path.write_text(json.dumps(provisional.to_dict()), encoding="utf-8")
+    return [
+        "validate", str(lexicons),
+        "--before-hits", str(before), "--after-hits", str(after),
+        "--substrate-manifest", str(substrate_path),
+        "--split-manifest", str(manifest_path),
+        "--decision-artifact", str(decision_path),
+        "--validation-artifact", str(validation_path),
+    ]
+
+
+PUBLISHED_VALIDATE_FILES = {
+    "stability_results.parquet", "backend_verification.tsv", "provenance.json",
+}
+
+
+@pytest.mark.parametrize("umask_value", [0o022, 0o027])
+def test_validate_publishes_its_output_at_the_process_umask_not_0700(tmp_path, umask_value):
+    """The published directory is as readable as anything else the run wrote.
+
+    `validate` stages its artifacts in a `tempfile.mkdtemp` directory, which is
+    0700 by construction, and publishes that same directory -- by rename where
+    the filesystem supports `renameat2(RENAME_NOREPLACE)`, by symlink to it where
+    it does not. Either way the 0700 travelled to the result, so `validation/`
+    sat under a 0755 parent holding 0644 files that no collaborator could reach.
+    The mode is compared against a directory this test creates with a plain
+    `mkdir` under the same umask rather than against a literal, because the claim
+    is "the mode the run would otherwise have produced", not "0755".
+    """
+    import os
+
+    base = _validate_inputs(tmp_path)
+    out = tmp_path / f"validation-{umask_value:03o}"
+    control = tmp_path / f"control-{umask_value:03o}"
+    previous = os.umask(umask_value)
+    try:
+        assert main([*base, "--out", str(out)]) == 0
+        control.mkdir()
+    finally:
+        os.umask(previous)
+
+    assert os.stat(out).st_mode & 0o777 == os.stat(control).st_mode & 0o777
+    assert os.stat(out).st_mode & 0o777 == 0o777 & ~umask_value
+    assert PUBLISHED_VALIDATE_FILES <= {entry.name for entry in out.iterdir()}
+
+
+def test_validate_output_is_readable_where_renameat2_is_unavailable(tmp_path, monkeypatch):
+    """The symlink fallback publishes a readable directory too.
+
+    Which of the two publish paths runs is a property of the filesystem, so the
+    real run took the fallback (ZFS rejects `RENAME_NOREPLACE` with EINVAL) while
+    a test on ext4 would not exercise it at all. libc is stubbed here so the
+    fallback is reached on every filesystem: it is the path where the mode
+    matters most, since the published name is a symlink and `cp -r` of it copies
+    the link rather than the results.
+    """
+    import ctypes
+    import os
+
+    base = _validate_inputs(tmp_path)  # imports h5py/pyarrow before libc is stubbed
+    import pyarrow.parquet  # noqa: F401  - likewise; nothing may load a library later
+
+    class _LibcWithoutRenameat2:
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *args, **kwargs: _LibcWithoutRenameat2())
+
+    out = tmp_path / "validation-fallback"
+    previous = os.umask(0o022)
+    try:
+        assert main([*base, "--out", str(out)]) == 0
+    finally:
+        os.umask(previous)
+
+    assert os.path.islink(out), "this test is meaningless unless the fallback ran"
+    assert os.stat(out).st_mode & 0o777 == 0o755
+    assert PUBLISHED_VALIDATE_FILES <= {entry.name for entry in out.iterdir()}
+
+
+def test_validate_help_says_out_must_not_already_exist_and_that_is_what_happens(
+    tmp_path, capsys,
+):
+    """The refusal is documented where the user chooses the directory.
+
+    `--out` said "output directory", and the second run into it exited 4. Both
+    halves are asserted together so the sentence cannot drift from the behaviour
+    it describes.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["validate", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "must NOT already exist" in help_text
+    assert "exit 4" in help_text
+
+    base = _validate_inputs(tmp_path)
+    out = tmp_path / "validation"
+    assert main([*base, "--out", str(out)]) == 0
+    capsys.readouterr()
+    assert main([*base, "--out", str(out)]) == 4
+    assert "already exists and will not be overwritten" in capsys.readouterr().err
+
+
+def test_adjudicate_help_states_that_a_relative_review_path_is_joined_to_out(
+    tmp_path, monkeypatch, capsys,
+):
+    """`--review` is an artifact name inside `--out`, and now says so.
+
+    "human review file to emit" reads as a path like every other path on the
+    command line, so `--review probe/review.yaml --out probe` looked like it
+    named `probe/review.yaml` and wrote `probe/probe/review.yaml`. The rule is
+    the intended one -- the review is one of adjudicate's three outputs, and
+    `write_adjudication_artifacts` joins a relative path to the output directory
+    on purpose -- so the fix is the sentence. The exact example in the help text
+    is then executed here, so prose and behaviour cannot disagree.
+    """
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_adjudicate import (  # noqa: E402
+        _alignment,
+        _annotation,
+        _write_adjudication_registry,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(["adjudicate", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "resolved against --out" in help_text
+    assert "`--review probe/review.yaml --out probe` writes probe/probe/review.yaml" in help_text
+
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    pd.DataFrame([_alignment().to_dict()]).to_parquet(
+        evidence / "alignment_edges.parquet", index=False
+    )
+    candidate_rows = []
+    for candidate in (_annotation("node-a", "FAM_ALPHA"), _annotation("node-b", "FAM_ALPHA")):
+        row = candidate.to_dict()
+        row["provenance"] = json.dumps(row["provenance"])
+        candidate_rows.append(row)
+    pd.DataFrame(candidate_rows).to_parquet(
+        evidence / "annotation_candidates.parquet", index=False
+    )
+    registry = _write_adjudication_registry(tmp_path)
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    out = tmp_path / "probe"
+    assert main([
+        "adjudicate", str(evidence), "--registry", str(registry),
+        "--review", "probe/review.yaml", "--out", str(out),
+    ]) == 0
+
+    assert (out / "probe" / "review.yaml").exists()
+    assert not (out / "review.yaml").exists()
+    assert not (cwd / "probe").exists(), "a relative --review is not relative to the cwd"
+    assert f"written: {out / 'probe' / 'review.yaml'}" in capsys.readouterr().out

@@ -27,7 +27,7 @@ criteria:
     relationship: TRUE_DUPLICATE
     required_evidence:
       - paired_delta_reconstruction_affected
-      - family_coefficient_share
+      - affected_coefficient_share
     predicates: []
     insufficient_evidence_action: deferred
 

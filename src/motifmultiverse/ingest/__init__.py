@@ -97,6 +97,12 @@ def validate_project(cfg: dict[str, Any]) -> AnalysisConfig:
         project=str(cfg.get("project") or "unnamed-project"),
         analyses=list(analyses),
         peak_universe_id=str(cfg.get("peak_universe_id") or MISSING_SENTINEL),
+        # Read, not ignored. `or None` is wrong here: an explicitly empty list is
+        # the claim "checked, nothing shared", which is not the same as the key
+        # being absent, so the key's presence decides and its value is passed
+        # through untouched. AnalysisConfig refuses a group naming an unknown id,
+        # naming one analysis twice, or naming fewer than two analyses.
+        shared_attribution_groups=cfg.get("shared_attribution_groups"),
     )
 
 
@@ -289,6 +295,8 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
         metacluster_states=states,
         trim_threshold=trim_threshold,
         schema_version=REGISTRY_SCHEMA_VERSION,
+        shared_attribution_groups=cfg.shared_attribution_groups,
+        n_attribution_sources=cfg.n_attribution_sources,
     )
     _write_registry(out, meta, nodes, arrays)
     prov.write(out)

@@ -40,7 +40,7 @@ CRITERIA_PATH = packaged_criteria_path()
 def _complete_duplicate_evidence():
     return {
         "paired_delta_reconstruction_affected": 0.0,
-        "family_coefficient_share": 0.95,
+        "affected_coefficient_share": 0.95,
     }
 
 
@@ -578,6 +578,7 @@ def _annotation(node_id, family_id, *, source="tomtom", match=None):
         source_version="1",
         matched_motif_id=match or f"database:{node_id}:{family_id}",
         motif_length=10,
+        trimmed_core_length=10,
         seqlet_count=150,
     )
 
@@ -1598,3 +1599,33 @@ def test_criteria_resource_is_declared_as_package_data():
     assert any("criteria.v1.yaml" in entry for entry in declared), (
         f"criteria.v1.yaml is loaded at runtime but not in package-data: {declared}"
     )
+
+
+def test_a_stability_artifact_from_another_schema_is_refused_not_silently_dropped(tmp_path):
+    """Two rename-driven incompatibilities behaved oppositely in one release.
+
+    The annotation candidates refuse a stale shape by name. The stability results
+    did not: `_stability_values` resolves an unknown field to None and drops it,
+    so a pre-rename artifact carrying `family_coefficient_share` instead of
+    `affected_coefficient_share` contributed nothing to a TRUE_DUPLICATE criterion
+    and the pair deferred with no message. A reader who sees one artifact refuse
+    and the other shrug learns to trust neither.
+    """
+    import pandas as pd
+    import pytest
+
+    from motifmultiverse.adjudicate import AdjudicationError, _read_stability_results
+    from motifmultiverse.validate import STABILITY_SCHEMA_VERSION
+
+    path = tmp_path / "stability_results.parquet"
+    stale = {"decision_id": "d1", "family_coefficient_share": 0.4, "schema_version": "1"}
+    pd.DataFrame([stale]).to_parquet(path)
+
+    if STABILITY_SCHEMA_VERSION == "1":                      # pragma: no cover
+        pytest.skip("this test is about reading an OLDER schema than the current one")
+    with pytest.raises(AdjudicationError, match="stability schema"):
+        _read_stability_results(path)
+
+    current = {**stale, "schema_version": STABILITY_SCHEMA_VERSION}
+    pd.DataFrame([current]).to_parquet(path)
+    assert len(_read_stability_results(path)) == 1

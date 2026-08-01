@@ -53,8 +53,30 @@ analyses:
 # Two analyses may share one attribution array. If so, declare it: they are NOT
 # independent observations, and any count of corroborating evidence must use the
 # number of distinct sources, not the number of analyses.
-shared_attribution_groups:
-  - [modelB_readout1]
+#
+# `ingest` READS this. Each entry names two or more analysis ids that read ONE
+# attribution array; the registry carries the list back out as
+# `shared_attribution_groups`, plus the derived `n_attribution_sources`
+# (one per group, one per ungrouped analysis). A group naming an unknown id,
+# naming an analysis that is already in another group, or naming fewer than two
+# analyses is refused -- a group of one changes no count, so it declares nothing.
+# This example previously read `- [modelB_readout1]`, which is exactly that
+# nothing, and it went unrefused for as long as nothing read the field.
+#
+# Omitting the key entirely records "never declared": `n_attribution_sources`
+# stays null. That is NOT a claim that the analyses are independent, and no step
+# may substitute the number of analyses for it.
+#
+# Nothing downstream consumes either field yet. They are recorded so that the one
+# count-of-corroboration field in the data model, `MotifNode
+# .cross_context_recurrence`, has a denominator to be checked against when it is
+# finally populated.
+#
+# The two analyses above read different attribution files, so nothing is shared
+# and the declared list is empty. Sharing would be written:
+#   shared_attribution_groups:
+#     - [modelA_readout1, modelB_readout1]
+shared_attribution_groups: []
 
 provenance:
   random_seed: 20260725

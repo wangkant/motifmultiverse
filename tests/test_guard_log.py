@@ -68,10 +68,12 @@ def test_the_recorded_verdict_is_the_guards_own_and_is_not_recomputed(tmp_path):
     """Copied, not re-derived. A log that recomputes can disagree with the guard."""
     log = guard_log.GuardLog("annotate", tmp_path)
     for result in (
-        guards.short_motif_flag([{"variant_id": "v1", "motif_length": 12,
+        guards.short_motif_flag([{"variant_id": "v1", "motif_length": 50,
+                                  "trimmed_core_length": 12,
                                   "seqlet_count": 400, "annotation_matches": {},
                                   "low_confidence_annotation": False}]),
-        guards.short_motif_flag([{"variant_id": "v2", "motif_length": 4,
+        guards.short_motif_flag([{"variant_id": "v2", "motif_length": 50,
+                                  "trimmed_core_length": 4,
                                   "seqlet_count": 400, "annotation_matches": {},
                                   "low_confidence_annotation": False}]),
     ):

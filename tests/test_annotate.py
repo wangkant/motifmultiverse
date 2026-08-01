@@ -10,12 +10,15 @@ import pytest
 from motifmultiverse.schema import MISSING_SENTINEL, MotifNode
 
 
-def _node(*, node_id: str = "node-a", motif_length: int = 10, seqlet_count: int | None = 150):
+def _node(*, node_id: str = "node-a", motif_length: int = 10,
+          trimmed_core=(0, 10), seqlet_count: int | None = 150):
     return MotifNode(
         node_id=node_id,
         model="model", readout="readout", context="context", metacluster="pos",
         denovo_pattern_id="pattern", variant_id="UA_UNASSIGNED_01",
-        family_id=MISSING_SENTINEL, motif_length=motif_length, seqlet_count=seqlet_count,
+        family_id=MISSING_SENTINEL, motif_length=motif_length,
+        trimmed_core=None if trimmed_core is None else list(trimmed_core),
+        seqlet_count=seqlet_count,
     )
 
 
@@ -46,7 +49,7 @@ def _candidate(**changes):
 
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     return replace(candidate, **changes)
@@ -59,6 +62,8 @@ def _candidate(**changes):
         ({"candidate_id": "annotation:corrupted"}, "stable annotation match identity"),
         ({"schema_version": "999"}, "candidate schema_version"),
         ({"motif_length": 0}, "motif_length"),
+        ({"trimmed_core_length": -1}, "trimmed_core_length cannot be negative"),
+        ({"trimmed_core_length": 11}, "trimmed_core_length exceeds its motif_length"),
         ({"seqlet_count": -1}, "seqlet_count"),
         ({"q_value": 1.01}, "q_value"),
         ({"chance_occurrence_probability": 1.01}, "chance_occurrence_probability"),
@@ -76,7 +81,7 @@ def test_annotation_candidate_schema_refuses_each_corrupted_guarded_value(change
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
-        ({"motif_length": 6}, "short motif"),
+        ({"trimmed_core_length": 6}, "short motif"),
         ({"source": "tomtom", "q_value": 0.0501}, "weak TomTom match"),
         ({"seqlet_count": 99}, "low seqlet support"),
     ],
@@ -89,7 +94,7 @@ def test_annotation_candidate_refuses_false_low_confidence_for_each_trigger(chan
     payload = {
         "node_id": "node-a", "proposed_family_id": "FAM_ALPHA", "source": "tomtom",
         "source_version": "5.5", "matched_motif_id": "JASPAR:MA0001", "motif_length": 10,
-        "seqlet_count": 150,
+        "trimmed_core_length": 10, "seqlet_count": 150,
     }
     payload.update(changes)
     candidate = AnnotationCandidate.create(**payload)
@@ -132,12 +137,12 @@ def test_annotation_keeps_conflicting_candidates_without_mutating_node_assignmen
     candidates = [
         AnnotationCandidate.create(
             node_id=node.node_id, proposed_family_id="FAM_ALPHA", source="tomtom",
-            source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+            source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
             seqlet_count=150,
         ),
         AnnotationCandidate.create(
             node_id=node.node_id, proposed_family_id="FAM_BETA", source="homer",
-            source_version="4.11", matched_motif_id="HOMER:TF_BETA", motif_length=10,
+            source_version="4.11", matched_motif_id="HOMER:TF_BETA", motif_length=10, trimmed_core_length=10,
             seqlet_count=150,
         ),
     ]
@@ -164,12 +169,12 @@ def test_candidate_identity_is_stable_for_same_match_independent_of_backend_row_
     left, right = _node(node_id="node-left"), _node(node_id="node-right")
     left_match = AnnotationCandidate.create(
         node_id="node-left", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     right_match = AnnotationCandidate.create(
         node_id="node-right", proposed_family_id="FAM_BETA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0002", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0002", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
 
@@ -188,12 +193,12 @@ def test_candidate_identity_uses_the_documented_match_tuple_not_a_proposed_label
 
     first = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     relabelled = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA_REVISED", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
 
@@ -201,29 +206,138 @@ def test_candidate_identity_uses_the_documented_match_tuple_not_a_proposed_label
 
 
 @pytest.mark.parametrize(
-    ("motif_length", "source", "q_value", "seqlet_count", "expected"),
+    ("trimmed_core_length", "source", "q_value", "seqlet_count", "expected"),
     [
         (6, "homer", None, 150, True),
         (7, "tomtom", 0.0501, 150, True),
         (7, "tomtom", 0.05, 150, False),
         (7, "homer", None, 99, True),
+        (0, "homer", None, 150, True),      # a core that trimmed to nothing is short
+        (None, "homer", None, 150, False),  # no core declared is "not measured"
     ],
 )
 def test_low_confidence_annotation_uses_the_documented_boundaries(
-    motif_length, source, q_value, seqlet_count, expected,
+    trimmed_core_length, source, q_value, seqlet_count, expected,
 ):
-    """Changing <=6, TomTom q>0.05, or <100 seqlets must fail its row."""
+    """Changing <=6, TomTom q>0.05, or <100 seqlets must fail its row.
+
+    The width under test is the trimmed core, and `motif_length` is held at the
+    padded window width real tfmodisco-lite output carries (50 on all 139 nodes
+    of the case-study registry) so that a rule reading the window instead of the
+    core cannot satisfy any of these rows.
+    """
     from motifmultiverse.schema.annotation import AnnotationCandidate
 
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source=source,
-        source_version="v1", matched_motif_id="database:match", motif_length=motif_length,
+        source_version="v1", matched_motif_id="database:match", motif_length=50,
+        trimmed_core_length=trimmed_core_length,
         seqlet_count=seqlet_count, q_value=q_value,
     )
 
     assert candidate.low_confidence_annotation is expected
     assert candidate.proposed_family_id == "FAM_ALPHA"
     assert candidate.matched_motif_id == "database:match"
+
+
+def test_a_short_core_in_a_padded_window_is_low_confidence():
+    """The defect, at the schema: `motif_length` is the padded discovery window.
+
+    It was 50 for every one of the 139 nodes of the thirteen-analysis case study,
+    so `motif_length <= 6` could not fire on any real row -- while 40 of those
+    nodes declare a contribution-bearing core of 6bp or less.
+    """
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    candidate = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
+        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=50,
+        trimmed_core_length=4, seqlet_count=400,
+    )
+
+    assert candidate.low_confidence_annotation is True
+    assert candidate.motif_length == 50
+    assert candidate.trimmed_core_length == 4
+
+
+def test_the_core_length_cannot_be_omitted_when_building_a_candidate():
+    """A defaulted width would silently restore the reading that could never fire."""
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    with pytest.raises(TypeError, match="trimmed_core_length"):
+        AnnotationCandidate.create(
+            node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
+            source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=50,
+            seqlet_count=400,
+        )
+
+
+def test_the_backend_takes_the_core_length_from_the_node_it_annotates(tmp_path):
+    """End to end in the shape the case study runs: window 50, core 4.
+
+    `ConfiguredAnnotationBackend` has the node in hand, so it reads the declared
+    `trimmed_core` rather than handing the padded window to the confidence rule.
+    """
+    from motifmultiverse.annotate.base import ConfiguredAnnotationBackend
+
+    node = _node(motif_length=50, trimmed_core=(25, 29), seqlet_count=400)
+    config = tmp_path / "db.json"
+    config.write_text(json.dumps({"tomtom": {
+        "version": "5.5",
+        "matches": [{"node_id": "node-a", "proposed_family_id": "FAM_ALPHA",
+                     "matched_motif_id": "JASPAR:MA0001", "q_value": 0.001}],
+    }}))
+
+    row = ConfiguredAnnotationBackend("tomtom", config).annotate([node])[0]
+
+    assert row.motif_length == 50
+    assert row.trimmed_core_length == 4
+    assert row.low_confidence_annotation is True
+
+
+def test_a_node_that_declares_no_core_carries_none_rather_than_its_window(tmp_path):
+    """None is "not measured". Substituting `motif_length` is what made this vacuous."""
+    from motifmultiverse.annotate.base import ConfiguredAnnotationBackend
+
+    node = _node(motif_length=50, trimmed_core=None, seqlet_count=400)
+    config = tmp_path / "db.json"
+    config.write_text(json.dumps({"tomtom": {
+        "version": "5.5",
+        "matches": [{"node_id": "node-a", "proposed_family_id": "FAM_ALPHA",
+                     "matched_motif_id": "JASPAR:MA0001", "q_value": 0.001}],
+    }}))
+
+    row = ConfiguredAnnotationBackend("tomtom", config).annotate([node])[0]
+
+    assert row.trimmed_core_length is None
+    assert row.low_confidence_annotation is False
+
+
+def test_the_core_length_survives_the_candidate_table_round_trip(tmp_path):
+    """`adjudicate` re-reads this table and re-validates the flag against the rule.
+
+    If the width did not travel in the artifact, the re-read would evaluate the
+    short clause against nothing -- a second place the clause could not fire.
+    """
+    from motifmultiverse.adjudicate import _read_annotation_candidates
+    from motifmultiverse.annotate import annotate_nodes, write_annotation_artifacts
+    from motifmultiverse.schema.annotation import AnnotationCandidate
+
+    node = _node(motif_length=50, trimmed_core=(25, 29), seqlet_count=400)
+    candidate = AnnotationCandidate.create(
+        node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
+        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=50,
+        trimmed_core_length=4, seqlet_count=400,
+    )
+    result = annotate_nodes([node], [_StaticBackend("homer", "4.11", [candidate])])
+    candidates_path, _ = write_annotation_artifacts(tmp_path, result)
+
+    table = pd.read_parquet(candidates_path)
+    reread = _read_annotation_candidates(candidates_path)
+
+    assert table["trimmed_core_length"].tolist() == [4]
+    assert [row.trimmed_core_length for row in reread] == [4]
+    assert [row.low_confidence_annotation for row in reread] == [True]
 
 
 def test_occurrence_null_fields_remain_none_without_input_and_preserve_supplied_values():
@@ -233,7 +347,7 @@ def test_occurrence_null_fields_remain_none_without_input_and_preserve_supplied_
 
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     backend = _StaticBackend("tomtom", "5.5", [candidate])
@@ -258,7 +372,7 @@ def test_optional_backend_failure_is_unverified_and_does_not_remove_successful_c
 
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     result = annotate_nodes(
@@ -283,12 +397,12 @@ def test_failed_backend_does_not_retain_a_partial_prefix_of_its_candidates():
 
     valid = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     foreign = AnnotationCandidate.create(
         node_id="node-not-in-run", proposed_family_id="FAM_BETA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0002", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0002", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
 
@@ -312,12 +426,12 @@ def test_backend_source_or_version_mismatch_is_unverified_without_erasing_succes
 
     successful = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="tomtom",
-        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10,
+        source_version="5.5", matched_motif_id="JASPAR:MA0001", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     mismatched = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_BETA", source=candidate_source,
-        source_version=candidate_version, matched_motif_id="DATABASE:MISMATCH", motif_length=10,
+        source_version=candidate_version, matched_motif_id="DATABASE:MISMATCH", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
 
@@ -351,7 +465,7 @@ def test_unreadable_optional_database_is_logged_without_erasing_another_backend(
     }))
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
-        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=10,
+        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     absent_config = tmp_path / "not-installed.yaml"
@@ -520,7 +634,7 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     def _match(node_id, family_id, matched):
         return AnnotationCandidate.create(
             node_id=node_id, proposed_family_id=family_id, source="tomtom",
-            source_version="5.5", matched_motif_id=matched, motif_length=10,
+            source_version="5.5", matched_motif_id=matched, motif_length=10, trimmed_core_length=10,
             seqlet_count=150,
         )
 
@@ -591,7 +705,7 @@ def test_annotate_records_what_its_guard_returned_beside_the_candidates(tmp_path
     }))
     candidate = AnnotationCandidate.create(
         node_id="node-a", proposed_family_id="FAM_ALPHA", source="homer",
-        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=10,
+        source_version="4.11", matched_motif_id="HOMER:TF_ALPHA", motif_length=10, trimmed_core_length=10,
         seqlet_count=150,
     )
     out = tmp_path / "annotation"

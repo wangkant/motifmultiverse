@@ -10,7 +10,9 @@ In the reference implementation `annotate` had no stage at all -- family assignm
 
 ## How to check it
 
-`guards.short_motif_flag`: PWM <= 6 bp, or TomTom q > 0.05, or seqlet count < 100 requires `low_confidence_annotation`. What it returned is written to `guard_outcomes.json` beside the candidate table (`motifmultiverse.guard_log`).
+`guards.short_motif_flag`: **trimmed core** <= 6 bp, or TomTom q > 0.05, or seqlet count < 100 requires `low_confidence_annotation`. What it returned is written to `guard_outcomes.json` beside the candidate table (`motifmultiverse.guard_log`).
+
+The short clause is measured on the trimmed core, not on `motif_length`. On tfmodisco-lite output `motif_length` is the fixed, background-padded window every pattern is emitted at -- 50 for all 139 nodes of the thirteen-analysis case study -- so a threshold of 6 on it could not fire on any real input, while 40 of those same nodes declare a core of 6bp or less. `AnnotationCandidate` therefore carries `trimmed_core_length` beside `motif_length`, and the guard reports how many nodes declared no core at all, so a run in which the clause could not fire does not read as a clean pass.
 
 ---
 

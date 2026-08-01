@@ -78,6 +78,29 @@ scheduling. Parallelism neither causes this nor is blocked by it (both worker
 counts reproduce the same correlated draws exactly), so it is written down here
 rather than quietly changed under cover of a performance patch.
 
+**Every pair this stage considered is accounted for on disk.** The run
+denominators used to be returned, printed, and written to no file, on the
+argument that a count smuggled into a guard-outcome sentence would become the
+on-disk denominator in the one artifact nobody would look for it in. That
+argument is right about *where* a count must not go and wrong about whether one
+belongs on disk at all. Run this stage on thirteen real TF-MoDISco outputs and
+`evidence/` holds 5,171 edges with no recorded denominator: a reader cannot tell
+5,171-of-9,591 from 5,171-of-5,171, and an excluded pair is indistinguishable
+from a pair that was never considered -- the absence-versus-refusal distinction
+this package enforces everywhere else, lost in the one stage whose output is a
+*subset* of what it looked at. So the guard sentence still carries no count, and
+the denominators go where a reader of `evidence/` will find them:
+`alignment_run_summary.json` beside the edge table carries
+`n_pairs_considered = n_edges + n_pairs_excluded` with the overlap floor that
+decided the split, and `alignment_excluded_pairs.tsv` names every excluded pair
+with the reason it was excluded, the registrability status of each endpoint, and
+the two trimmed-core lengths that reason is a statement about -- so
+`no_offset_meets_overlap_floor` can be re-derived from the row and the recorded
+floor rather than taken on trust. On that thirteen-analysis run all 139 nodes
+were registrable and all 4,420 exclusions were the overlap floor over cores of
+4-49bp, which is a fact about core-width heterogeneity in the registry that no
+artifact previously recorded.
+
 BASE_ORDER documents a convention this module needs but nothing upstream
 declares: PPM/CWM columns are `(A, C, G, T)`. This is a numeric axis
 convention (needed only to build a reverse complement), not a parsed
@@ -86,6 +109,7 @@ identifier, so it is not a Rule 2 (`no_key_parsing`) violation.
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
 from collections.abc import Callable
@@ -102,6 +126,9 @@ __all__ = [
     "BASE_ORDER", "REGISTRATION_RULE_VERSION",
     "DEFAULT_MIN_OVERLAP_BP", "DEFAULT_MIN_OVERLAP_FRAC", "DEFAULT_NULL_SHUFFLES",
     "DEFAULT_WORKERS",
+    "NODE_REGISTRABLE", "NODE_NO_PPM_ARRAY", "NODE_NO_TRIMMED_CORE", "NODE_STATUSES",
+    "EXCLUDED_NODE_NOT_REGISTRABLE", "EXCLUDED_NO_OFFSET_MEETS_FLOOR",
+    "PAIR_EXCLUSION_REASONS", "RUN_SUMMARY_SCHEMA_VERSION",
 ]
 
 #: PPM/CWM column convention. See module docstring.
@@ -130,6 +157,29 @@ DEFAULT_NULL_SHUFFLES = 1000
 #: that. Raising it is safe for the *result* -- see the module docstring -- but
 #: it is the caller's decision, not this module's.
 DEFAULT_WORKERS = 1
+
+#: Whether a registry node contributed matrices to the pair loop, and if not,
+#: why not. The two refusals are named separately rather than merged into one
+#: "unusable" because they are different repairs: no PPM at all is a discovery
+#: or ingest problem, an undeclared `trimmed_core` is a trim-threshold one. A
+#: reader holding only "excluded" could not tell which.
+NODE_REGISTRABLE = "registrable"
+NODE_NO_PPM_ARRAY = "no_ppm_array"
+NODE_NO_TRIMMED_CORE = "no_declared_trimmed_core"
+NODE_STATUSES = (NODE_REGISTRABLE, NODE_NO_PPM_ARRAY, NODE_NO_TRIMMED_CORE)
+
+#: Why a considered pair produced no edge. Exactly one applies to each excluded
+#: pair, and with `n_edges` they partition `n_pairs_considered` -- which is the
+#: property `alignment_run_summary.json` exists to let a reader check.
+EXCLUDED_NODE_NOT_REGISTRABLE = "node_not_registrable"
+EXCLUDED_NO_OFFSET_MEETS_FLOOR = "no_offset_meets_overlap_floor"
+PAIR_EXCLUSION_REASONS = (
+    EXCLUDED_NODE_NOT_REGISTRABLE, EXCLUDED_NO_OFFSET_MEETS_FLOOR,
+)
+
+#: Bumped if the run-summary payload's keys change. Carried in the file so a
+#: reader parsing it never has to infer which shape it is looking at.
+RUN_SUMMARY_SCHEMA_VERSION = "1"
 
 
 class AlignmentError(ValueError):
@@ -242,6 +292,16 @@ class AlignmentRunSummary:
     cannot change any number in the table, so putting it on every row would tell
     a reader to consider it when comparing rows. Here it answers "what did this
     run do", which is a fair question about a job that can take hours.
+
+    The denominators are no longer only here: `align_registry` writes them to
+    `alignment_run_summary.json` beside the edge table, and every excluded pair
+    to `alignment_excluded_pairs.tsv`, so a reader who never saw this object can
+    still recover `n_pairs_considered = n_edges + n_pairs_excluded` and say why
+    each excluded pair was excluded. `workers` is the one field deliberately
+    left out of that file, for the same reason it is not on an edge: it changes
+    no number, and a run-summary artifact that differed between two runs of the
+    same registry would invite a reader to look for a difference that is not
+    there. The CLI prints it, where it belongs -- it explains the wall-clock.
     """
 
     n_nodes: int
@@ -254,6 +314,15 @@ class AlignmentRunSummary:
     edges_path: str
     null_summary_path: str
     workers: int = DEFAULT_WORKERS
+    # Appended, never inserted -- the same convention
+    # `AlignmentEvidence.registration_rule_version` follows, so positional
+    # construction of the original fields is unaffected. `align_registry` sets
+    # all four on every run; the defaults exist for that compatibility and are
+    # not a value any run of this stage can actually emit.
+    min_overlap_bp: int = DEFAULT_MIN_OVERLAP_BP
+    min_overlap_frac: float = DEFAULT_MIN_OVERLAP_FRAC
+    excluded_pairs_path: str = ""
+    run_summary_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -549,6 +618,20 @@ _NULL_SUMMARY_FIELDS = [
     "empirical_p_value", "null_mean", "null_min", "null_max",
     "observed_ppm_similarity", "registration_rule_version",
 ]
+#: One row per excluded pair -- the complement of `alignment_edges.parquet` over
+#: the same enumeration, so the two together are every pair this run considered.
+#: `*_node_status` says why an endpoint contributed no matrices, and is
+#: `registrable` on both sides exactly when the pair itself is what failed.
+#: `*_core_bp` is the trimmed-core length each side brought: the two numbers the
+#: overlap floor recorded in `alignment_run_summary.json` is a statement about,
+#: so `no_offset_meets_overlap_floor` is a claim a reader can re-derive from the
+#: row rather than one that has to be believed. Empty when the node declared no
+#: core to measure -- which is itself that node's reason, not a missing value.
+_EXCLUDED_PAIR_FIELDS = [
+    "source_node_id", "target_node_id", "exclusion_reason",
+    "source_node_status", "target_node_status",
+    "source_core_bp", "target_core_bp",
+]
 
 
 def _write_edges(out: Path, edges: list[AlignmentEvidence]) -> Path:
@@ -568,6 +651,60 @@ def _write_null_summary(out: Path, rows: list[dict[str, Any]]) -> Path:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    return dest
+
+
+def _excluded_pair_row(source_node_id: str, target_node_id: str, reason: str,
+                       source_status: str, target_status: str,
+                       core_bp: dict[str, int]) -> dict[str, Any]:
+    """One excluded pair, said in full: which pair, which reason, and the facts
+    the reason is about.
+
+    The core lengths are read off the trimmed matrices, not recomputed from the
+    floor -- a second copy of the overlap rule here could disagree with the one
+    that actually excluded the pair, and a row that explained an exclusion that
+    did not happen that way would be worse than no row.
+    """
+    return {
+        "source_node_id": source_node_id,
+        "target_node_id": target_node_id,
+        "exclusion_reason": reason,
+        "source_node_status": source_status,
+        "target_node_status": target_status,
+        "source_core_bp": core_bp.get(source_node_id, ""),
+        "target_core_bp": core_bp.get(target_node_id, ""),
+    }
+
+
+def _write_excluded_pairs(out: Path, rows: list[dict[str, Any]]) -> Path:
+    """Write every excluded pair -- header first, and written even with no rows.
+
+    A zero-row file with its header says "this run excluded nothing". A missing
+    file says "this run did not record exclusions". Those are different claims,
+    and the whole point of the artifact is that a reader never has to guess which
+    one an empty directory entry meant.
+    """
+    dest = out / "alignment_excluded_pairs.tsv"
+    with open(dest, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_EXCLUDED_PAIR_FIELDS, delimiter="\t")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return dest
+
+
+def _write_run_summary(out: Path, payload: dict[str, Any]) -> Path:
+    """The denominator, beside the numerator.
+
+    Sorted keys and a trailing newline so the file is stable text: two runs of
+    the same registry at different worker counts must produce identical bytes
+    here as well as in the two tables, which is why nothing about scheduling is
+    in the payload.
+    """
+    dest = out / "alignment_run_summary.json"
+    dest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+    )
     return dest
 
 
@@ -725,6 +862,15 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     around it. A node whose registry record declares no usable core is excluded
     with the pairs it would have joined; see `_declared_core`.
 
+    Four files are written, not two. `alignment_edges.parquet` and
+    `alignment_null_summary.tsv` are the registered pairs;
+    `alignment_excluded_pairs.tsv` is their complement over the same
+    enumeration, one row per excluded pair with the reason and the two core
+    lengths behind it; and `alignment_run_summary.json` carries the denominators
+    (`n_pairs_considered == n_edges + n_pairs_excluded`) together with the
+    overlap floor that split them. So a reader of the output directory can
+    recover what this run looked at, not only what it kept.
+
     `null_shuffles` and `seed` are threaded through as the provenance the
     non-negotiable constraints require: every emitted edge carries both
     (`AlignmentEvidence.null_shuffles` / `.seed`), not just the run as a whole.
@@ -788,6 +934,12 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
         # use h5py documents as unsupported. Closing here means the workers never
         # touch the file at all -- they get plain arrays.
         matrices: dict[str, tuple[Any, Any | None]] = {}
+        # Every node gets a status, including the ordinary one: a node absent
+        # from this map would be a node the run never decided about, and the
+        # pair loop below reads it rather than inferring registrability from
+        # membership in `matrices` -- so "excluded" always comes with a reason.
+        node_status: dict[str, str] = {}
+        core_bp: dict[str, int] = {}
         for node in nodes:
             node_id = node["node_id"]
             node_arrays = arrays[node_id]
@@ -795,6 +947,7 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
                 # Never averaged, never guessed: a node with no PPM at all has
                 # no unsigned content to register on, so its pairs are excluded
                 # rather than silently registered on CWM alone.
+                node_status[node_id] = NODE_NO_PPM_ARRAY
                 continue
             ppm = node_arrays["ppm"][:]
             # Trim to the declared core before anything is scored. Both matrices
@@ -803,8 +956,11 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
             # otherwise no longer describe the same positions.
             core = _declared_core(node, ppm.shape[0])
             if core is None:
+                node_status[node_id] = NODE_NO_TRIMMED_CORE
                 continue
             cwm = node_arrays["cwm"][:] if "cwm" in node_arrays else None
+            node_status[node_id] = NODE_REGISTRABLE
+            core_bp[node_id] = core[1] - core[0]
             matrices[node_id] = (
                 ppm[core[0]:core[1]],
                 None if cwm is None else cwm[core[0]:core[1]],
@@ -815,39 +971,75 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     params = {"null_shuffles": null_shuffles, "seed": seed,
               "min_overlap_bp": min_overlap_bp, "min_overlap_frac": min_overlap_frac}
     jobs: list[tuple[int, str, str, dict[str, Any]]] = []
+    # Excluded pairs are keyed by their position in `combinations(nodes, 2)`,
+    # not appended in the order they are discovered: exclusions arise at two
+    # different stages (node filter here, overlap floor after the pair loop) and
+    # a table that ran the first stage's rows before the second's would not be
+    # in the order of the enumeration it is the complement of.
+    excluded_rows: dict[int, dict[str, Any]] = {}
+    #: job index -> that pair's position in the considered enumeration.
+    job_pair_index: list[int] = []
     n_considered = 0
-    n_excluded = 0
     for a, b in combinations(nodes, 2):
         a_id, b_id = a["node_id"], b["node_id"]
+        pair_index = n_considered
         n_considered += 1
-        if a_id not in matrices or b_id not in matrices:
-            # No PPM, or no declared trimmed core: excluded above, counted here,
+        a_status, b_status = node_status[a_id], node_status[b_id]
+        if a_status != NODE_REGISTRABLE or b_status != NODE_REGISTRABLE:
+            # No PPM, or no declared trimmed core: excluded above, NAMED here,
             # never registered on padding or on CWM alone.
-            n_excluded += 1
+            excluded_rows[pair_index] = _excluded_pair_row(
+                a_id, b_id, EXCLUDED_NODE_NOT_REGISTRABLE,
+                a_status, b_status, core_bp,
+            )
             continue
         # The index IS the pair's position among the jobs, which is
         # `combinations` order; `_run_pairs` restores that order from it.
+        job_pair_index.append(pair_index)
         jobs.append((len(jobs), a_id, b_id, params))
 
     edges: list[AlignmentEvidence] = []
     null_rows: list[dict[str, Any]] = []
-    for _index, evidence, null_row in _run_pairs(
+    for job_index, evidence, null_row in _run_pairs(
         jobs, matrices, workers=workers, progress=progress,
     ):
         if evidence is None or null_row is None:
             # No offset met the bilateral overlap requirement for this pair.
-            n_excluded += 1
+            # Both endpoints were registrable -- it is the two cores' widths that
+            # admit no window, which is why the row carries them.
+            _job, a_id, b_id, _params = jobs[job_index]
+            excluded_rows[job_pair_index[job_index]] = _excluded_pair_row(
+                a_id, b_id, EXCLUDED_NO_OFFSET_MEETS_FLOOR,
+                NODE_REGISTRABLE, NODE_REGISTRABLE, core_bp,
+            )
             continue
         edges.append(evidence)
         null_rows.append(null_row)
 
+    exclusions = [excluded_rows[index] for index in sorted(excluded_rows)]
+    if n_considered != len(edges) + len(exclusions):
+        # Not arithmetic-by-construction: `_run_pairs` reassembles outcomes by
+        # index and drops any slot it never filled, so a scheduling bug that lost
+        # a job would silently shrink both numerators while `n_pairs_considered`
+        # stayed put -- a denominator that no longer adds up, published as if it
+        # did. Cheaper to refuse than to write it.
+        raise AlignmentError(
+            f"pair accounting does not close: {n_considered} considered but "
+            f"{len(edges)} edges + {len(exclusions)} excluded = "
+            f"{len(edges) + len(exclusions)}; refusing to write a run summary "
+            "whose denominator cannot be reconciled with its rows"
+        )
+
     GuardLog("align", out).record(
         guards.sign_alignment([e.to_dict() for e in edges]),
-        # No edge count here on purpose. `AlignmentRunSummary`'s denominators are
-        # returned and printed and deliberately written to no file; a count
-        # smuggled into a guard-outcome sentence would become the on-disk
-        # denominator this module has decided not to publish, in the one artifact
-        # nobody would think to look for it in.
+        # Still no edge count here, and for the reason this comment always gave:
+        # a denominator smuggled into a guard-outcome sentence lands in the one
+        # artifact nobody would look for it in, as prose rather than as a field.
+        # What has changed is that it is no longer written nowhere -- it is in
+        # `alignment_run_summary.json` beside the edges, with the excluded pairs
+        # named one per row in `alignment_excluded_pairs.tsv`. A guard outcome
+        # records whether the question was asked; it is not the denominator's
+        # home.
         subject=(
             "the alignment edges about to be written to alignment_edges.parquet, "
             f"registered under rule version {REGISTRATION_RULE_VERSION} "
@@ -857,18 +1049,56 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
 
     edges_path = _write_edges(out, edges)
     null_summary_path = _write_null_summary(out, null_rows)
+    excluded_pairs_path = _write_excluded_pairs(out, exclusions)
+    # Every member of both vocabularies is emitted, including the ones this run
+    # never used. A reason absent from the payload would read as "not counted";
+    # a reason present with 0 says the run looked and found none, and it also
+    # tells a reader what the other possibilities were.
+    run_summary_path = _write_run_summary(out, {
+        "schema_version": RUN_SUMMARY_SCHEMA_VERSION,
+        "n_nodes": len(nodes),
+        "n_nodes_by_status": {
+            status: sum(1 for value in node_status.values() if value == status)
+            for status in NODE_STATUSES
+        },
+        "n_pairs_considered": n_considered,
+        "n_edges": len(edges),
+        "n_pairs_excluded": len(exclusions),
+        "n_pairs_excluded_by_reason": {
+            reason: sum(1 for row in exclusions if row["exclusion_reason"] == reason)
+            for reason in PAIR_EXCLUSION_REASONS
+        },
+        "null_shuffles": null_shuffles,
+        "seed": seed,
+        # The floor is what decided the split, and until now it was recorded
+        # nowhere -- so `no_offset_meets_overlap_floor` named a threshold a
+        # reader had no way to know the value of.
+        "min_overlap_bp": min_overlap_bp,
+        "min_overlap_frac": min_overlap_frac,
+        "registration_rule_version": REGISTRATION_RULE_VERSION,
+        # File NAMES, not paths: these three sit in the directory this file sits
+        # in, and an absolute path would make the artifact depend on where the
+        # run happened to be written.
+        "edges_file": edges_path.name,
+        "null_summary_file": null_summary_path.name,
+        "excluded_pairs_file": excluded_pairs_path.name,
+    })
 
     summary = AlignmentRunSummary(
         n_nodes=len(nodes),
         n_pairs_considered=n_considered,
         n_edges=len(edges),
-        n_pairs_excluded=n_excluded,
+        n_pairs_excluded=len(exclusions),
         null_shuffles=null_shuffles,
         seed=seed,
         registration_rule_version=REGISTRATION_RULE_VERSION,
         edges_path=str(edges_path),
         null_summary_path=str(null_summary_path),
         workers=workers,
+        min_overlap_bp=min_overlap_bp,
+        min_overlap_frac=min_overlap_frac,
+        excluded_pairs_path=str(excluded_pairs_path),
+        run_summary_path=str(run_summary_path),
     )
     return summary, edges
 
