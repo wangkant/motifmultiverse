@@ -181,11 +181,18 @@ jobs:
           rows = read_bias_ledger(ledger)
           assert len(rows) == 20, f"the packaged ledger has {len(rows)} axes, expected 20"
           root = Path(motifmultiverse.__file__).parent
-          for module in ("ingest", "align", "annotate", "adjudicate", "compile",
-                         "validate", "infer", "interpret", "report"):
+          # Derived from the INSTALLED package, for the reason the two --help
+          # loops above are: this list was typed by hand and had already gone
+          # stale -- it named nine modules and `multiverse` was not one of them,
+          # so the newest module's README could have dropped out of the wheel
+          # with the job still green. `MODULES` is what the status table and the
+          # smoke tests already derive from; there is no second list to forget.
+          from motifmultiverse.status import MODULES
+          for module in MODULES:
               assert (root / module / "README.md").is_file(), \
                   f"{module}/README.md missing from the wheel"
-          print("packaged data: criteria, bias ledger and nine module READMEs all present")
+          print("packaged data: criteria, bias ledger and all "
+                f"{len(MODULES)} module READMEs present")
           PY
       - name: End to end, from the installed wheel, with the DEFAULT bias ledger
         # The regression this job exists for. `motifmultiverse report <dir>/` with
