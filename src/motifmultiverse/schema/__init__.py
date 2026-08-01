@@ -34,6 +34,7 @@ __all__ = [
     "MotifNode", "EvidenceEdge", "DecisionRecord", "DecisionBundle", "OntologyDecision",
     "AnalysisConfig",
     "NamespacedId", "translate", "assert_no_key_parsing", "MISSING_SENTINEL",
+    "variant_claim_is_assigned",
     "SelectionProvenance", "OutputMode", "MOST_CONSERVATIVE_OUTPUT_MODE",
     "OUTPUT_MODE_BY_PROVENANCE", "output_mode_for", "HitRecord",
     "HIT_TABLE_COLUMNS", "PeakSetQuery", "HealthFloors",
@@ -51,7 +52,37 @@ __all__ = [
     "SUBSTRATE_SCHEMA_VERSION", "JsonValue", "CallerSpecification", "HitSubstrateManifest",
     "SPLIT_MANIFEST_SCHEMA_VERSION", "SplitRole", "PeakSplitManifest",
     "build_peak_split_manifest", "peak_split_manifest_checksum",
+    "EVIDENCE_FIELD_DOMAINS",
 ]
+
+#: The closed interval each real-valued alignment evidence field is validated
+#: into, as ``(low, high)``.
+#:
+#: This is NOT documentation kept beside the real bounds. It has two consumers and
+#: is load-bearing for both: ``align.AlignmentEvidence.__post_init__`` validates
+#: against it, so a value outside the stated interval cannot be constructed; and
+#: ``schema.criteria`` resolves ``provenance: derived`` thresholds against it, so a
+#: threshold claiming to be a structural landmark of a field's range is checked
+#: against the same interval the data is held to. A second, descriptive copy could
+#: drift from the enforced one, and the drift would be invisible in exactly the
+#: artifact the provenance label exists to make readable.
+#:
+#: ``ppm_similarity`` spans [-1.0, 1.0] and not [0.0, 1.0]: ``align`` registers
+#: pairs on an UNSIGNED ppm cosine, but the field is a cosine and the validator has
+#: never restricted its sign. The table records what is enforced, not what is
+#: expected.
+#:
+#: ``overlap_bp`` is absent deliberately -- it is a positive integer with no upper
+#: bound, so it has no upper landmark, and a threshold on it cannot be derived from
+#: its range. That is a fact about ``overlap_bp``, and the shipped criterion
+#: declares its ``overlap_bp`` threshold rather than deriving it.
+EVIDENCE_FIELD_DOMAINS: Mapping[str, tuple[float, float]] = MappingProxyType({
+    "overlap_frac_source": (0.0, 1.0),
+    "overlap_frac_target": (0.0, 1.0),
+    "ppm_similarity": (-1.0, 1.0),
+    "signed_cwm_similarity": (-1.0, 1.0),
+    "empirical_p_value": (0.0, 1.0),
+})
 
 
 def __getattr__(name: str) -> Any:
@@ -99,6 +130,46 @@ def _require_sha256_digest(name: str, value: object) -> None:
 
 def _is_nonempty_string(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def variant_claim_is_assigned(
+    variant_assignment_source: object, variant_id: object
+) -> bool:
+    """Whether a node carries a real variant claim rather than a placeholder.
+
+    ``MotifNode.variant_id`` is mandatory and must be unique per node, so ``ingest``
+    manufactures one for every node whether or not any variant identity exists
+    (``ingest/__init__.py``, whose own comment on the value reads "a placeholder,
+    not a claim"). Those manufactured values are all *distinct* while claiming
+    nothing, so a consumer that reads distinctness off them is reading ``ingest``'s
+    own counter back as evidence -- which ``adjudicate`` did, making
+    ``SAME_FAMILY_VARIANT`` a blanket refusal of every same-family pair the pipeline
+    can ever see, and putting ``TRUE_DUPLICATE`` permanently out of reach.
+
+    The test is deliberately **not** a look at the ``variant_id`` string.
+    ``V-09``/``assert_no_key_parsing`` forbids recovering meaning from an
+    identifier's spelling, and a rule that pattern-matched ``ingest``'s current
+    placeholder would break the moment ``ingest`` renamed it. It reads the explicit
+    ``variant_assignment_source`` field instead, exactly as family assignment is
+    already read from ``family_assignment_source``.
+
+    A **missing** source (``None``) counts as assigned, not as unassigned. Treating
+    an unstated source as unassigned would route genuinely-distinct variants into
+    ``TRUE_DUPLICATE``, i.e. toward collapse, which is the destructive direction
+    (``MOST_CONSERVATIVE_OUTPUT_MODE``).
+    """
+    # `_is_nonempty_string` rather than `variant_id.strip()`: the emptiness test is
+    # not identifier parsing, but `guards.no_key_parsing` watches `.strip` on a name
+    # called `variant_id` and is right to -- routing it through a helper keeps that
+    # guard's signal honest instead of teaching it to ignore this module.
+    if not _is_nonempty_string(variant_id) or variant_id == MISSING_SENTINEL:
+        return False
+    if variant_assignment_source is None:
+        return True
+    return (
+        _is_nonempty_string(variant_assignment_source)
+        and variant_assignment_source != MISSING_SENTINEL
+    )
 
 
 def _validated_split_assignments(
@@ -304,6 +375,16 @@ class MotifNode:
     low_confidence_annotation: bool = False
     family_assignment_source: str = MISSING_SENTINEL
     family_assignment_confidence: float | None = None
+    #: Which stage assigned ``variant_id``, or ``MISSING_SENTINEL`` if none did.
+    #: The twin of ``family_assignment_source``, and it had to exist. ``variant_id``
+    #: is mandatory and must be unique, so ``ingest`` manufactures a placeholder for
+    #: every node when no variant identity exists -- and until now the only record
+    #: of that placeholder-ness was the *spelling* of the value, which
+    #: ``V-09``/``assert_no_key_parsing`` forbids any consumer from reading. The
+    #: consequence was live: ``adjudicate`` read the manufactured values as
+    #: "distinct variant identities", i.e. ``ingest``'s own counter fed back as
+    #: evidence. See ``variant_claim_is_assigned``.
+    variant_assignment_source: str = MISSING_SENTINEL
     discovery_tier: Tier | None = None
     analysis_tier: Tier | None = None
     tier_reason: str = MISSING_SENTINEL

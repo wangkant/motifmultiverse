@@ -607,9 +607,16 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     ``annotation_candidates.parquet`` and nothing else. So the component below
     loses the family conflict that refused its merge, and adjudicates as a
     duplicate instead, on annotation evidence it has no way to know is partial.
-    With the shipped criteria that is a DEFERRED rather than a collapse only
-    because TRUE_DUPLICATE is CRITERION_NOT_YET_DEFINED; a project registry that
-    freezes it, which ``--criteria`` exists to supply, collapses the pair.
+    This USED to be a DEFERRED rather than a collapse, only because TRUE_DUPLICATE
+    was CRITERION_NOT_YET_DEFINED. TRUE_DUPLICATE v2 is a FROZEN_DECLARED_HEURISTIC
+    that decides, so the limitation is no longer hypothetical, and the assertions
+    below say exactly how far it gets. On this fixture the shipped criterion
+    REFUSES -- but only by an accident of the fixture's numbers: its
+    ``empirical_p_value`` is 0.001, a hair above its own null floor of
+    1/(1000+1) = 0.000999. Move it to the floor, which real duplicate pairs sit
+    at, and the shipped criterion collapses a pair whose own annotation evidence
+    said FAM_ALPHA vs FAM_BETA. That is pinned below too, because that is the
+    live severity, and nothing in v2 pays it down.
 
     It is pinned rather than patched because both obvious repairs invent a rule
     the design has not decided. Keeping the good rows contradicts the retention
@@ -676,15 +683,31 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     assert _adjudicate(complete.candidates, shipped).relationship == "AMBIGUOUS_CROSS_FAMILY"
     assert _adjudicate(complete.candidates, shipped).decision == Decision.REFUSE_MERGE
     assert _adjudicate(dropped.candidates, shipped).relationship == "TRUE_DUPLICATE"
-    assert _adjudicate(dropped.candidates, shipped).decision == Decision.DEFERRED
+    # Complete evidence, one unmet predicate (p = 0.001 > the 1/1001 null floor)
+    # -> the fail-safe REFUSE_MERGE, which v1 could not express and v2 can.
+    assert _adjudicate(dropped.candidates, shipped).decision == Decision.REFUSE_MERGE
+
+    # ...and the live severity, one number away. At the null floor the shipped
+    # heuristic COLLAPSES the pair, on annotation evidence it cannot know is
+    # partial. This is the cost of freezing the criterion, stated as a passing
+    # assertion rather than as prose.
+    at_floor = replace(edge, empirical_p_value=1.0 / (edge.null_shuffles + 1))
+    assert adjudicate_component(
+        ["node-a", "node-b"], [at_floor], dropped.candidates, [], shipped, "test",
+        node_metadata=metadata,
+    ).decision == Decision.COLLAPSE
 
     frozen_duplicate = dict(shipped)
     frozen_duplicate["TRUE_DUPLICATE"] = Criterion(
-        criterion_id="TRUE_DUPLICATE", version="project-1", status=CriterionStatus.FROZEN,
+        criterion_id="TRUE_DUPLICATE", version="project-1",
+        status=CriterionStatus.FROZEN_DECLARED_HEURISTIC,
         relationship="TRUE_DUPLICATE", required_evidence=("ppm_similarity",),
-        predicates=(Predicate(field="ppm_similarity", operator="ge", value=0.9),),
+        predicates=(Predicate(field="ppm_similarity", operator="ge", value=0.9,
+                              provenance="declared", basis="test fixture"),),
         insufficient_evidence_action=Decision.DEFERRED,
         decision_if_matched=Decision.COLLAPSE,
+        declared_rationale="a site-local threshold, invented for this test",
+        replacement_evidence=("nothing; this criterion exists only in this test",),
     )
     assert _adjudicate(complete.candidates, frozen_duplicate).decision == Decision.REFUSE_MERGE
     assert _adjudicate(dropped.candidates, frozen_duplicate).decision == Decision.COLLAPSE

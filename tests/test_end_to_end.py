@@ -343,9 +343,17 @@ def test_every_declared_artifact_parses_as_its_own_format(reference_run):
     assert {"candidate_id", "node_id", "proposed_family_id", "source"} <= set(candidates.columns)
 
     decisions = pd.read_parquet(reference_run / "adjudication" / "ontology_decisions.parquet")
-    assert len(decisions) == 1
-    assert decisions["relationship"].iloc[0] == "TRUE_DUPLICATE"
-    assert decisions["criterion_id"].iloc[0] == "TRUE_DUPLICATE"
+    # TWO considered clusters over three fully-connected nodes, not one. The
+    # unrestricted connectivity pass proposes the whole {0,1,2} component; the
+    # duplicate criterion's own predicates, read as FP-05's declared distance
+    # ceiling, additionally propose the tighter {0,1} sub-clique -- pattern_2 is
+    # sign-flipped against both others (signed_cwm_similarity -1.0), so its edges
+    # are not admitted. Both proposals are recorded, which is the point: the wide
+    # one is the record that the 3-node cluster was considered.
+    assert len(decisions) == 2
+    assert set(decisions["relationship"]) == {"TRUE_DUPLICATE"}
+    assert set(decisions["criterion_id"]) == {"TRUE_DUPLICATE"}
+    assert {len(json.loads(ids)) for ids in decisions["node_ids"]} == {2, 3}
 
     manifest = json.loads((reference_run / "lexicons" / "core.manifest.json").read_text())
     assert len(manifest["lexicon_content_hash"]) == 64
@@ -491,20 +499,28 @@ def test_every_stage_left_a_provenance_record(reference_run):
 # --------------------------------------------------------------------------- #
 #: A criteria registry written FOR THIS TEST, not the project's.
 #:
-#: `config/criteria.v1.yaml` leaves TRUE_DUPLICATE and FRAGMENT_MATCH
-#: `CRITERION_NOT_YET_DEFINED`, because no frozen design document states how much
-#: reconstruction loss a collapse may cost, and inventing that number is the
-#: thing the criterion registry exists to prevent. That is a statement about the
-#: science, not about the code -- but it does mean the shipped pipeline can never
-#: collapse anything, so the collapse path needs a criteria file of its own to be
-#: exercised at all. These thresholds are fixture values with no scientific
-#: standing, and `test_the_shipped_criteria_still_refuse_to_guess_a_threshold`
-#: pins that the shipped file is unchanged.
+#: The shipped registry decides on ALIGNMENT GEOMETRY. This fixture decides on
+#: DOWNSTREAM STABILITY EVIDENCE (`paired_delta_reconstruction_affected`,
+#: `family_coefficient_share`), which is the path the two-pass test below exists
+#: to exercise and which no shipped criterion takes. These thresholds are fixture
+#: values with no scientific standing;
+#: `test_the_shipped_criteria_still_refuse_to_guess_a_threshold` pins what the
+#: shipped file is allowed to look like.
+#:
+#: Deliberately `schema_version: "1"`, which is also a live regression test of the
+#: promise that v1 files keep loading unchanged: none of its thresholds carries
+#: `provenance`, because the key did not exist in v1, and the loader must not
+#: start refusing it.
 TEST_CRITERIA = """\
 schema_version: "1"
 criteria:
   - criterion_id: TRUE_DUPLICATE
-    version: "1"
+    # Must track the SHIPPED TRUE_DUPLICATE's version. `stable_decision_id` hashes
+    # (members, relationship, criterion_id, criterion_version), so a version that
+    # disagrees with pass 1's gives pass 2 a different decision_id, and the
+    # stability row written for pass 1 silently stops matching -- the second pass
+    # would defer for missing evidence and the collapse path would go untested.
+    version: "2"
     status: FROZEN
     relationship: TRUE_DUPLICATE
     required_evidence:
@@ -641,13 +657,38 @@ def adjudication_run(tmp_path_factory) -> dict:
     }
 
 
-def test_the_first_pass_defers_everything_for_want_of_downstream_evidence(adjudication_run):
-    """Under the SHIPPED criteria, nothing collapses -- and that is the design."""
+def test_the_first_pass_collapses_nothing_under_the_shipped_criteria(adjudication_run):
+    """Under the SHIPPED criteria, nothing collapses HERE -- and that is not luck.
+
+    What changed with TRUE_DUPLICATE v2 is the SHAPE of the non-collapse, not the
+    absence of one, and the shape is checked here rather than asserted in prose.
+    All three of this fixture's edges DO sit at their null floor (p = 0.0909 =
+    1/(10+1)), so the derived null-floor predicate is satisfied; each pair is then
+    stopped by a different, named gate:
+
+      pattern_0 / pattern_1 -- overlap_bp 7, under the DECLARED `overlap_bp ge 8`
+      pattern_4 / pattern_5 -- signed_cwm_similarity -1.0, under the derived sign gate
+      pattern_2 / pattern_3 -- FRAGMENT_MATCH geometry, still CRITERION_NOT_YET_DEFINED
+
+    So two are REFUSE_MERGE (complete evidence, one unmet predicate -- the fail-safe
+    branch, which v1 could not express because it could only ever say "deferred")
+    and one is DEFERRED. Neither is a collapse, which is the property this test
+    guards. The two refusals must also carry the declared-magnitude caveat, because
+    "this pair missed a threshold" means something different when the threshold was
+    chosen rather than derived.
+    """
     first = adjudication_run["first"]
     assert len(first) == 3
-    assert set(first["decision"]) == {"deferred"}
+    assert "collapse" not in set(first["decision"])
+    assert set(first["decision"]) == {"deferred", "refuse_merge"}
     assert set(first["relationship"]) == {"TRUE_DUPLICATE", "FRAGMENT_MATCH"}
     assert first["representative_node_id"].isna().all()
+
+    refusals = first[first["decision"] == "refuse_merge"]
+    assert len(refusals) == 2
+    for rationale in refusals["rationale"]:
+        assert "DECLARED-NOT-DERIVED" in rationale
+        assert "overlap_bp ge 8" in rationale and "ppm_similarity ge 0.9" in rationale
 
 
 def test_adjudication_emits_collapse_refusal_and_deferral_in_one_run(adjudication_run):
@@ -696,20 +737,39 @@ def test_every_considered_cluster_appears_including_the_ones_that_did_not_collap
     assert len(collapsing) == 1
 
 
-def test_the_shipped_criteria_still_refuse_to_guess_a_threshold():
-    """The guard on the test above: its criteria file must not become the project's.
+def test_the_shipped_criteria_never_hide_a_guessed_threshold():
+    """The guard on the test above, restated for a registry that now decides.
 
-    If someone ever fills a magnitude into `config/criteria.v1.yaml` to make a
-    pipeline collapse duplicates, this fails and says why.
+    TRUE_DUPLICATE v2 ships a heuristic on the maintainer's explicit authorisation,
+    so "it must not decide" is no longer the rule that can be enforced. The rule
+    that can be, and the one that actually protects a reader, is: it must not
+    decide while LOOKING derived. A chosen magnitude may never sit under plain
+    FROZEN, must be labelled predicate by predicate, must carry a stated rationale,
+    and must name the evidence that would retire it. FRAGMENT_MATCH states no
+    magnitude anywhere, so it must still refuse outright.
     """
     from motifmultiverse.adjudicate import packaged_criteria_path
     from motifmultiverse.schema.criteria import CriterionStatus, load_criteria
 
     shipped = load_criteria(packaged_criteria_path())
-    for criterion_id in ("TRUE_DUPLICATE", "FRAGMENT_MATCH"):
-        criterion = shipped[criterion_id]
-        assert criterion.status is CriterionStatus.CRITERION_NOT_YET_DEFINED, (
-            f"{criterion_id} became FROZEN: the frozen design states no magnitude for it, "
-            "so a threshold here was invented rather than derived"
-        )
-        assert criterion.predicates == ()
+
+    assert shipped["FRAGMENT_MATCH"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED, (
+        "FRAGMENT_MATCH became evaluable: no document states a containment ceiling "
+        "for it, and TRUE_DUPLICATE's bilateral geometry does not transfer, because "
+        "containment is not transitive"
+    )
+    assert shipped["FRAGMENT_MATCH"].predicates == ()
+
+    duplicate = shipped["TRUE_DUPLICATE"]
+    assert duplicate.status is CriterionStatus.FROZEN_DECLARED_HEURISTIC, (
+        "TRUE_DUPLICATE contains chosen magnitudes; presenting it as plain FROZEN "
+        "would make an invented threshold indistinguishable from a derived one"
+    )
+    declared = [p for p in duplicate.predicates if p.provenance == "declared"]
+    assert declared, "a FROZEN_DECLARED_HEURISTIC must name which values were chosen"
+    assert all(
+        p.provenance in ("declared", "derived") and p.basis
+        for p in duplicate.predicates
+        if p.operator in ("ge", "le")
+    ), "every threshold must say where it came from and show its working"
+    assert duplicate.declared_rationale and duplicate.replacement_evidence

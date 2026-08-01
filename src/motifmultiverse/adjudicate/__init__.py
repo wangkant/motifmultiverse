@@ -21,13 +21,17 @@ from motifmultiverse.schema import (
     RegistryMetadata,
     SchemaError,
     decision_bundle_artifact_id,
+    variant_claim_is_assigned,
 )
 from motifmultiverse.schema.annotation import AnnotationCandidate
 from motifmultiverse.schema.criteria import Criterion, evaluate_criterion
 
 __all__ = [
     "ADJUDICATION_SCHEMA_VERSION",
+    "EDGE_EVIDENCE_FIELDS",
     "AdjudicationError",
+    "at_alignment_null_floor",
+    "edge_admits_duplicate_candidate",
     "StabilityEvidence",
     "OntologyDecision",
     "stable_decision_id",
@@ -38,11 +42,21 @@ __all__ = [
     "write_adjudication_artifacts",
     "adjudicate_evidence",
     "packaged_criteria_path",
+    "packaged_legacy_criteria_path",
     "run",
 ]
 
 ADJUDICATION_SCHEMA_VERSION = "1"
-CRITERIA_RESOURCE = "criteria.v1.yaml"
+
+#: The registry loaded when ``--criteria`` is not given. Moved from
+#: ``criteria.v1.yaml`` to ``criteria.v2.yaml`` when TRUE_DUPLICATE was frozen as
+#: a declared heuristic: leaving the default on v1 would have kept the default
+#: pipeline compiling an UNDEDUPLICATED lexicon, which is the whole failure the
+#: freeze was authorised to end. ``criteria.v1.yaml`` still ships and still loads
+#: -- pass it explicitly to reproduce a pre-v2 run bit for bit, including its
+#: recorded ``criteria_sha256``.
+CRITERIA_RESOURCE = "criteria.v2.yaml"
+LEGACY_CRITERIA_RESOURCE = "criteria.v1.yaml"
 
 
 def packaged_criteria_path() -> Path:
@@ -62,6 +76,22 @@ def packaged_criteria_path() -> Path:
     from importlib.resources import as_file, files
 
     resource = files(__package__).joinpath(CRITERIA_RESOURCE)
+    with as_file(resource) as concrete:
+        return Path(concrete)
+
+
+def packaged_legacy_criteria_path() -> Path:
+    """Locate the v1 registry, retained so a pre-v2 run stays reproducible.
+
+    v1 is not loaded by anything on the default path. It ships because
+    ``--criteria <this>`` is the documented way to get the pre-v2 meaning back --
+    ``TRUE_DUPLICATE`` ``CRITERION_NOT_YET_DEFINED``, always ``DEFERRED`` -- and a
+    wheel that dropped the file would make that impossible from an installed
+    package rather than merely inconvenient.
+    """
+    from importlib.resources import as_file, files
+
+    resource = files(__package__).joinpath(LEGACY_CRITERIA_RESOURCE)
     with as_file(resource) as concrete:
         return Path(concrete)
 
@@ -350,6 +380,91 @@ def _require_registered_node_ids(
         raise AdjudicationError(f"unknown registry node_id(s): {unknown}")
 
 
+def at_alignment_null_floor(edge: AlignmentEvidence) -> bool | None:
+    """Did this pair's registration beat EVERY one of its own null shuffles?
+
+    ``align.calibrate_pair_null`` re-runs the full registration -- offset and
+    orientation search included -- on ``null_shuffles`` column-permutations of the
+    target, so the smallest p-value it can express is ``1 / (null_shuffles + 1)``.
+    Reaching that floor means the observed alignment was not matched by any shuffle
+    of this exact pair.
+
+    This is arithmetic on two recorded fields, not a chosen significance level, and
+    that is the whole reason a criterion may read it. A fixed alpha (``0.001``,
+    say) would be a magnitude nobody derived, and would silently mean something
+    different at a different ``--null-shuffles``; the floor is the estimator's own
+    resolution. It is also per-pair, so it corrects for core length: a short core
+    has to clear a similarity its own shuffles cannot reach, which no single global
+    similarity cut-off can express.
+
+    Returns ``None`` for uncalibrated evidence rather than ``False``. "This run
+    computed no null" and "this pair failed its null" are different facts, and a
+    criterion must DEFER on the first, not refuse -- which is what ``None`` gets it,
+    via ``evaluate_criterion``'s missing-evidence gate.
+    """
+    if not edge.is_calibrated or edge.empirical_p_value is None or edge.null_shuffles < 1:
+        return None
+    return bool(edge.empirical_p_value <= 1.0 / (edge.null_shuffles + 1))
+
+
+#: The per-pair evidence a criterion may read about a single alignment edge. Kept
+#: explicit rather than derived from ``dataclasses.fields(AlignmentEvidence)`` so
+#: that adding a field to ``AlignmentEvidence`` cannot silently widen what a
+#: predicate is allowed to threshold.
+#:
+#: ``overlap_bp`` and ``at_alignment_null_floor`` are the two additions v2 needed.
+#: Under bilateral ``overlap_frac == 1.0``, ``overlap_bp`` IS the shared trimmed
+#: core length, which is the only way to express a minimum core length without a
+#: new named operator; ``at_alignment_null_floor`` replaces thresholding
+#: ``empirical_p_value`` directly, which would have been a chosen alpha.
+EDGE_EVIDENCE_FIELDS = (
+    "ppm_similarity",
+    "signed_cwm_similarity",
+    "empirical_p_value",
+    "overlap_frac_source",
+    "overlap_frac_target",
+    "overlap_bp",
+    "at_alignment_null_floor",
+)
+
+
+def _edge_evidence(edge: AlignmentEvidence) -> dict[str, Any]:
+    values = {
+        name: getattr(edge, name)
+        for name in EDGE_EVIDENCE_FIELDS
+        if name != "at_alignment_null_floor"
+    }
+    values["at_alignment_null_floor"] = at_alignment_null_floor(edge)
+    return values
+
+
+def edge_admits_duplicate_candidate(criterion: Criterion, edge: AlignmentEvidence) -> bool:
+    """Whether one alignment edge satisfies a criterion's pair-geometry predicates.
+
+    ``FP-05``: "single linkage is admissible only with a declared distance
+    ceiling." ``adjudicate_all`` proposes components as connected components over
+    *every* registered edge, which is unrestricted single linkage -- on the K562
+    run that fuses all 5,171 edges into one 115-node component, which then defers
+    for non-transitivity, forever. The ceiling here is not a new number: it is the
+    duplicate criterion's own predicates, re-read as an edge filter, so the
+    proposal step and the decision step are governed by the same declared rule.
+
+    Only predicates over :data:`EDGE_EVIDENCE_FIELDS` are applied. A criterion
+    whose predicates also read component-level or stability evidence still has
+    those evaluated per-pair later, inside :func:`adjudicate_component`; this
+    function decides admission to the *proposal*, never the decision itself.
+    """
+    from motifmultiverse.schema.criteria import EVALUABLE_STATUSES, _evaluate_predicate
+
+    if criterion.status not in EVALUABLE_STATUSES:
+        return False
+    edge_predicates = [p for p in criterion.predicates if p.field in EDGE_EVIDENCE_FIELDS]
+    if not edge_predicates:
+        return False
+    evidence = _edge_evidence(edge)
+    return all(_evaluate_predicate(p, evidence) for p in edge_predicates)
+
+
 def _criterion_for(
     relationship: str,
     criteria: Mapping[str, Criterion],
@@ -464,10 +579,27 @@ def adjudicate_component(
         node_metadata.get(node_id, {}).get("variant_id")
         for node_id in members
     ]
-    distinct_variant_ids = (
-        all(isinstance(value, str) and value.strip() for value in variant_ids)
-        and len(set(variant_ids)) > 1
-    )
+    # `ingest` manufactures a unique variant_id for every node whether or not any
+    # variant identity exists, so distinctness among them is ingest's own counter,
+    # not evidence (schema.variant_claim_is_assigned). Counting those as "distinct
+    # variant identities" reads the counter back as evidence, which made
+    # SAME_FAMILY_VARIANT refuse every same-family pair the pipeline will ever see
+    # -- and TRUE_DUPLICATE unreachable, criterion or no criterion. This mirrors
+    # the exclusion of `family_id == "NA"` a few lines above; the asymmetry was the
+    # bug. Absence resolves to None (missing evidence -> DEFERRED), never to False,
+    # because "no variant identity was assigned" is not "the variants are the same".
+    assigned_variant_ids = [
+        node_metadata.get(node_id, {}).get("variant_id")
+        for node_id in members
+        if variant_claim_is_assigned(
+            node_metadata.get(node_id, {}).get("variant_assignment_source"),
+            node_metadata.get(node_id, {}).get("variant_id"),
+        )
+    ]
+    if len(assigned_variant_ids) != len(members):
+        distinct_variant_ids = None
+    else:
+        distinct_variant_ids = len(set(assigned_variant_ids)) > 1
     if family_conflict:
         relationship = "AMBIGUOUS_CROSS_FAMILY"
     elif len(proposed_families) == 1 and distinct_variant_ids:
@@ -503,7 +635,7 @@ def adjudicate_component(
         "alignment_registered": bool(pair_edges),
         "family_conflict": family_conflict,
         "same_family": family_id is not None and all(families_by_node.values()),
-        "distinct_variant_ids": distinct_variant_ids if all(variant_ids) else None,
+        "distinct_variant_ids": distinct_variant_ids,
         **stability_values,
     }
 
@@ -627,11 +759,7 @@ def adjudicate_component(
         edge = pair_edges[_pair_key(member, medoid)]
         pair_evidence = {
             **base_evidence,
-            "ppm_similarity": edge.ppm_similarity,
-            "signed_cwm_similarity": edge.signed_cwm_similarity,
-            "empirical_p_value": edge.empirical_p_value,
-            "overlap_frac_source": edge.overlap_frac_source,
-            "overlap_frac_target": edge.overlap_frac_target,
+            **_edge_evidence(edge),
         }
         evaluations.append(evaluate_criterion(criterion, pair_evidence))
 
@@ -718,10 +846,65 @@ def adjudicate_all(
             *(candidate.node_id for candidate in annotation_candidates),
         ),
     )
-    adjacency: dict[str, set[str]] = {}
     for edge in alignment_edges:
         if edge.source_node_id == edge.target_node_id:
             raise AdjudicationError("an alignment edge cannot connect a node to itself")
+
+    components = list(_connected_components(alignment_edges))
+
+    # A second, strictly ADDITIVE proposal pass under the duplicate criterion's
+    # own predicates, read as FP-05's "declared distance ceiling".
+    #
+    # The unrestricted pass above is kept exactly as it was. Its deferrals are the
+    # record that those wide clusters were considered and not licensed, and
+    # dropping them to make room for the ceiling would trade one silence for
+    # another. The ceiling only ADDS tighter sub-proposals, which is why a node can
+    # appear both in a wide deferral and in a narrow collapse -- `compile` reads
+    # COLLAPSE records only, so the deferral cannot corrupt a tier.
+    #
+    # Without this, on the K562 run every one of the 5,171 edges proposes, all 115
+    # nodes fuse into one component, that component fails the transitivity check,
+    # and the whole run produces exactly one DEFERRED decision. The criterion would
+    # be frozen and still never reached.
+    duplicate_criterion = criteria.get("TRUE_DUPLICATE")
+    if duplicate_criterion is not None:
+        admitted = [
+            edge for edge in alignment_edges
+            if edge_admits_duplicate_candidate(duplicate_criterion, edge)
+        ]
+        if admitted:
+            proposed = set(components)
+            for component in _connected_components(admitted):
+                if component not in proposed:
+                    components.append(component)
+                    proposed.add(component)
+
+    decisions = [
+        adjudicate_component(
+            component,
+            alignment_edges,
+            annotation_candidates,
+            stability_results,
+            criteria,
+            decided_by,
+            node_metadata=node_metadata,
+        )
+        for component in sorted(components)
+    ]
+    if len({decision.decision_id for decision in decisions}) != len(decisions):
+        raise AdjudicationError(
+            "component proposal produced two decisions with the same decision_id; a "
+            "considered cluster must be adjudicated exactly once"
+        )
+    return tuple(decisions)
+
+
+def _connected_components(
+    alignment_edges: Sequence[AlignmentEvidence],
+) -> tuple[tuple[str, ...], ...]:
+    """Connected components of >=2 nodes over the supplied edges, lexically ordered."""
+    adjacency: dict[str, set[str]] = {}
+    for edge in alignment_edges:
         adjacency.setdefault(edge.source_node_id, set()).add(edge.target_node_id)
         adjacency.setdefault(edge.target_node_id, set()).add(edge.source_node_id)
 
@@ -740,19 +923,7 @@ def adjudicate_all(
         remaining -= component
         if len(component) >= 2:
             components.append(tuple(sorted(component)))
-
-    return tuple(
-        adjudicate_component(
-            component,
-            alignment_edges,
-            annotation_candidates,
-            stability_results,
-            criteria,
-            decided_by,
-            node_metadata=node_metadata,
-        )
-        for component in sorted(components)
-    )
+    return tuple(sorted(components))
 
 
 def _merge_record(decision: OntologyDecision) -> DecisionRecord:
@@ -1011,6 +1182,7 @@ def _read_node_metadata(registry_dir: str | Path) -> tuple[Path, dict[str, dict[
         values = {
             "family_id": node.family_id,
             "variant_id": node.variant_id,
+            "variant_assignment_source": node.variant_assignment_source,
             "motif_completeness": node.motif_completeness,
             "seqlet_count": node.seqlet_count,
             "core_ic": node.core_ic,

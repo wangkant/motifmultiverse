@@ -209,8 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="authoritative versioned registry/ supplying variant and medoid metadata",
     )
     a.add_argument("--criteria", default=None,
-                   help="versioned executable criterion registry "
-                        "(default: the criteria.v1.yaml packaged with adjudicate)")
+                   help="versioned executable criterion registry (default: the "
+                        "criteria.v2.yaml packaged with adjudicate, whose TRUE_DUPLICATE "
+                        "is a FROZEN_DECLARED_HEURISTIC and therefore DEDUPLICATES; pass "
+                        "the packaged criteria.v1.yaml for the pre-v2 meaning, which "
+                        "always defers and leaves the lexicon undeduplicated)")
     a.add_argument("--review", default="review.yaml",
                    help="human review file to emit. It is one of this subcommand's three "
                         "output artifacts, so a RELATIVE path is resolved against --out "

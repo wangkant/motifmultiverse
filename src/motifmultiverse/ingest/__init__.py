@@ -257,6 +257,10 @@ def ingest_project(project_path: str | os.PathLike[str], out_dir: str | os.PathL
                         # The middle segment is a placeholder, not a claim: family_id
                         # is the authoritative field, and annotate is unspecified.
                         variant_id=f"{union_id}_UNASSIGNED_{counter:02d}",
+                        # ...and this is where that placeholder-ness is RECORDED,
+                        # rather than left legible only in the value's spelling
+                        # (which V-09 forbids a consumer from reading).
+                        variant_assignment_source=MISSING_SENTINEL,
                         family_id=MISSING_SENTINEL,
                         motif_length=int(cwm.shape[0]),
                         trimmed_core=[start, end],

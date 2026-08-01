@@ -81,6 +81,7 @@ where = ["src"]
 motifmultiverse = [
   "*/README.md",
   "adjudicate/criteria.v1.yaml",
+  "adjudicate/criteria.v2.yaml",
   "report/bias_ledger.tsv",
 ]
 

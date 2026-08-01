@@ -1,31 +1,79 @@
 # motifmultiverse
 
-**Bias-aware harmonization and robust inference of attribution-derived regulatory
-motifs across models and methods.**
+**A merge-auditable lexicon compiler for attribution-derived motifs, and a
+specification multiverse for the claims built on them.**
 
 ![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 ![version: 0.1.0.dev0](https://img.shields.io/badge/version-0.1.0.dev0-blue)
 ![API: unstable](https://img.shields.io/badge/API-unstable-red)
 
-> **Pre-alpha.** What this is today, stated as precisely as the code supports: an
-> **auditable motif lexicon compiler**, and a **specification-multiverse inference
-> reference implementation**. All ten analysis modules are implemented — `report`
-> was the last skeleton — and no subcommand raises `NotImplementedError` any more.
-> `multiverse` runs a predeclared grid over one frozen dataset, records every
-> planned cell including the refused and the non-estimable ones, and summarises
-> stability **within** each estimand: two baseline populations are two questions,
-> and a guard refuses a summary that averages across them. Implemented is not
-> complete, and one gap matters before the name misleads you: the adjudication
-> criteria this package ships leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH`
-> undefined, so the
-> default pipeline defers every duplicate and compiles an **undeduplicated**
-> lexicon by design. The collapse path is implemented and tested; what is missing
-> is a validated merge policy, which is a scientific decision nobody has frozen.
-> `report` renders markdown only and prints `NOT RECORDED` for the fields no
-> artifact carries. The API is unstable and the per-module table in
-> [Implementation status](#implementation-status) is generated from the CLI
-> dispatch table rather than maintained by hand, because it was wrong twice before
-> it was generated. Read that section before investing time.
+## What it does
+
+Run TF-MoDISco on several models, readouts or cell contexts and you get several
+sets of motifs that partly describe the same biology. Before anything can be
+compared across them, somebody has to decide which motifs are *the same motif*.
+That decision is usually made by a similarity threshold, applied once, recorded
+nowhere.
+
+This package makes it an auditable step. It ingests the discovery outputs into
+one registry, registers every pair of motifs against a per-pair null, retains
+competing database annotations instead of picking one, and adjudicates each
+candidate relationship into a first-class record — collapsed, refused, deferred,
+or overridden — carrying the evidence and the criterion that produced it. The
+compiled lexicons are content-addressed and verified by reading them back with
+the real hit caller.
+
+It then answers questions over a frozen hit table, and answers them across the
+grid of defensible specifications rather than one: different baseline
+populations, different lexicons, different estimators. Stability is summarised
+within each estimand and never across, because an effect measured against one
+baseline and an effect measured against another are answers to two questions.
+
+**The recurring subject is absence.** A motif that was not searched, one that was
+searched and not retained, one no lexicon contains, and one whose effect is a
+measured zero are four different facts, and every artifact here keeps them apart.
+The package exists because collapsing them to zero produced a coverage figure of
+1.000000 that corroborated its own error.
+
+## What it does not do
+
+It does not compute attributions, discover motifs, or re-implement a hit caller;
+it consumes their output. It does not average across baseline populations, and a
+guard refuses a summary that tries. It does not invent a threshold: a magnitude
+the frozen design does not state is either derived from a named artifact and
+column, or declared as a heuristic with its costs and an exit condition, and the
+loader refuses a file that claims the first without resolving to it.
+
+## Status
+
+Pre-alpha; the API is unstable. All ten stages are implemented and no subcommand
+raises `NotImplementedError`.
+
+**Read this before running it on work you care about.** The default adjudication
+criteria now include a preregistered `TRUE_DUPLICATE` rule, so **a default run
+deletes motifs**. That rule is checksummed in
+[`docs/MERGE_CRITERION_PREREGISTRATION.md`](docs/MERGE_CRITERION_PREREGISTRATION.md)
+together with what it predicted, what would falsify it, and what happened on
+held-out data — where it fired two of its own falsifiers on the single-context
+configuration. Three properties matter more than the fact that it exists:
+
+- its error direction is **deletion**, which the reader of a lexicon cannot undo;
+- it merges on geometry, while this package's own stated principle is that merges
+  are validated downstream — the reconstruction evidence that principle asks for
+  was measured on real data and found to have **no power** to distinguish a
+  correct merge from deleting motifs of comparable mass;
+- against plain TomTom merging it wins by **refusing**, not by finding: on the
+  reference registry every pair it merged, TomTom merged too, and it merged none
+  that TomTom did not.
+
+Pass `--criteria` the packaged `criteria.v1.yaml` to defer every duplicate and
+compile an undeduplicated lexicon, which is what earlier releases did.
+
+`report` renders markdown only and prints `NOT RECORDED` for the fields no
+artifact carries. The per-module table in
+[Implementation status](#implementation-status) is generated from the CLI dispatch
+table rather than maintained by hand, because it was wrong twice before it was
+generated.
 
 ## Quickstart
 
@@ -288,7 +336,12 @@ though it were a measured *p* value.
 - **Representation and identity are separate.** A CWM belongs to one model and
   readout; `family_id` / `variant_id` are the ontology that crosses them.
 - **Merges are validated downstream, not by similarity.** Two motifs are the same
-  when collapsing them does not degrade reconstruction.
+  when collapsing them does not degrade reconstruction. This is the design
+  principle and the shipped criterion **does not satisfy it**: reconstruction was
+  measured on real data and had no power to separate a correct merge from
+  deleting motifs of comparable mass, so the frozen rule falls back on geometry.
+  Stated here rather than quietly dropped, because the gap between the principle
+  and the rule is the most important thing to know about the merge policy.
 - **The output is stability and uncertainty**, not one absolute lexicon.
 
 ### Four findings from the reference implementation
@@ -402,15 +455,23 @@ the affected subset of frozen standardized hit tables. An all-peak delta remains
 a dilution diagnostic: fewer than 30 affected peaks are recorded as
 `LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim.
 
-Undefined scientific thresholds remain explicitly deferred, and this is the second
-thing to know before the name misleads you: the criteria this package **ships**
-(`adjudicate/criteria.v1.yaml`) leave `TRUE_DUPLICATE` and `FRAGMENT_MATCH` at
-`CRITERION_NOT_YET_DEFINED`, so the **default** run defers every duplicate and every
-fragment and compiles an undeduplicated lexicon rather than guess a merge. The
-collapse path is implemented and exercised end to end, but against thresholds the
-caller supplies. That makes this release a strict **adjudication framework**, not a
-harmonizer with a validated merge policy — an accurate description of where the
-science is, not a gap in the code.
+One threshold has been frozen and the rest have not. `TRUE_DUPLICATE` now carries
+a preregistered rule in `adjudicate/criteria.v2.yaml`, the default, so a default
+run collapses duplicates and **removes motifs**. `FRAGMENT_MATCH` remains
+`CRITERION_NOT_YET_DEFINED` and every fragment still defers.
+
+The frozen rule is a declared heuristic and says so in its own status field. Its
+magnitudes were anchored on one registry, its predictions were registered and
+checksummed before the held-out run, and the held-out run is reported whether or
+not it flattered them — it did not, on the single-context configuration, where two
+of the rule's own falsifiers fired. What no run available to this project can
+establish is **correctness**: there is no labelled set of same-motif pairs, and
+the downstream test the design principle asks for has no power at this operating
+point. A held-out run therefore shows the rule is *consistent*, never that it is
+*right*, and nothing here reports it otherwise.
+
+`adjudicate/criteria.v1.yaml` still ships. Pass it to `--criteria` for the earlier
+behaviour: every duplicate deferred, an undeduplicated lexicon, no motif removed.
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) states milestones M0–M5 by completion criteria
 rather than dates.

@@ -1,0 +1,416 @@
+# Executable adjudication criteria, file format version 2
+# (schema.criteria.load_criteria). This is the registry the package ships and
+# loads by default.
+#
+# WHAT CHANGED FROM v1, AND WHY THERE ARE TWO FILES
+#
+# criteria.v1.yaml is still present, still loads, and still means exactly what it
+# meant: TRUE_DUPLICATE CRITERION_NOT_YET_DEFINED, no predicates, always DEFERRED.
+# A run pinned to it with `--criteria .../criteria.v1.yaml` is unaffected by
+# anything below, which is the point of not editing it in place -- an existing,
+# checksummed run must not change meaning silently (its digest is recorded into
+# every decision as `criteria_sha256`).
+#
+# The format grew two things v1 does not have, which is why the version bumped:
+#
+#   * predicate-level `provenance` (declared | derived) + `basis`. From v2 on the
+#     loader REFUSES any `ge`/`le` that does not say where its magnitude came
+#     from. v1 files are exempt, because the key did not exist when they were
+#     written -- a v1 file with no provenance is a different fact from a v2 file
+#     omitting it.
+#   * criterion-level `declared_rationale` + `replacement_evidence`, required by
+#     the new FROZEN_DECLARED_HEURISTIC status.
+#
+# THE STATUS THAT MAKES THE DIFFERENCE READABLE
+#
+# FROZEN               -- evaluable; every magnitude follows from something.
+# FROZEN_DECLARED_HEURISTIC
+#                      -- evaluable; at least one magnitude was CHOSEN BY A
+#                         MAINTAINER. Every decision it emits, on match and on
+#                         refusal, is stamped [DECLARED-NOT-DERIVED: ...] naming
+#                         the chosen magnitudes, so the caveat reaches
+#                         ontology_decisions.parquet and not just this file.
+# CRITERION_NOT_YET_DEFINED
+#                      -- not evaluable; always DEFERRED.
+#
+# See docs/CONSTRAINTS.md (FP-04, FP-05, FP-08, FP-13) and docs/CONCEPT.md.
+schema_version: "2"
+
+criteria:
+  # ---------------------------------------------------------------------------
+  # TRUE_DUPLICATE v2 -- FROZEN_DECLARED_HEURISTIC.
+  #
+  # v1 was CRITERION_NOT_YET_DEFINED, waiting on a reconstruction-loss magnitude
+  # no document states. The consequence was that the DEFAULT pipeline compiled an
+  # undeduplicated lexicon -- the package's core promise, undelivered. The
+  # maintainer authorised freezing a criterion, "even a heuristic one", and
+  # validating it. This is that criterion, and the status says plainly which of
+  # its numbers were chosen and which follow from something.
+  #
+  # WHY NOT RECONSTRUCTION LOSS, WHICH v1 ASKED FOR
+  # It was measured on the K562 13-cluster case study and is NOT known to be
+  # falsified -- but it is not usable either, for a reason worth stating exactly,
+  # because an earlier draft of this file overclaimed it. The n=9 pair set in
+  # casestudy/pair_stability.tsv contains NO duplicate candidate under this
+  # criterion's own geometry: eight pairs have empirical_p_value 0.007992-0.904096
+  # (never at the 1/1001 null floor), and the ninth, at the floor with
+  # ppm_similarity 0.999167, has overlap_frac_source 0.777778 -- fragment
+  # geometry, not duplicate geometry. The null result was therefore measured
+  # entirely on non-duplicates, and on the MEDIAN delta (range 0 to 1.162e-05)
+  # rather than the mean (which ranges -6.75e-04 to +3.12e-03 over the same
+  # substrate, merge/dup_stability.tsv). Reconstruction is left out of the
+  # predicates for lack of POWER, demonstrated below in replacement_evidence, and
+  # not because it was shown to be degenerate. It should be recomputed on real
+  # duplicates before anyone treats it as settled.
+  #
+  # v2 predicates on the geometry the alignment stage already computes. Four
+  # magnitudes are DERIVED, two are DECLARED. Read each `basis`.
+  - criterion_id: TRUE_DUPLICATE
+    version: "2"
+    status: FROZEN_DECLARED_HEURISTIC
+    relationship: TRUE_DUPLICATE
+    required_evidence:
+      - at_alignment_null_floor
+      - overlap_frac_source
+      - overlap_frac_target
+      - overlap_bp
+      - signed_cwm_similarity
+      - ppm_similarity
+    predicates:
+      # --- DERIVED: the instrument's own resolution, not a chosen alpha --------
+      # No provenance/basis keys, and that is deliberate: `is_true` is not an
+      # ordered comparison and carries no magnitude, so the loader REFUSES
+      # provenance on it. The derivation lives in the helper that computes the
+      # field -- adjudicate.at_alignment_null_floor, which is
+      # `empirical_p_value <= 1/(null_shuffles+1)`, i.e. "the observed alignment
+      # was not matched by any shuffle of this exact pair". Writing
+      # `empirical_p_value le 0.001` instead would have been a chosen alpha that
+      # silently means something different at a different --null-shuffles; on
+      # this run the two select the identical 272 edges
+      # (casestudy/distributions.tsv reports 272 at the 1/1001 floor).
+      - field: at_alignment_null_floor
+        operator: is_true
+
+      # --- DERIVED: structural definitions, not tuned cuts --------------------
+      - field: overlap_frac_source
+        operator: ge
+        value: 1.0            # 1.0 = "the whole trimmed core is inside the alignment"; the
+                              # boundary adjudicate ALREADY uses to split TRUE_DUPLICATE from
+                              # FRAGMENT_MATCH. 312/5171 edges meet the bilateral form
+                              # (casestudy/distributions.tsv).
+        provenance: derived
+        derived_from: {evidence_domain: overlap_frac_source, endpoint: max}
+        basis: >-
+          RESOLVED: 1.0 is the top of the interval align validates this field into
+          ([0.0, 1.0], schema.EVIDENCE_FIELD_DOMAINS), so the loader recomputes it
+          rather than taking this label on trust. What that check establishes is
+          only that the number was not chosen -- it is the field's own ceiling.
+          The ARGUMENT, which no loader can check, is that the ceiling is the
+          right place to gate: 1.0 is the definition of "the whole of this motif's
+          trimmed core is inside the alignment", and adjudicate_component already
+          uses exactly this boundary to separate TRUE_DUPLICATE from
+          FRAGMENT_MATCH (`overlap_frac_source < 1.0 or overlap_frac_target < 1.0`
+          -> FRAGMENT_MATCH), so restating it here introduces no number the
+          package did not already contain. On the K562 run 312 of 5171 registered
+          edges satisfy the bilateral form (casestudy/distributions.tsv).
+      - field: overlap_frac_target
+        operator: ge
+        value: 1.0            # same definition, other side. Source: as above.
+        provenance: derived
+        derived_from: {evidence_domain: overlap_frac_target, endpoint: max}
+        basis: >-
+          Bilateral form of the same definition, and resolved the same way against
+          its own field's ceiling. Required separately because a one-sided 1.0 is a
+          fragment inside a longer parent, which is FRAGMENT_MATCH's case, not this
+          one.
+      - field: signed_cwm_similarity
+        operator: ge
+        value: 0.0            # the SIGN boundary, not a magnitude. q25 of this field over
+                              # the 5171 edges is -0.4641 (casestudy/distributions.tsv), so
+                              # sign-flipped pairs are common and this gate is load-bearing:
+                              # it removes 84 of the 312 bilateral edges (merge/sweep.py).
+        provenance: derived
+        derived_from: {evidence_domain: signed_cwm_similarity, endpoint: sign_boundary}
+        basis: >-
+          RESOLVED: this field is validated into [-1.0, 1.0]
+          (schema.EVIDENCE_FIELD_DOMAINS), a range that straddles zero, so 0.0 is
+          its sign boundary and the loader recomputes it. The `sign_boundary`
+          endpoint is refused on a field that never changes sign, which is what
+          stops this from being a floor dressed up as a sign test.
+          Zero is the sign boundary, not a magnitude. align registers on UNSIGNED
+          ppm precisely so that sign-flipped pairs stay visible rather than being
+          silently matched (align: registered_on='unsigned_ppm'); q25 of
+          signed_cwm_similarity over the 5171 registered edges is -0.4641
+          (casestudy/distributions.tsv). Collapsing across the sign merges a
+          driver with a repressor. On the 312 bilateral edges this gate removes 84
+          (312 -> 228), and it is why no collapse in the rule sweep mixes a
+          pos-metacluster node with a neg-metacluster one.
+          Its MARGINAL effect at the shipped operating point is much smaller and
+          is stated here so the 84 cannot be read as this gate's contribution:
+          once the null-floor gate has also been applied, 107 bilateral edges
+          remain and the sign gate removes exactly ONE of them (107 -> 106). That
+          one edge is the cl0/pattern_11 -- cl7/neg pattern_1 pair, 0.977 similar
+          on unsigned ppm and -0.976 on the signed CWM, pinned in
+          tests/test_true_duplicate_criterion.py. A gate that fires once is still
+          worth having when the thing it prevents is merging a driver into a
+          repressor, but it is not doing 84 edges' worth of work.
+
+      # --- DECLARED: chosen by a maintainer -----------------------------------
+      - field: ppm_similarity
+        operator: ge
+        value: 0.90           # DECLARED. Anchored to this run's q90 = 0.8721 over all 5171
+                              # edges (casestudy/distributions.tsv). MEASURED CAVEAT: the run
+                              # is bit-identical for any S in [0.70, 0.95] at overlap_bp=8 --
+                              # and NOT monotone above it: S=0.96 removes MORE motifs (10)
+                              # than the plateau (9). Full table and mechanism in
+                              # docs/MERGE_CRITERION_PREREGISTRATION.md.
+        provenance: declared
+        basis: >-
+          DECLARED. Anchored to the run's own distribution -- 0.90 sits just above
+          q90 of all 5171 registered edges (0.8721,
+          casestudy/distributions.tsv), so it reads "top decile of what alignment
+          registered at all". Measured caveat, not assumed: this predicate is
+          nearly INERT at the shipped operating point, because the derived
+          null-floor gate above already implies high similarity. At overlap_bp=8
+          the whole run is bit-identical for every value in [0.70, 0.95] --
+          collapse_set_fingerprint f4362c36dbd3, 139 -> 130 core motifs, for S in
+          {0.70, 0.80, 0.90, 0.93, 0.95}.
+          NOT MONOTONE, and this was omitted from an earlier draft of this file:
+          raising S past the plateau removes MORE motifs, not fewer. S=0.96 and
+          S=0.97 each remove 10 (139 -> 129, fingerprint 37ed841cb2bb) against the
+          plateau's 9. The cause is structural rather than incidental --
+          `adjudicate.edge_admits_duplicate_candidate` re-reads these same
+          predicates as the component-proposal edge filter (FP-05's distance
+          ceiling), so raising a threshold does not merely drop candidate pairs, it
+          RE-PARTITIONS the graph. At S=0.95 the pair (cl2/pattern_6,
+          cl3/pattern_6) sits inside an 11-node component refused for
+          family_conflict; at S=0.96 the lost edges split that component into a
+          9-node refusal plus this pair alone, which then has no conflict left to
+          refuse it and collapses. A reader must not assume a stricter-looking
+          threshold is a more conservative one. Above that, S=0.98 removes 7 and
+          S=0.99 removes 2. All 54 swept cells are in
+          docs/MERGE_CRITERION_PREREGISTRATION.md, re-measured end to end through
+          the real adjudicate and compile stages on this HEAD.
+          0.90 is kept as a floor that does not depend on shuffle count, so a
+          future run with a coarser null is still gated -- not because it is doing
+          work here. A release that promoted it to `derived` on the strength of
+          this run would be promoting an untested number, and the loader would
+          refuse it anyway: 0.90 is not a landmark of ppm_similarity's [-1.0, 1.0]
+          domain, which is exactly the check that makes `derived` mean something.
+      - field: overlap_bp
+        operator: ge
+        value: 8              # DECLARED, and the only chosen number that moves the answer
+                              # WITHIN the plateau. 8 = median registry trimmed-core length
+                              # (q50 = 8, casestudy/distributions.tsv "registry: trimmed_core
+                              # length"), above align's 6 bp bilateral admission floor.
+                              # MEASURED at S=0.90: B=6 -> 13 motifs removed, B=7 -> 11,
+                              # B=8/10/12 -> 9, B=14 -> 1. 8 is the LOWER, more aggressive
+                              # edge of the B=8..12 plateau.
+        provenance: declared
+        basis: >-
+          DECLARED. Under the two bilateral 1.0 predicates, overlap_bp IS the
+          shared trimmed-core length, so a `ge` expresses a minimum core length
+          with no new operator. 8 bp is the median trimmed core in the K562
+          registry (q50 = 8, casestudy/distributions.tsv) and sits above align's
+          6 bp bilateral admission floor, which the case study flags as written
+          for longer motifs. Measured through the real adjudicate + compile stages
+          with THIS criterion at S=0.90, on this HEAD: B=6 -> 13 motifs removed,
+          B=7 -> 11, B=8/10/12 -> 9, B=14 -> 1
+          (docs/MERGE_CRITERION_PREREGISTRATION.md, sweep table). The extra
+          collapses at B=6-7 are 6-7 bp ETS cores (bare GGAA half-sites), where
+          the criterion would be merging detectors the package cannot show are the
+          same. There is a plateau at B=8..12; 8 is its LOWER, more aggressive
+          edge, and a reviewer preferring 10 or 12 would be reading the same
+          plateau more conservatively. It is reasoning, not a derivation.
+          The B=6 figure was 12 in an earlier draft of this file. It is 13 on this
+          HEAD, because the short-motif annotation rule now measures the trimmed
+          core rather than the padded window and 68 of 6,430 annotation candidates
+          changed their low_confidence flag as a result, which moved one family
+          resolution. The number changed under the criterion without the criterion
+          changing -- which is the ordinary reason a case-study figure has to name
+          the commit it was measured on.
+    insufficient_evidence_action: deferred
+    decision_if_matched: collapse
+
+    declared_rationale: >-
+      ppm_similarity ge 0.90 and overlap_bp ge 8 were chosen by a maintainer. No
+      document in this package states a minimum similarity or a minimum shared
+      core length for two motifs to be the same motif, and no null calibrated on
+      this run supplied one that survived inspection. The criterion is frozen
+      anyway, on the maintainer's explicit authorisation, because the alternative
+      -- shipping an undeduplicated lexicon indefinitely -- is the larger failure.
+      The answer is flat in both numbers over a wide box: the declared pair can
+      move anywhere in ppm_similarity [0.70, 0.95] x overlap_bp [8, 12] and the
+      K562 run produces a bit-identical result -- 15 of the 54 swept cells, each
+      re-run end to end through the real adjudicate and compile stages, identified
+      by a hash of the collapse membership (fingerprint f4362c36dbd3; 139 -> 130
+      core motifs in every one). Where the plateau ends is stated too:
+      overlap_bp 6 removes 13, overlap_bp 14 removes 1, ppm_similarity 0.98
+      removes 7, ppm_similarity 0.99 removes 2 -- AND ppm_similarity 0.96/0.97
+      remove 10, which is MORE than the plateau's 9. The full table and the reason
+      the response is not monotone are in
+      docs/MERGE_CRITERION_PREREGISTRATION.md and in the ppm_similarity basis
+      above. Flatness inside a box is not the same claim as monotonicity at its
+      edge, and only the first is true here. Every decision this criterion emits,
+      on match and on refusal, is stamped [DECLARED-NOT-DERIVED: ...] naming both
+      magnitudes.
+
+      WHAT THE FLATNESS IS NOT EVIDENCE OF. Both declared magnitudes were anchored
+      on the K562 run's own distribution and then validated by sweeping collapse
+      outcomes on that same run. FP-13 requires a merge-rule parameter set to be
+      written and checksummed BEFORE that pair's result is seen, and forbids
+      retuning after the fact; a plateau found by looking at the answers is not a
+      preregistration, and this file cited FP-13 while doing the thing FP-13
+      names. So: nothing measured on K562 is evidence that these magnitudes
+      transfer. The transfer claim is preregistered separately, with numeric
+      predictions and named falsifiers, in
+      docs/MERGE_CRITERION_PREREGISTRATION.md, and is settled against GM12878 --
+      a cell type this criterion has never been run on -- and not here.
+
+      KNOWN COST 1, not mitigated by anything in v2: this criterion merges
+      paralogs, in the destructive direction. One of the four collapses it
+      licenses on the K562 run merges CTCF with CTCFL/BORIS -- both resolve to
+      C2H2_ZINC_FINGER_FACTORS so family_conflict never fires, and the pair clears
+      every predicate comfortably (overlap_bp 14, both overlap fracs 1.0,
+      ppm_similarity 0.97413, signed_cwm_similarity 0.981337, at the null floor;
+      casestudy/evidence/alignment_edges.parquet). In K562, CTCFL is a real,
+      separately regulated factor. That is 1 of 4 collapses, and the error
+      direction is DELETION -- irreversible for the reader of the lexicon --
+      rather than the status quo's inflation. The fix is the first
+      replacement_evidence entry and it is NOT implemented.
+
+      KNOWN COST 2, an FP-08 REGRESSION, and it is a regression rather than a
+      correction. v1's TRUE_DUPLICATE required BOTH fields FP-08 names for a
+      redundancy claim -- `paired_delta_reconstruction_affected` and
+      `affected_coefficient_share`. v2 requires NEITHER, so under FP-08's own
+      audit test ("FAIL if either field is absent") this criterion fails. Dropping
+      reconstruction is argued above and below: it was measured and shown to lack
+      power. Dropping the coefficient share is NOT argued, and was silently
+      unmentioned in an earlier draft of this file. The honest account is
+      mechanical, not principled: putting either field back into required_evidence
+      takes this criterion from 4 collapses to 0 on the K562 run -- every
+      component defers for missing evidence and the lexicon stays at 139, which is
+      exactly v1's state -- because `validate` binds a StabilityResult to a single
+      decision_id and this run has one such row, matching none of these
+      components. So v2 collapses motifs on geometry alone, having checked neither
+      piece of downstream redundancy evidence the design says a collapse needs.
+      That is the cost of it functioning at all, and the third
+      replacement_evidence entry (a per-pair decision_id) is what would let a
+      future version pay it instead.
+    replacement_evidence:
+      - >-
+        A sub-family discriminator, to close the paralog merge above. tomtom
+        already separates the two by five orders of magnitude -- the cl4 node best-
+        matches CTCF_MOUSE.H11MO.0.A at q=1.61e-10 while the cl5 node best-matches
+        CTCFL_MOUSE.H11MO.0.A at q=3.06e-11 with CTCF_MOUSE only q=1.96e-06
+        (casestudy/evidence/annotation_candidates.parquet) -- but no evidence field
+        carries it. A `best_matched_motif_id` equality field on the pair evidence
+        would express this with the existing `eq` operator, no new operator and no
+        new magnitude. This is the single highest-value item on this list.
+      - >-
+        A discriminating downstream estimand, now MEASURED and available.
+        hit_jaccard between the pre- and post-collapse hit sets separates the mass
+        control (0.7070, dropping the highest-mass motif, coefficient share
+        0.0597) from all 18 gate-passing duplicate collapses (0.9477-0.9846) and
+        from the device null (0.9995) -- merge/dup_stability.tsv. That is the gap
+        the bootstrap interval on reconstruction NLL does not have: the same mass
+        control PASSES an `affected_delta_lower le 0.0` clause with CI
+        (-8.02e-04, +2.91e-04), so that clause has too little power to license a
+        collapse. Retire BOTH declared magnitudes when hit_jaccard (or an
+        equivalent hit-recall estimand) is computed inside adjudicate and its
+        separating boundary is calibrated on labelled same/different pairs.
+      - >-
+        A per-pair decision_id. StabilityResult binds to a decision_id and
+        stable_decision_id hashes a WHOLE component's sorted node_ids, so pair-
+        level stability evidence has nothing to attach to; the case study's nine
+        results had to be produced by calling validate.evaluate_stability directly
+        and could not enter adjudicate at all.
+      - >-
+        A held-out peak split frozen BEFORE motif discovery. MoDISco consumed every
+        peak in every cluster, so decision set == validation set and
+        AnalysisMode.PRIMARY is unreachable; the case study ran EXPLORATORY with
+        all peaks role DISCOVERY. This is upstream of this package.
+      - >-
+        Substrate coverage beyond one cluster. All hit-level evidence on this run
+        is cl0 only (2,639 of ~33,917 K562 peaks); a merge of motifs absent from
+        cl0 yields n_affected_peaks=0 and LOW_RISK_RARE_NOT_VALIDATED regardless of
+        merit.
+      - >-
+        Orthogonal ground truth for the collapses this criterion licenses, e.g.
+        ChIP-seq co-occupancy or a curated database's own synonymy, against which
+        the K562 collapses could be scored rather than merely inspected.
+
+  # ---------------------------------------------------------------------------
+  # FRAGMENT_MATCH -- one motif registers (align/__init__.py's AlignmentEvidence)
+  # as a bilateral-overlap sub-window of another. Collapsing a fragment into its
+  # parent is still a collapse, so it inherits Concept principle 2's
+  # downstream-validation requirement, and FP-05's remaining clause ("single
+  # linkage is admissible only with a declared distance ceiling").
+  #
+  # UNCHANGED FROM v1, ON PURPOSE. The maintainer authorised freezing ONE
+  # criterion. Nothing here derives a containment ceiling, and TRUE_DUPLICATE's
+  # geometry does not transfer: containment is not transitive (a short core inside
+  # two long ones says nothing about whether the two long ones are related), so
+  # the duplicate rule's bilateral predicates are exactly what a fragment rule
+  # cannot borrow. It stays CRITERION_NOT_YET_DEFINED and always DEFERS.
+  - criterion_id: FRAGMENT_MATCH
+    version: "1"
+    status: CRITERION_NOT_YET_DEFINED
+    relationship: FRAGMENT_MATCH
+    required_evidence:
+      - overlap_frac_source
+      - overlap_frac_target
+      - paired_delta_reconstruction_affected
+    predicates: []
+    insufficient_evidence_action: deferred
+
+  # ---------------------------------------------------------------------------
+  # SAME_FAMILY_VARIANT -- FP-03: cross-model identity travels by family_id /
+  # variant_id. Two nodes agreeing on family_id but keeping distinct variant_ids
+  # are legitimately separate detectors, not a merge candidate. This is a
+  # structural equality check over identity fields, not a magnitude comparison --
+  # both evidence fields are booleans the caller derives from MotifNode identity
+  # (never a raw similarity score) -- so it can be FROZEN without inventing a
+  # threshold. UNCHANGED FROM v1.
+  #
+  # `distinct_variant_ids` now resolves to None, not True, when no stage assigned
+  # a variant identity (schema.variant_claim_is_assigned): ingest manufactures a
+  # unique placeholder per node, and counting those as distinct identities read
+  # ingest's own counter back as evidence.
+  - criterion_id: SAME_FAMILY_VARIANT
+    version: "1"
+    status: FROZEN
+    relationship: SAME_FAMILY_VARIANT
+    required_evidence:
+      - same_family
+      - distinct_variant_ids
+    predicates:
+      - field: same_family
+        operator: is_true
+      - field: distinct_variant_ids
+        operator: is_true
+    insufficient_evidence_action: deferred
+    decision_if_matched: refuse_merge
+
+  # ---------------------------------------------------------------------------
+  # AMBIGUOUS_CROSS_FAMILY -- two annotation backends propose conflicting,
+  # non-flagged family_id for nodes that align has already registered as a
+  # candidate pair (schema/annotation.py's AnnotationCandidate rows never
+  # overwrite one another by design, so a conflict is visible as two rows, not a
+  # missing one). "Was this pair registered as a candidate at all" is a presence
+  # fact upstream already established, not a similarity magnitude this criterion
+  # invents. Structural, so FROZEN. UNCHANGED FROM v1.
+  - criterion_id: AMBIGUOUS_CROSS_FAMILY
+    version: "1"
+    status: FROZEN
+    relationship: AMBIGUOUS_CROSS_FAMILY
+    required_evidence:
+      - family_conflict
+      - alignment_registered
+    predicates:
+      - field: family_conflict
+        operator: is_true
+      - field: alignment_registered
+        operator: is_true
+    insufficient_evidence_action: deferred
+    decision_if_matched: refuse_merge

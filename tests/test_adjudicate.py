@@ -99,15 +99,35 @@ def test_criterion_loader_loads_the_four_v1_relationships():
 
 
 def test_criterion_loader_marks_undefined_thresholds_correctly():
-    """TRUE_DUPLICATE / FRAGMENT_MATCH need a magnitude threshold the frozen
-    design does not state and must stay CRITERION_NOT_YET_DEFINED; the two
-    structural, categorical criteria may be FROZEN.
+    """FRAGMENT_MATCH still needs a magnitude the frozen design does not state and
+    stays CRITERION_NOT_YET_DEFINED; the two structural, categorical criteria stay
+    FROZEN; TRUE_DUPLICATE is FROZEN_DECLARED_HEURISTIC, which is evaluable but can
+    never be mistaken for one whose numbers were derived.
     """
     criteria = load_criteria(CRITERIA_PATH)
-    assert criteria["TRUE_DUPLICATE"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
+    assert criteria["TRUE_DUPLICATE"].status is CriterionStatus.FROZEN_DECLARED_HEURISTIC
     assert criteria["FRAGMENT_MATCH"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
     assert criteria["SAME_FAMILY_VARIANT"].status is CriterionStatus.FROZEN
     assert criteria["AMBIGUOUS_CROSS_FAMILY"].status is CriterionStatus.FROZEN
+
+
+def test_the_legacy_v1_registry_still_ships_and_still_means_what_it_meant():
+    """`--criteria .../criteria.v1.yaml` must keep reproducing a pre-v2 run.
+
+    Freezing TRUE_DUPLICATE changed the DEFAULT, not the meaning of an existing
+    pinned registry. A v1 file's thresholds carry no `provenance` because the key
+    did not exist when it was written; the loader must keep reading it, and
+    TRUE_DUPLICATE there must still be CRITERION_NOT_YET_DEFINED with no predicates.
+    """
+    from motifmultiverse.adjudicate import packaged_legacy_criteria_path
+
+    legacy = load_criteria(packaged_legacy_criteria_path())
+    assert legacy["TRUE_DUPLICATE"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
+    assert legacy["TRUE_DUPLICATE"].predicates == ()
+    assert legacy["TRUE_DUPLICATE"].version == "1"
+    assert evaluate_criterion(
+        legacy["TRUE_DUPLICATE"], _complete_duplicate_evidence()
+    ).decision is Decision.DEFERRED
 
 
 def test_criterion_loader_rejects_unknown_predicate_operator(tmp_path):
@@ -370,13 +390,17 @@ def test_undefined_criterion_returns_deferred_not_a_guessed_decision():
     assert decision.decision is Decision.DEFERRED
 
 
-def test_true_duplicate_is_already_criterion_not_yet_defined_in_the_shipped_registry():
-    """The registry itself must not have quietly filled this in already: loading
-    the real file and evaluating TRUE_DUPLICATE with complete evidence must still
-    defer, with no `replace()` needed.
+def test_true_duplicate_v2_no_longer_reads_the_underpowered_reconstruction_evidence():
+    """v1 required paired_delta_reconstruction_affected + family_coefficient_share
+    and deferred forever waiting on a magnitude for them. v2 does not read either
+    field, so supplying them can no longer make the criterion evaluable -- and
+    their absence can no longer block it. The old evidence bundle alone is now
+    simply insufficient: DEFERRED, not a guess in either direction.
     """
     criterion = load_criteria(CRITERIA_PATH)["TRUE_DUPLICATE"]
-    assert criterion.status is CriterionStatus.CRITERION_NOT_YET_DEFINED
+    assert "paired_delta_reconstruction_affected" not in criterion.required_evidence
+    assert "family_coefficient_share" not in criterion.required_evidence
+
     decision = evaluate_criterion(criterion, _complete_duplicate_evidence())
     assert decision.decision is Decision.DEFERRED
     assert decision.matched is False
@@ -1398,7 +1422,15 @@ def test_cli_adjudicate_refuses_all_unknown_evidence_node_ids(tmp_path, capsys):
             "status": "FROZEN",
             "relationship": "TRUE_DUPLICATE",
             "required_evidence": ["ppm_similarity"],
-            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.0}],
+            # schema_version 2 refuses an unattributed threshold, and now refuses
+            # a `derived` one that names no resolvable source. 0.0 is genuinely
+            # derivable here -- ppm_similarity is validated into [-1.0, 1.0], so
+            # 0.0 is its sign boundary -- and the loader recomputes it. The
+            # predicate exists to admit the pair, not to gate it.
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.0,
+                            "provenance": "derived", "basis": "test fixture",
+                            "derived_from": {"evidence_domain": "ppm_similarity",
+                                             "endpoint": "sign_boundary"}}],
             "insufficient_evidence_action": "deferred",
             "decision_if_matched": "collapse",
         }],
@@ -1481,7 +1513,16 @@ def test_real_ingest_registry_completeness_resolves_before_missing_recurrence(
             "status": "FROZEN",
             "relationship": "TRUE_DUPLICATE",
             "required_evidence": ["ppm_similarity"],
-            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.9}],
+            # Was `ge 0.9` labelled `derived`, which is the exact forgery
+            # tests/test_derived_provenance.py now refuses: 0.9 follows from
+            # nothing. This test is about which node becomes the representative,
+            # not about where the gate sits, so the predicate is the resolvable
+            # sign boundary of ppm_similarity's [-1.0, 1.0] range. The fixture
+            # edges sit at 0.99 and collapse under either value.
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.0,
+                            "provenance": "derived", "basis": "test fixture",
+                            "derived_from": {"evidence_domain": "ppm_similarity",
+                                             "endpoint": "sign_boundary"}}],
             "insufficient_evidence_action": "deferred",
             "decision_if_matched": "collapse",
         }],
@@ -1527,7 +1568,16 @@ def test_cli_adjudicate_registry_metadata_changes_the_representative(tmp_path):
             "status": "FROZEN",
             "relationship": "TRUE_DUPLICATE",
             "required_evidence": ["ppm_similarity"],
-            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.9}],
+            # Was `ge 0.9` labelled `derived`, which is the exact forgery
+            # tests/test_derived_provenance.py now refuses: 0.9 follows from
+            # nothing. This test is about which node becomes the representative,
+            # not about where the gate sits, so the predicate is the resolvable
+            # sign boundary of ppm_similarity's [-1.0, 1.0] range. The fixture
+            # edges sit at 0.99 and collapse under either value.
+            "predicates": [{"field": "ppm_similarity", "operator": "ge", "value": 0.0,
+                            "provenance": "derived", "basis": "test fixture",
+                            "derived_from": {"evidence_domain": "ppm_similarity",
+                                             "endpoint": "sign_boundary"}}],
             "insufficient_evidence_action": "deferred",
             "decision_if_matched": "collapse",
         }],

@@ -35,26 +35,6 @@ the easier question (see the module docstring). `tests/test_align.py` pins the
 registration count so a later "optimisation" cannot quietly buy speed with a
 weaker null.
 
-**What that cost has since bought back, without touching the null.** A pair's
-~1000 null registrations all run against the same source matrix and the same two
-core lengths — only the target's row order changes — so the admissible-window
-list and every candidate's source-side flattened view and norm were being
-re-derived ~1000 times to the same bits. `calibrate_pair_null` now builds them
-once per pair and passes them into each shuffle's `register_pair` call. The
-shuffle still gets a full offset × orientation search, the number of cosine
-evaluations is unchanged, and the plan is built inside one call and dropped when
-it returns — so "nothing is cached across pairs" stays literally true. Measured
-on the inner function (both builds alternated in one process, `process_time`,
-≥100,000 calls each, min of 7 rounds, three independent runs, noise floor
-0.88–1.14×), one null shuffle on real cores costs 1.71–1.73× less at 6bp and
-2.11–2.69× less at 8–49bp. On the
-thirteen-analysis registry at the default settings (`--null-shuffles 1000
---workers 8`) the whole stage went from 788 to 362 CPU-seconds with all four
-output files byte-identical, which is a test
-(`test_align_registry_is_byte_reproducible_run_to_run` plus the bit-exact
-`test_align_null_is_bit_identical_to_registering_each_shuffle_from_scratch`)
-rather than a claim.
-
 **Parallelism across pairs is the one lever that does not weaken the null**, and
 it is now taken: `--workers` / `workers=` runs the pair loop in that many
 processes, defaulting to 1 so no existing invocation changes. It is admissible
