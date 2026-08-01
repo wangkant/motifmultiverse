@@ -483,7 +483,18 @@ def test_the_design_documented_here_parses(tmp_path):
     path = tmp_path / "design.json"
     path.write_text(payload, encoding="utf-8")
 
+    # Materialise every file the example names, because a cell's identity now
+    # depends on their contents: a design that only parses is not one that runs,
+    # and the failure a documented example most often has is a path that resolves
+    # nowhere.
     design = multiverse.read_design(path)
+    for relative in ("peaksets/island.txt", "peaksets/complement.txt",
+                     "peaksets/sibling.txt", "substrate_core.tsv",
+                     "lexicon_manifests/core.manifest.json", "ledgers/core.ledger.json"):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"placeholder for {relative}\n", encoding="utf-8")
+
     assert len(design.specifications()) == 2 * 1 * 2, (
         "the documented grid is not the product of its axes"
     )
@@ -592,3 +603,190 @@ def test_a_measurement_with_a_ledger_for_another_substrate_refuses_the_cell(data
     result = multiverse.run_multiverse(design, tmp_path / "out")
     assert [c.status for c in result.cells] == [CellStatus.REFUSED_SCHEMA]
     assert "refusing to check one frozen run" in result.cells[0].reason
+
+
+# --------------------------------------------------------------------------- #
+# Identity binds CONTENT, not paths.
+# --------------------------------------------------------------------------- #
+def test_replacing_a_peak_sets_contents_changes_the_cell_and_estimand_id(dataset,
+                                                                        tmp_path):
+    """Same id must mean same science. Paths cannot promise that.
+
+    Everything declared stays byte-identical -- same filename, same baseline, same
+    lexicon, same estimator -- and only the bytes inside `query.txt` change. If the
+    ids survived that, two different analyses would be indistinguishable in the
+    manifest, in `family_effects.tsv`, and in any comparison built on them.
+    """
+    design = _design(dataset)
+    before = design.specifications()[0]
+
+    (dataset / "query.txt").write_text(
+        "\n".join(f"peak{i}" for i in range(5, 45)) + "\n", encoding="utf-8")
+    after = design.specifications()[0]
+
+    assert before.estimand.query_regions == after.estimand.query_regions  # same path
+    assert before.cell_id != after.cell_id, "the cell id did not see the new contents"
+    assert before.estimand_id != after.estimand_id, (
+        "the estimand id did not see the new contents: a different query is a "
+        "different question, not the same question re-measured"
+    )
+
+
+def test_the_declared_path_stays_part_of_the_identity(dataset, tmp_path):
+    """Renaming a file with identical bytes gives a different cell, on purpose.
+
+    The property that has to hold is one-directional: **same id implies same
+    inputs**. Hashing the contents secures that. Keeping the declared path in the
+    payload as well can only make ids more discriminating, never less, so it
+    cannot break it -- and the path is part of the declaration a reader
+    reproduces the run from, which is the thing a manifest is for.
+
+    So this is a documented consequence rather than a guarantee to rely on: do not
+    build cross-run cell matching on the assumption that identical bytes at a new
+    path are the same cell. They are the same science and a different declaration.
+    """
+    design = _design(dataset)
+    before = design.specifications()[0]
+
+    (dataset / "renamed.txt").write_text((dataset / "query.txt").read_text(),
+                                         encoding="utf-8")
+    moved = _design(dataset, estimands=[_estimand("complement",
+                                                  query_regions="renamed.txt")])
+    after = moved.specifications()[0]
+
+    assert after.input_digests["query_regions"] == before.input_digests["query_regions"]
+    assert after.cell_id != before.cell_id
+
+
+def test_every_identity_bearing_input_is_hashed_and_named(dataset, tmp_path):
+    """The roles are a closed list, and each one is a file whose contents decide
+    what the cell measured."""
+    from motifmultiverse.substrate import OpportunityLedger, write_opportunity_ledger
+
+    rows = _hit_rows()
+    (dataset / "core.manifest.json").write_text(
+        json.dumps({"lexicon_content_hash": f"hash_of_{LEXICON}"}), encoding="utf-8")
+    write_opportunity_ledger(
+        OpportunityLedger(substrate_id=SUBSTRATE, n_opportunities=len(rows),
+                          n_retained=sum(1 for r in rows if r["missingness"] == "used"),
+                          n_searched=len(rows), producer="test-freezer"),
+        dataset / "core.ledger.json")
+    design = _design(dataset, measurements=[
+        _measurement(lexicon_manifest="core.manifest.json",
+                     opportunity_ledger="core.ledger.json")])
+    spec = design.specifications()[0]
+
+    assert set(spec.input_digests) == set(
+        multiverse.ESTIMAND_INPUT_ROLES + multiverse.MEASUREMENT_INPUT_ROLES)
+    assert all(len(d) == 64 for d in spec.input_digests.values()), spec.input_digests
+    assert spec.design_schema_version == multiverse.MULTIVERSE_SCHEMA_VERSION
+
+    # Each role, changed one at a time, moves the id. A role hashed into the
+    # payload but never varied would look covered and cover nothing.
+    for role in spec.input_digests:
+        mutated = dict(spec.input_digests)
+        mutated[role] = "0" * 64
+        assert multiverse.Specification(
+            spec.estimand, spec.measurement, spec.statistical,
+            input_digests=mutated).cell_id != spec.cell_id, role
+
+
+def test_an_undeclared_optional_input_is_not_the_same_as_a_missing_one(dataset):
+    """`NOT_DECLARED` is a token, not an empty string, for the usual reason."""
+    design = _design(dataset)
+    spec = design.specifications()[0]
+    assert spec.input_digests["lexicon_manifest"] == multiverse.NOT_DECLARED
+    assert spec.input_digests["opportunity_ledger"] == multiverse.NOT_DECLARED
+
+    broken = _design(dataset, measurements=[
+        _measurement(lexicon_manifest="does_not_exist.json")])
+    with pytest.raises(multiverse.MultiverseError, match="broken design"):
+        broken.specifications()
+
+
+def test_the_manifest_records_every_cells_input_digests(dataset, tmp_path):
+    design = _design(dataset, statistical=[_statistical("a"), _statistical("b", seed=1)])
+    result = multiverse.run_multiverse(design, tmp_path / "out")
+
+    manifest = json.loads(
+        (tmp_path / "out" / "specification_manifest.json").read_text())
+    recorded = manifest["input_digests_by_cell"]
+    assert set(recorded) == {c.cell_id for c in result.cells}
+    for digests in recorded.values():
+        assert digests["query_regions"] == multiverse.content_digest(dataset / "query.txt")
+
+
+def test_every_cell_and_family_pair_has_an_explicit_state(dataset, tmp_path):
+    """Absence at the family level is written down, not left to be inferred.
+
+    A family present in one lexicon and not the other used to show up as a
+    missing row in `family_effects.tsv`, which a reader had to interpret. Here the
+    pair exists and says `NOT_IN_LEXICON`.
+    """
+    _write_hits(dataset / "hits_extra.tsv",
+                [r for r in _hit_rows(substrate="b" * 64, lexicon="lex_expanded")]
+                + [{**r, "family_id": "ONLY_HERE", "variant_id": "ONLY_HERE_v1"}
+                   for r in _hit_rows(substrate="b" * 64, lexicon="lex_expanded")
+                   if r["family_id"] == "CTCF"])
+    design = _design(dataset, measurements=[
+        _measurement(),
+        _measurement("expanded", "lex_expanded", "b" * 64, "hits_extra.tsv")])
+    out = tmp_path / "out"
+    result = multiverse.run_multiverse(design, out)
+
+    import csv
+    with open(out / "family_cells.tsv", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    families = {r["family_id"] for r in rows}
+    assert "ONLY_HERE" in families
+    assert len(rows) == len(result.cells) * len(families), (
+        "every (cell, family) pair must have exactly one row"
+    )
+
+    core_cells = {c.cell_id for c in result.cells
+                  if "core" in [s["measurement_id"] for s in result.manifest["specifications"]
+                                if s["cell_id"] == c.cell_id]}
+    only_here_in_core = [r for r in rows
+                         if r["family_id"] == "ONLY_HERE" and r["cell_id"] in core_cells]
+    assert only_here_in_core, "the fixture did not produce the cross-lexicon case"
+    assert all(r["status"] == multiverse.FamilyCellStatus.NOT_IN_LEXICON
+               for r in only_here_in_core)
+    assert all(r["effect"] == "" for r in only_here_in_core), (
+        "a family absent from a lexicon was given a number"
+    )
+
+
+def test_a_refused_cell_marks_every_family_refused_not_absent(dataset, tmp_path):
+    design = _design(dataset, statistical=[_statistical("impossible",
+                                                        floor_blocks=10_000.0)])
+    out = tmp_path / "out"
+    multiverse.run_multiverse(design, out)
+
+    import csv
+    with open(out / "family_cells.tsv", newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    assert rows
+    assert all(r["status"] == multiverse.FamilyCellStatus.CELL_REFUSED for r in rows)
+    assert all(r["reason"] for r in rows), "a refused pair with no reason"
+
+
+def test_a_measured_zero_is_labelled_and_not_confused_with_an_absence():
+    """0.0 is the one value most likely to be mistaken for a fill, so it is named."""
+    cell = multiverse.CellResult(
+        cell_id="c1", estimand_id="e1", status=CellStatus.SUCCESS,
+        effects=[{"family_id": "A", "effect": 0.0}, {"family_id": "B", "effect": 0.3}],
+        measurement_coverage=({"A", "B"}, {"A": {"p1"}, "B": {"p1"}}),
+        contrast_regions={"p1"})
+    states = {r["family_id"]: r["status"] for r in multiverse.family_cell_states([cell])}
+    assert states["A"] == multiverse.FamilyCellStatus.MEASURED_ZERO
+    assert states["B"] == multiverse.FamilyCellStatus.ESTIMATED
+
+
+def test_a_family_never_searched_in_this_contrast_is_not_called_absent():
+    """Searched elsewhere in the frozen run and nowhere here is NOT_SEARCHED."""
+    cell = multiverse.CellResult(
+        cell_id="c1", estimand_id="e1", status=CellStatus.SUCCESS, effects=[],
+        measurement_coverage=({"A"}, {"A": {"other_peak"}}),
+        contrast_regions={"p1"})
+    states = {r["family_id"]: r["status"] for r in multiverse.family_cell_states([cell])}
+    assert states["A"] == multiverse.FamilyCellStatus.NOT_SEARCHED

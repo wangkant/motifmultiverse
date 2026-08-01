@@ -65,6 +65,8 @@ __all__ = [
     "Estimand", "Measurement", "StatisticalChoice", "Specification",
     "MultiverseDesign", "CellResult", "MultiverseResult",
     "read_design", "plan", "run_multiverse", "stability_within_estimand",
+    "FamilyCellStatus", "family_cell_states", "content_digest",
+    "ESTIMAND_INPUT_ROLES", "MEASUREMENT_INPUT_ROLES", "NOT_DECLARED",
     "NOT_ESTIMABLE_MARKER", "NO_PREREGISTERED_THRESHOLD",
 ]
 
@@ -86,6 +88,38 @@ class MultiverseError(SchemaError):
     """A design cannot be read, or a grid cannot be run as declared."""
 
 
+class FamilyCellStatus:
+    """What became of one (cell, family) pair. Six states, and none of them zero.
+
+    The audit could already say that five families existed only under one lexicon,
+    but only by *inference*: those cells had no row in `family_effects.tsv`, and a
+    reader had to work out that an absent row meant an absent family rather than
+    an absent effect. That is the founding failure's shape one level up -- an
+    absence standing in for a measurement -- so the states are written down
+    per pair instead of left to be deduced.
+
+    ``MEASURED_ZERO`` is separate from ``ESTIMATED`` on purpose. An effect of
+    exactly 0.0 is a real measurement and the one value most likely to be confused
+    with a fill, so it is labelled rather than left to look like any other
+    estimate.
+
+    ``NOT_SEARCHED`` is evaluated against *this cell's* peaks -- the query and the
+    baseline together -- not against the whole substrate: a family searched
+    elsewhere in the frozen run and nowhere in this contrast was not searched
+    here, whatever the rest of the table says.
+    """
+
+    ESTIMATED = "ESTIMATED"
+    MEASURED_ZERO = "MEASURED_ZERO"
+    NOT_IN_LEXICON = "NOT_IN_LEXICON"
+    NOT_SEARCHED = "NOT_SEARCHED"
+    NOT_ESTIMABLE = "NOT_ESTIMABLE"
+    CELL_REFUSED = "CELL_REFUSED"
+
+    ALL = (ESTIMATED, MEASURED_ZERO, NOT_IN_LEXICON, NOT_SEARCHED, NOT_ESTIMABLE,
+           CELL_REFUSED)
+
+
 class CellStatus:
     """What became of one planned cell. Every planned cell gets exactly one.
 
@@ -101,6 +135,35 @@ class CellStatus:
     ERROR = "ERROR"
 
     ALL = (SUCCESS, REFUSED_GUARD, REFUSED_SCHEMA, NOT_ESTIMABLE, ERROR)
+
+
+#: What a cell's identity binds, beyond the strings a design declares. Each is a
+#: file whose *contents* decide what the cell measured, and hashing the path
+#: instead would let the contents be swapped underneath a stable id -- the failure
+#: mode this whole package is organised against, in the identity system itself. A
+#: design that renames `peaksets/query.txt` and rewrites it produces a different
+#: cell; a design that moves the same bytes to a new path produces the same one.
+ESTIMAND_INPUT_ROLES = ("query_regions", "baseline_regions")
+MEASUREMENT_INPUT_ROLES = ("hit_table", "lexicon_manifest", "opportunity_ledger")
+
+#: Recorded for an input a design declares but no file backs -- the optional ones,
+#: which are absent rather than empty. A literal token rather than "" so that a
+#: declared-but-missing file cannot hash the same as one nobody declared.
+NOT_DECLARED = "NOT_DECLARED"
+
+
+def content_digest(path: str | os.PathLike[str]) -> str:
+    """SHA-256 of a file's bytes, streamed.
+
+    Streamed because a hit table is routinely hundreds of megabytes and an
+    identity function that needs the whole file in memory is one people work
+    around.
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stable_id(prefix: str, payload: Mapping[str, Any]) -> str:
@@ -161,9 +224,22 @@ class Estimand:
                 f"{[p.value for p in SelectionProvenance]}"
             ) from exc
 
+    def identity(self, digests: Mapping[str, str] | None = None) -> str:
+        """The estimand's id, over its declaration AND its peak sets' contents.
+
+        ``digests`` is required in practice and defaulted only so that a caller
+        reasoning about a declaration alone can still get a stable string. A
+        declaration-only id is not an identity: two runs whose `query.txt` differs
+        are two different questions, and an id that cannot tell them apart makes
+        the manifest's whole promise -- that a cell id names the science -- false.
+        """
+        return _stable_id("est", {"declared": asdict(self),
+                                  "inputs": dict(sorted((digests or {}).items()))})
+
     @property
     def estimand_id(self) -> str:
-        return _stable_id("est", asdict(self))
+        """Declaration-only id. Prefer :meth:`identity`; see its docstring."""
+        return self.identity()
 
 
 @dataclass(frozen=True)
@@ -230,15 +306,32 @@ class StatisticalChoice:
 
 @dataclass(frozen=True)
 class Specification:
-    """One cell: one of each axis, and the id that identifies it forever."""
+    """One cell: one of each axis, and the id that identifies it forever.
+
+    "Forever" is the claim ``input_digests`` exists to make true. Without it the
+    ids hash declared *strings* -- including paths -- so replacing the bytes at
+    `peaksets/query.txt` leaves every id unchanged and two different analyses
+    become indistinguishable in the manifest, the effects table and any
+    comparison built on them. Same id must mean same science, and only content can
+    promise that.
+    """
 
     estimand: Estimand
     measurement: Measurement
     statistical: StatisticalChoice
+    #: role -> SHA-256 of the file that role named, or ``NOT_DECLARED``. Empty
+    #: only for a specification built outside :meth:`MultiverseDesign.resolve`,
+    #: which is a declaration and not yet a cell.
+    input_digests: Mapping[str, str] = field(default_factory=dict)
+    #: The version of the design vocabulary these strings were written in, so a
+    #: field that changes meaning between releases changes the id with it.
+    design_schema_version: str = MULTIVERSE_SCHEMA_VERSION
 
     @property
     def estimand_id(self) -> str:
-        return self.estimand.estimand_id
+        return self.estimand.identity(
+            {role: self.input_digests[role] for role in ESTIMAND_INPUT_ROLES
+             if role in self.input_digests})
 
     @property
     def cell_id(self) -> str:
@@ -246,6 +339,8 @@ class Specification:
             "estimand": asdict(self.estimand),
             "measurement": asdict(self.measurement),
             "statistical": asdict(self.statistical),
+            "inputs": dict(sorted(self.input_digests.items())),
+            "design_schema_version": self.design_schema_version,
         })
 
     def to_dict(self) -> dict[str, Any]:
@@ -313,19 +408,74 @@ class MultiverseDesign:
             if len(set(ids)) != len(ids):
                 raise MultiverseError(f"duplicate {label} in the design: {sorted(ids)}")
 
+    def resolve_path(self, declared: str) -> Path:
+        p = Path(declared)
+        return p if p.is_absolute() else self.root / p
+
+    def input_digests(self, estimand: Estimand, measurement: Measurement) -> dict[str, str]:
+        """Hash every file this cell's identity depends on.
+
+        A declared path that does not exist is an error here rather than a
+        ``NOT_DECLARED``: the design named it, so a missing file is a broken
+        design and not an absent input. Only the *optional* roles -- the lexicon
+        manifest and the opportunity ledger -- may legitimately be undeclared, and
+        those get the token so that "declared and missing" can never hash the same
+        as "never declared".
+        """
+        digests: dict[str, str] = {}
+        for role in ESTIMAND_INPUT_ROLES:
+            declared = getattr(estimand, role)
+            try:
+                digests[role] = content_digest(self.resolve_path(declared))
+            except OSError as exc:
+                raise MultiverseError(
+                    f"estimand {estimand.query_id} vs {estimand.baseline_id} declares "
+                    f"{role} {declared!r}, which cannot be read ({exc}). The cell's "
+                    "identity depends on this file's contents, so there is no cell "
+                    "without it."
+                ) from exc
+        for role in MEASUREMENT_INPUT_ROLES:
+            declared = getattr(measurement, role)
+            if not declared:
+                digests[role] = NOT_DECLARED
+                continue
+            path = self.resolve_path(declared)
+            try:
+                digests[role] = content_digest(path)
+            except OSError as exc:
+                raise MultiverseError(
+                    f"measurement {measurement.measurement_id} declares {role} "
+                    f"{declared!r}, which cannot be read ({exc}). A declared input that "
+                    "is not there is a broken design, not an absent input."
+                ) from exc
+        return digests
+
     def specifications(self) -> list[Specification]:
-        """Every planned cell, in a deterministic order.
+        """Every planned cell, in a deterministic order, with its inputs hashed.
 
         The order is the declaration order of the three axes, so a design read
         twice plans the same cells in the same sequence -- which is what lets a
         re-run be compared to an earlier one row by row.
+
+        Reading files here rather than in the dataclass is deliberate: an id that
+        depends on file contents cannot be computed from a declaration alone, and
+        pretending otherwise is how a stable-looking id ends up naming two
+        different analyses. Digests are cached per (estimand, measurement) pair, so
+        a 36-cell grid over 2 hit tables hashes each table once rather than 18
+        times.
         """
-        return [
-            Specification(estimand=e, measurement=m, statistical=s)
-            for e in self.estimands
-            for m in self.measurements
-            for s in self.statistical_choices
-        ]
+        cache: dict[tuple[int, int], dict[str, str]] = {}
+        specs = []
+        for e_index, estimand in enumerate(self.estimands):
+            for m_index, measurement in enumerate(self.measurements):
+                key = (e_index, m_index)
+                if key not in cache:
+                    cache[key] = self.input_digests(estimand, measurement)
+                for statistical in self.statistical_choices:
+                    specs.append(Specification(
+                        estimand=estimand, measurement=measurement,
+                        statistical=statistical, input_digests=cache[key]))
+        return specs
 
 
 def read_design(path: str | os.PathLike[str]) -> MultiverseDesign:
@@ -390,6 +540,9 @@ def plan(design: MultiverseDesign) -> dict[str, Any]:
         "peak_universe_id": design.peak_universe_id,
         "preregistered_threshold": design.preregistered_threshold,
         "n_planned_cells": len(specs),
+        "input_digests_by_cell": {
+            spec.cell_id: dict(sorted(spec.input_digests.items())) for spec in specs
+        },
         "axes": {
             "estimands": [{**asdict(e), "estimand_id": e.estimand_id} for e in design.estimands],
             "measurements": [asdict(m) for m in design.measurements],
@@ -416,6 +569,13 @@ class CellResult:
     n_baseline_peaks: int | None = None
     claim_scope: str = ""
     statistical_license: str = ""
+    #: (families in this cell's frozen table, family -> regions where it was
+    #: searched). Carried so that a (cell, family) pair can distinguish "this
+    #: lexicon has no such family" from "it has one and this contrast never
+    #: searched it" -- two absences that look identical as a missing effect row.
+    measurement_coverage: tuple[set[str], dict[str, set[str]]] | None = None
+    #: Query and baseline regions together: the peaks this cell actually compared.
+    contrast_regions: set[str] = field(default_factory=set)
     #: What the guards returned *while this cell ran*. `guard_outcomes.json`
     #: records every outcome in the directory but has no cell to attribute them
     #: to -- 144 entries from a 36-cell grid, none of which a reader can join to
@@ -523,6 +683,11 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
     spec_rows = {spec.cell_id: spec.to_dict() for spec in specs}
     hit_cache: dict[str, list[Any]] = {}
     peak_cache: dict[str, list[str]] = {}
+    # Per measurement: which families the frozen table contains at all, and for
+    # each, the regions where it was actually searched. Built once per table --
+    # this is what lets a (cell, family) pair say NOT_IN_LEXICON and NOT_SEARCHED
+    # apart, rather than both arriving as a missing row.
+    coverage_cache: dict[str, tuple[set[str], dict[str, set[str]]]] = {}
     cells: list[CellResult] = []
 
     def _resolve(rel: str) -> Path:
@@ -548,6 +713,15 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
                 _verify_measurement(hits, spec.measurement, design.root)
                 hit_cache[key] = hits
             hits = hit_cache[key]
+            if key not in coverage_cache:
+                families: set[str] = set()
+                searched: dict[str, set[str]] = {}
+                for hit in hits:
+                    family = str(hit.family_id)
+                    families.add(family)
+                    if str(hit.missingness) != "not_searched":
+                        searched.setdefault(family, set()).add(hit.region_id)
+                coverage_cache[key] = (families, searched)
             if spec.measurement.opportunity_ledger:
                 # Re-checked per cell rather than once per measurement, because a
                 # guard outcome belongs to the cell it licensed: a reader asking
@@ -611,6 +785,9 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
             (out / f"error_{spec.cell_id}.txt").write_text(
                 traceback.format_exc(), encoding="utf-8")
         cell.guard_outcomes = [o.to_dict() for o in log.outcomes[outcomes_before:]]
+        cell.measurement_coverage = coverage_cache.get(spec.measurement.measurement_id)
+        cell.contrast_regions = (set(peak_cache.get(spec.estimand.query_regions, ()))
+                                 | set(peak_cache.get(spec.estimand.baseline_regions, ())))
         cells.append(cell)
 
     summaries = stability_within_estimand(cells, manifest)
@@ -700,6 +877,54 @@ def stability_within_estimand(cells: Sequence[CellResult],
     return summaries
 
 
+def family_cell_states(cells: Sequence[CellResult]) -> list[dict[str, Any]]:
+    """One row per (cell, family) over the union of families the grid ever saw.
+
+    The union is taken across every measurement, which is what makes
+    ``NOT_IN_LEXICON`` a statement rather than a silence: a family that only one
+    lexicon contains gets an explicit row in the cells of the lexicon that does
+    not, instead of a gap a reader has to interpret.
+
+    Nothing here recomputes an effect. The status is read off what the cell
+    returned and what its frozen table contains, and no absent value is given a
+    number -- which is the property the whole table exists to make checkable at
+    the family x specification level rather than only at the cell level.
+    """
+    universe: set[str] = set()
+    for cell in cells:
+        if cell.measurement_coverage:
+            universe |= cell.measurement_coverage[0]
+        universe |= {str(e.get("family_id")) for e in cell.effects}
+
+    rows: list[dict[str, Any]] = []
+    for cell in cells:
+        by_family = {str(e.get("family_id")): e for e in cell.effects}
+        families, searched = cell.measurement_coverage or (set(), {})
+        for family in sorted(universe):
+            effect = by_family.get(family)
+            if cell.status != CellStatus.SUCCESS:
+                status, value = FamilyCellStatus.CELL_REFUSED, ""
+            elif family not in families:
+                status, value = FamilyCellStatus.NOT_IN_LEXICON, ""
+            elif not (searched.get(family, set()) & cell.contrast_regions):
+                status, value = FamilyCellStatus.NOT_SEARCHED, ""
+            elif effect is None or effect.get("effect") is None:
+                status, value = FamilyCellStatus.NOT_ESTIMABLE, ""
+            elif effect.get("effect") == 0:
+                status, value = FamilyCellStatus.MEASURED_ZERO, effect.get("effect")
+            else:
+                status, value = FamilyCellStatus.ESTIMATED, effect.get("effect")
+            rows.append({
+                "cell_id": cell.cell_id,
+                "estimand_id": cell.estimand_id,
+                "family_id": family,
+                "status": status,
+                "effect": value,
+                "reason": cell.reason if status == FamilyCellStatus.CELL_REFUSED else "",
+            })
+    return rows
+
+
 def _median(values: Sequence[float]) -> float:
     ordered = sorted(values)
     mid = len(ordered) // 2
@@ -743,6 +968,10 @@ EFFECT_COLUMNS = (
     "estimator", "block_size", "n_bootstrap", "seed",
 )
 
+FAMILY_CELL_COLUMNS = (
+    "cell_id", "estimand_id", "family_id", "status", "effect", "reason",
+)
+
 SUMMARY_COLUMNS = (
     "estimand_id", "family_id", "n_cells_planned_in_estimand", "n_cells_with_estimate",
     "n_effects_positive", "n_effects_negative", "sign_agreement",
@@ -784,6 +1013,7 @@ def _write_outputs(result: MultiverseResult, spec_rows: Mapping[str, Mapping[str
                 "n_bootstrap_valid": effect.get("n_bootstrap_valid"),
             })
     _tsv(out / "family_effects.tsv", EFFECT_COLUMNS, effect_rows)
+    _tsv(out / "family_cells.tsv", FAMILY_CELL_COLUMNS, family_cell_states(result.cells))
     _tsv(out / "stability_by_estimand.tsv", SUMMARY_COLUMNS, result.summaries)
     (out / "specification_curve.md").write_text(
         _render_curve(result, design), encoding="utf-8")

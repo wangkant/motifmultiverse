@@ -788,7 +788,13 @@ def test_infer_writes_the_flat_effect_table_and_the_full_record(tmp_path, capsys
     blob = json.loads((out / "interpretation.json").read_text())
     assert blob["query_health"]["n_blocks"] == 32
     assert json.loads((out / "provenance.json").read_text())[0]["subcommand"] == "infer"
-    assert "multiverse is not implemented" in capsys.readouterr().out
+    # `infer` still answers ONE specification and still says so -- but it now
+    # points at the subcommand that runs the grid instead of asserting there
+    # isn't one, which stopped being true when `multiverse` landed.
+    printed = capsys.readouterr().out
+    assert "ONE specification" in printed
+    assert "motifmultiverse multiverse" in printed
+    assert "not implemented" not in printed
 
 
 def test_infer_writes_the_missing_sentinel_for_a_withheld_p_never_a_blank_or_zero(tmp_path):

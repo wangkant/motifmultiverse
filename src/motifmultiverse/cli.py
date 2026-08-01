@@ -789,8 +789,13 @@ def _run_infer(ns: argparse.Namespace) -> int:
 
     print(f"infer: {len(result.effects)} family effects, estimator={result.estimator} "
           f"({result.effects[0]['inference_capability']})")
-    print("  ONE specification. The specification multiverse is not implemented; "
-          "see docs/ROADMAP.md M4.")
+    # `infer` estimating one specification is correct and stays correct. What
+    # changed is that "the multiverse is not implemented" stopped being true when
+    # the `multiverse` subcommand landed, and a line saying so on every infer run
+    # now misdirects a reader who wants the grid.
+    print("  ONE specification. To run a declared grid of them over this substrate "
+          "-- and see which conclusions survive a different baseline, lexicon or "
+          "estimator -- use `motifmultiverse multiverse`.")
     for effect in result.effects[:5]:
         ci = effect["ci"]
         interval = "NA" if ci is None else f"[{ci[0]:.4g}, {ci[1]:.4g}]"
@@ -908,13 +913,22 @@ def _run_multiverse(ns: argparse.Namespace) -> int:
     rec = record("multiverse")
     design = multiverse_mod.read_design(ns.design)
     rec.add_input(ns.design, key=f"design:{Path(ns.design).name}")
-    # Every distinct hit table the grid will read, by the measurement whose
-    # identity it carries. A grid's provenance that named only the design file
-    # would not say which frozen runs were actually opened.
+    # Every file the grid's results depend on, by the role it played -- not just
+    # the hit tables. A provenance record that named the design and the hit tables
+    # would leave the peak sets, the lexicon manifests and the ledgers unrecorded,
+    # and those decide the answer as much as the substrate does. Same list as the
+    # one the cell ids hash, so the record and the identity cannot disagree about
+    # what the run depended on.
+    for estimand in design.estimands:
+        for role in multiverse_mod.ESTIMAND_INPUT_ROLES:
+            rec.add_input(design.resolve_path(getattr(estimand, role)),
+                          key=f"{role}:{estimand.query_id}_vs_{estimand.baseline_id}")
     for measurement in design.measurements:
-        path = Path(measurement.hit_table)
-        path = path if path.is_absolute() else design.root / path
-        rec.add_input(path, key=f"hits:{measurement.measurement_id}")
+        for role in multiverse_mod.MEASUREMENT_INPUT_ROLES:
+            declared = getattr(measurement, role)
+            if declared:
+                rec.add_input(design.resolve_path(declared),
+                              key=f"{role}:{measurement.measurement_id}")
     rec.write(ns.out)
 
     log = GuardLog("multiverse", ns.out)
