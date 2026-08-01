@@ -228,6 +228,49 @@ def test_the_readme_block_carries_no_test_count_to_go_stale():
     assert "999" not in block and "passed" not in block.split("| module |")[0]
 
 
+def test_the_table_states_what_IMPLEMENTED_covers_and_shows_the_evidence_per_row():
+    """A status word that can be separated from its scope is the `VERIFIED` defect.
+
+    `BackendProbe.capability` is rendered into the status document for a reason
+    this file states out loud: so that "nobody has to open the source to learn
+    what green covers". The module table made the same kind of claim without the
+    same discipline. It printed IMPLEMENTED and stopped -- no statement of what
+    the word establishes, and no sign of `module_status`'s `detail`, which names
+    the runner the subcommand dispatches to and IS the evidence the derivation
+    ran on. The scope sat in hand-written prose outside the markers, where it can
+    be edited, moved, or quoted away from the table it qualifies, while the block
+    itself travels on its own into `PKG-INFO` and onto the project page.
+
+    So the block now carries both. `IMPLEMENTED` is a claim about dispatch and
+    says so, next to the dispatch it is claiming.
+    """
+    block = status_mod.render_markdown(status_mod.build_status())
+    scope = block.split("| module |")[0]
+
+    assert "dispatches" in scope, "the block does not say what IMPLEMENTED covers"
+    assert "not a claim" in scope, "the block does not say what IMPLEMENTED does not cover"
+    for name in status_mod.MODULES:
+        detail = status_mod.module_status(name)["detail"]
+        assert detail in block, f"{name}: the table drops the evidence it derived from"
+
+
+def test_the_scope_sentence_is_generated_rather_than_typed_beside_the_table():
+    """Non-vacuity: the scope must come from the same render as the rows.
+
+    A caveat that lives in the hand-written prose passes any test that greps the
+    README, and drifts the first time somebody rewrites the surrounding section.
+    This asserts it is inside the markers -- the part `--render-readme` rewrites
+    wholesale and `test_the_readme_block_matches_what_the_generator_renders`
+    holds to the code.
+    """
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
+    start = readme.find(status_mod.BEGIN_MARKER)
+    end = readme.find(status_mod.END_MARKER) + len(status_mod.END_MARKER)
+    committed_block = readme[start:end]
+
+    assert "dispatches" in committed_block.split("| module |")[0]
+
+
 def test_rendering_refuses_a_readme_without_markers():
     with pytest.raises(ValueError, match="markers"):
         status_mod._splice("no markers here", "block")
