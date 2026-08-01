@@ -1077,3 +1077,33 @@ def test_align_records_what_its_guard_returned_beside_the_edge_table(
     assert "unsigned" in recorded[0]["detail"]
     # Written after the provenance record, so the join to the run holds.
     assert recorded[0]["provenance_records"] == 1
+
+
+def test_align_records_the_registry_bytes_it_read(
+    tmp_path, shared_ppm, short_overlap_target, sign_flip_cwm,
+):
+    """`align` recorded no inputs at all, which made its edges untraceable.
+
+    Every other stage checksums what it read. This one wrote `"inputs": {}`, so
+    `alignment_edges.parquet` could not be tied to the registry that produced it
+    -- the one thing the provenance discipline exists for. Found by running the
+    pipeline on real data.
+
+    The checksums are taken before the record is written, so T-09 still holds: a
+    run that cannot load its registry leaves a record naming what it tried.
+    """
+    import json
+
+    registry = _registry_arrays_h5(tmp_path, {
+        "a": {"ppm": shared_ppm, "cwm": sign_flip_cwm},
+        "b": {"ppm": short_overlap_target, "cwm": -sign_flip_cwm},
+    })
+    out = tmp_path / "evidence"
+    align_registry(registry, out, null_shuffles=3, seed=4)
+
+    records = json.loads((out / "provenance.json").read_text())
+    assert len(records) == 1, "a second write would move the provenance_records join"
+    inputs = records[0]["inputs"]
+    assert inputs, "align recorded no inputs"
+    assert {key.split(":", 1)[1] for key in inputs} >= {"registry.json"}
+    assert all(len(digest) == 64 for digest in inputs.values())

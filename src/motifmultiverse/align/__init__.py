@@ -761,6 +761,20 @@ def align_registry(registry_dir: str | os.PathLike[str], out_dir: str | os.PathL
     # compile's pattern: a run that fails to load its registry still leaves a
     # record of what was attempted (T-09).
     prov = record("align", seed=seed)
+    # Checksummed BEFORE the write, and before the registry is opened. `align` was
+    # the one stage whose provenance carried `"inputs": {}`, so
+    # `alignment_edges.parquet` could not be tied to the registry bytes behind it
+    # -- the single thing this package's provenance discipline exists to make
+    # possible. Hashing does not need `load_registry` to succeed, only the files
+    # to be on disk, so this keeps T-09 intact: the record is still written before
+    # the body runs, and a run that cannot load its registry still leaves one --
+    # now naming what it tried to read. A second `prov.write` would have appended
+    # a second record and moved the `provenance_records` count that guard outcomes
+    # join on.
+    for name in ("registry.json", "arrays.h5"):
+        candidate = Path(registry_dir) / name
+        if candidate.exists():
+            prov.add_input(candidate, key=f"registry:{name}")
     prov.write(out)
 
     meta, nodes, arrays = load_registry(registry_dir)

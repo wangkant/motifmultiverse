@@ -37,7 +37,7 @@ python examples/quickstart/make_inputs.py quickstart_inputs
 cd quickstart_inputs
 
 motifmultiverse ingest    project.json --out registry
-motifmultiverse align     registry     --out evidence
+motifmultiverse align     registry     --out evidence --workers 8
 motifmultiverse annotate  evidence     --registry registry --out evidence
 motifmultiverse adjudicate evidence    --registry registry --out decisions
 motifmultiverse compile   registry     --decisions decisions/merge_decisions.json --out lexicons
@@ -46,6 +46,13 @@ motifmultiverse compile   registry     --decisions decisions/merge_decisions.jso
 The generator writes two TF-MoDISco-shaped HDF5 files and a project config. The
 matrices come from a fixed seed and are not real motifs; the run shows what each
 stage writes and what it refuses, not what any biology looks like.
+
+`align` is the slow stage and `--workers` is why. The pair loop is quadratic in
+motifs, and every pair re-registers its null a thousand times — a 139-motif
+project is 9,591 pairs and roughly 9.6 million registrations. It defaults to one
+worker so that a shared machine is never silently consumed, which means you have
+to ask. The written tables are byte-identical at every worker count; only the
+wall clock moves.
 
 `annotate` reports `0 candidates from 0 backends` here, because no motif database
 is installed. That is the intended behaviour: it says what it did not do rather
@@ -286,9 +293,18 @@ though it were a measured *p* value.
 
 ### Four findings from the reference implementation
 
-This tool exists because of these four results. All are from the reference
-implementation, not from this repository; figures and sources are in
-[`docs/CONCEPT.md`](docs/CONCEPT.md).
+> **Externally sourced. Not reproducible from this repository.** Every number in
+> this section was measured in the reference implementation, whose data this
+> repository does not ship. Nothing here re-derives them and no test checks them.
+> Treat them as the motivation for the design, not as evidence produced by this
+> code. Figures and sources: [`docs/CONCEPT.md`](docs/CONCEPT.md).
+>
+> What *is* checkable from a checkout: the [Quickstart](#quickstart), which
+> generates its own inputs and is executed by the test suite, and
+> [`docs/CASE_STUDY.md`](docs/CASE_STUDY.md), which runs the pipeline on real
+> discovery output and reports what it found. Reproducing finding 1 would need the
+> hit caller re-run at two scales on a shared peak set, which is the smallest
+> experiment that would move these claims into this repository.
 
 **1. The hit caller is not input-scale invariant.** The same regions produce
 different *discrete* retention decisions depending on which other regions share

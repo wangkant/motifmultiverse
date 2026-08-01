@@ -205,9 +205,11 @@ def test_the_readme_block_matches_what_the_generator_renders():
     If a module is implemented or reverts to a skeleton and nobody re-renders,
     this fails and names the command to run.
     """
-    from pathlib import Path
 
-    readme = Path("README.md").read_text(encoding="utf-8")
+    # Resolved against this file, not the cwd. With a bare relative path the whole
+    # suite went red from any directory but the repository root -- a clean checkout
+    # run as `pytest path/to/tests` failed on FileNotFoundError: README.md.
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
     expected = status_mod.render_markdown(status_mod.build_status())
     start = readme.find(status_mod.BEGIN_MARKER)
     end = readme.find(status_mod.END_MARKER)
