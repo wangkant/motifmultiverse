@@ -688,6 +688,56 @@ def test_citation_file_stays_in_sync_with_the_package():
     assert "doi" not in cff, "a DOI appeared; check it resolves before pinning it here"
 
 
+def test_every_file_that_states_a_version_states_the_same_one():
+    """Four files name a version and only one of them was ever checked.
+
+    `CITATION.cff` is held to `__version__` by the test above. `pyproject.toml`,
+    the README badge and the CHANGELOG heading were not held to anything, and
+    that was measured rather than assumed: bumping `pyproject.toml` to 0.2.0 and
+    leaving `_version.py` alone left the whole suite green, and so did moving the
+    badge and the CHANGELOG heading to a version that exists nowhere else.
+
+    The pyproject drift is the one that matters. `provenance.__init__` writes
+    `software.motifmultiverse` from `__version__`, so a release built from a
+    bumped `pyproject.toml` installs as one version and stamps every artifact it
+    produces with another. A provenance record that names software that was never
+    released is not a lesser bug than a wrong number -- it is the record this
+    package exists to make trustworthy, saying something untrue about itself, and
+    nobody downstream can tell.
+
+    `_version.py` is the single source. Everything else restates it and is
+    therefore checked against it.
+    """
+    import re
+    import tomllib
+
+    import motifmultiverse
+
+    root = _repo_root()
+    version = motifmultiverse.__version__
+
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["project"]["version"] == version, (
+        f"pyproject.toml declares {pyproject['project']['version']}, package is {version}; "
+        "the wheel would install under one version and stamp provenance with the other"
+    )
+
+    # shields.io escapes a literal dash as `--`, so undo that before comparing
+    # rather than forbidding a version that contains one.
+    badge = re.search(r"version-([^)\s]+?)-blue", (root / "README.md").read_text(encoding="utf-8"))
+    assert badge, "the README lost its version badge"
+    assert badge.group(1).replace("--", "-") == version, (
+        f"README badge shows {badge.group(1)}, package is {version}"
+    )
+
+    changelog = re.search(r"^## \[([^\]]+)\]", (root / "CHANGELOG.md").read_text(encoding="utf-8"),
+                          flags=re.MULTILINE)
+    assert changelog, "the CHANGELOG lost its version heading"
+    assert changelog.group(1) == version, (
+        f"CHANGELOG's newest section is {changelog.group(1)}, package is {version}"
+    )
+
+
 def test_citation_license_matches_the_license_file():
     import yaml
 
