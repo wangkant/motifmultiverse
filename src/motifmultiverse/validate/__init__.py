@@ -678,8 +678,18 @@ def evaluate_stability(
     # what the arithmetic below actually produces rather than the arithmetic
     # changed to a quantity this function has no inputs for; FP-11's family-level
     # "dominant variant's coefficient share" stays unclaimed and unshadowed.
-    denominator = sum(abs(value) for value in after_coefficients.values())
-    numerator = sum(abs(after_coefficients[key]) for key in affected_keys_after)
+    # math.fsum, not sum: the numerator ranges over a SET (hash order) and the
+    # denominator over a dict (insertion order), so when every peak is affected
+    # the two add the same numbers in different orders. Float addition is not
+    # associative, the numerator landed one ulp high, and a subset of the mass
+    # came out larger than all of it -- 1.0000000000000004, which this module's
+    # own [0, 1] check then refused. Python 3.12 hid it (builtin sum is Neumaier
+    # compensated there, 3.11 is not), so the reported share also disagreed
+    # between the two interpreters the classifiers claim. fsum is correctly
+    # rounded and order-independent, and rounding is monotonic, so subset <=
+    # whole is now guaranteed rather than lucky.
+    denominator = math.fsum(abs(value) for value in after_coefficients.values())
+    numerator = math.fsum(abs(after_coefficients[key]) for key in affected_keys_after)
     share = 0.0 if denominator == 0 else numerator / denominator
     n_affected = len(affected)
     if n_affected < MIN_AFFECTED_PEAKS:

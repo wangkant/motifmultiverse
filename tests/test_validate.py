@@ -815,6 +815,33 @@ def test_the_recorded_definition_is_the_one_that_produced_the_numbers():
         assert replayed == result
 
 
+def test_the_share_of_an_all_affected_run_is_one_on_both_supported_interpreters():
+    """Naive float summation let a subset exceed the whole it is a subset of.
+
+    `affected_coefficient_share` divided a sum taken over `affected_keys_after`
+    -- a set, iterated in hash order -- by a sum over `after_coefficients`, a
+    dict iterated in insertion order. When every peak is affected the two add
+    exactly the same numbers in different orders, and float addition is not
+    associative: the numerator landed one ulp above the denominator, the share
+    came out 1.0000000000000004 and `StabilityResult` refused its own output.
+
+    Python 3.12 concealed it, because builtin `sum` uses Neumaier compensated
+    summation there and 3.11 does not -- so the share this package REPORTED
+    differed between the two interpreters its classifiers claim. `math.fsum` is
+    correctly rounded and order-independent, which is the property the ratio
+    needed all along and the reason the number is now reproducible.
+    """
+    before = _refit_hit_table(changed=40, total=400, after=False)
+    after = _refit_hit_table(changed=40, total=400, after=True)
+
+    exact = evaluate_stability("decision:share", before, after, coefficient_tolerance=0.0)
+    default = evaluate_stability("decision:share", before, after)
+
+    assert exact.n_affected_peaks == 400              # the affected subset IS the whole
+    assert exact.affected_coefficient_share == 1.0    # so the share is one, not one-plus-an-ulp
+    assert 0.0 <= default.affected_coefficient_share < 1.0
+
+
 @pytest.mark.parametrize("definition", [
     "",
     "   ",
