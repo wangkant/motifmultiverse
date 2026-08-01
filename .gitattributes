@@ -1,0 +1,23 @@
+# Files whose BYTES are an identity, not merely whose content is.
+#
+# The criterion checksum frozen in docs/MERGE_CRITERION_PREREGISTRATION.md, and
+# the `criteria_sha256` a run records in its provenance, are both sha256 of the
+# file exactly as it sits on disk. Git's default `core.autocrlf=true` on Windows
+# rewrites line endings at checkout, so the same committed file hashes
+# differently there. Measured on a Windows clone: criteria.v2.yaml checks out
+# with 416 CRLF and hashes to e35ac653..., while the committed blob is LF and
+# hashes to 8af0a879... -- which is the value the preregistration document
+# records.
+#
+# Two harms, and the second is the worse one. The preregistration check -- the
+# mechanism that exists to make a silent criterion change impossible -- fires as
+# a false alarm on every Windows clone, which teaches a reader to dismiss exactly
+# the alarm it was built to raise. And a provenance record written on Windows
+# disagrees with one written on Linux about which criteria produced the run,
+# for two runs that used the identical file.
+#
+# Pinned rather than left to `core.autocrlf` because the property has to hold on
+# a machine whose git is configured by somebody else.
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.tsv  text eol=lf
