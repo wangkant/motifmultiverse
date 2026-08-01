@@ -27,6 +27,40 @@ motifs across models and methods.**
 > dispatch table rather than maintained by hand, because it was wrong twice before
 > it was generated. Read that section before investing time.
 
+## Quickstart
+
+Five minutes, no data to download.
+
+```bash
+pip install -e .
+python examples/quickstart/make_inputs.py quickstart_inputs
+cd quickstart_inputs
+
+motifmultiverse ingest    project.json --out registry
+motifmultiverse align     registry     --out evidence
+motifmultiverse annotate  evidence     --registry registry --out evidence
+motifmultiverse adjudicate evidence    --registry registry --out decisions
+motifmultiverse compile   registry     --decisions decisions/merge_decisions.json --out lexicons
+```
+
+The generator writes two TF-MoDISco-shaped HDF5 files and a project config. The
+matrices come from a fixed seed and are not real motifs; the run shows what each
+stage writes and what it refuses, not what any biology looks like.
+
+`annotate` reports `0 candidates from 0 backends` here, because no motif database
+is installed. That is the intended behaviour: it says what it did not do rather
+than returning an empty result that looks complete.
+
+Four files are worth opening afterwards. `decisions/review.yaml` lists what a
+human still has to decide. `evidence/alignment_null_summary.tsv` holds the
+per-pair null. `lexicons/core.manifest.json` carries the lexicon's content hash.
+Every output directory has a `provenance.json` and a `guard_outcomes.json`.
+
+Each stage also writes `run_status.json`. Trust an output directory only when it
+says `"status": "SUCCESS"`.
+
+For a run on real discovery output, see [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
+
 ## Contents
 
 [Overview](#overview) · [Installation](#installation) · [Usage](#usage) ·

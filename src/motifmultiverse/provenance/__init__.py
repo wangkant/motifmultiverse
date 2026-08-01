@@ -45,6 +45,19 @@ class ProvenanceError(ValueError):
 
 
 def sha256_file(path: str | os.PathLike[str]) -> str:
+    # A directory here is the ordinary mistake, not a corner case: almost every
+    # `--flag` in this CLI takes a directory, and `compile --decisions` takes a
+    # file. Passing the directory produced `IsADirectoryError` out of the middle
+    # of provenance -- an unhandled traceback at exit 1, where this package's
+    # whole contract is that a refusal is named and exits 4. Found by running the
+    # quickstart.
+    if os.path.isdir(path):
+        raise ProvenanceError(
+            f"{path} is a directory, and an input has to be a file for its checksum "
+            "to mean anything. If a subcommand asks for one artifact, name the "
+            "artifact -- `--decisions decisions/merge_decisions.json`, not "
+            "`--decisions decisions/`."
+        )
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):

@@ -393,9 +393,12 @@ def test_every_readme_quickstart_command_parses():
     """The README's own `validate` line omitted a required argument and exited 2.
 
     A documented command that the parser rejects is a claim the tool contradicts
-    the moment anyone copies it. Parsing is checked here, not execution: the
-    quick-start names input files that do not exist in a checkout, and inventing
-    them would test the fixtures rather than the documentation.
+    the moment anyone copies it.
+
+    This checks parsing across EVERY fenced block, including the ones whose inputs
+    a reader has to supply. The quickstart's own sequence generates its inputs and
+    is therefore executed rather than parsed, in
+    `test_the_readme_quickstart_actually_runs`.
     """
     import shlex
 
@@ -709,3 +712,47 @@ def test_no_published_file_carries_a_local_path_or_identity():
                 line = text.count("\n", 0, match.start()) + 1
                 offences.append(f"{name}:{line}: {what} -- {match.group(0)!r}")
     assert not offences, "published files carry local identity:\n  " + "\n  ".join(offences[:20])
+
+
+def test_the_readme_quickstart_actually_runs(tmp_path):
+    """Not "parses" -- runs, from a checkout, with nothing downloaded.
+
+    `test_every_readme_quickstart_command_parses` checks the parser because the
+    older examples named files a reader had to supply. The quickstart generates
+    its own inputs, so the stronger claim is available and is the one worth
+    making: a documented sequence that has never been executed is a claim about
+    software nobody ran.
+
+    The matrices are seeded noise. This asserts the pipeline completes and writes
+    the artifacts the README says it writes -- not that any number is meaningful.
+    """
+    import subprocess
+    import sys
+
+    root = _repo_root()
+    inputs = tmp_path / "quickstart_inputs"
+    subprocess.run([sys.executable, str(root / "examples/quickstart/make_inputs.py"),
+                    str(inputs)], check=True, capture_output=True)
+    assert (inputs / "project.json").exists()
+
+    def cli(*args):
+        result = subprocess.run(
+            [sys.executable, "-m", "motifmultiverse.cli", *args],
+            cwd=inputs, capture_output=True, text=True)
+        assert result.returncode == 0, f"{args[0]} exited {result.returncode}: {result.stderr}"
+        return result
+
+    cli("ingest", "project.json", "--out", "registry")
+    cli("align", "registry", "--out", "evidence")
+    cli("annotate", "evidence", "--registry", "registry", "--out", "evidence")
+    cli("adjudicate", "evidence", "--registry", "registry", "--out", "decisions")
+    cli("compile", "registry", "--decisions", "decisions/merge_decisions.json",
+        "--out", "lexicons")
+
+    # The four files the README tells a reader to open.
+    for relative in ("decisions/review.yaml", "evidence/alignment_null_summary.tsv",
+                     "lexicons/core.manifest.json", "lexicons/provenance.json"):
+        assert (inputs / relative).exists(), relative
+    for stage in ("registry", "evidence", "decisions", "lexicons"):
+        status = json.loads((inputs / stage / "run_status.json").read_text())
+        assert status["status"] == "SUCCESS", (stage, status)
