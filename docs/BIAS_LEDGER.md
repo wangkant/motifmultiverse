@@ -54,6 +54,14 @@ under 10% of the base set's size. In the same ladder, permuting input order prod
 the largest coefficient displacement measured and **zero** discrete flips. Two axes,
 neither predicting the other. See [`LESSONS.md`](LESSONS.md).
 
+`BA-14` is **confirmed and re-attributed** by
+[`INPUT_SCALE_INVARIANCE.md`](INPUT_SCALE_INVARIANCE.md): a peak really can be
+retained in one run and dropped in another, but the two runs need not differ in
+scale at all — order or batch size at identical region count is enough, while
+scale alone is not. The mitigation column is unchanged and remains correct, since
+it forbids re-calling rather than forbidding growth. The permutation clause above
+is contradicted there (876 flips, not zero).
+
 **`BA-17`** is the reason the schema has a four-state enum rather than a nullable float.
 The encoding had already been written down; a table operation coerced an all-undefined
 group to `0.0` anyway, and the coverage figure computed after that coercion reported

@@ -49,13 +49,21 @@ loader refuses a file that claims the first without resolving to it.
 Pre-alpha; the API is unstable. All ten stages are implemented and no subcommand
 raises `NotImplementedError`.
 
-**Read this before running it on work you care about.** The default adjudication
-criteria now include a preregistered `TRUE_DUPLICATE` rule, so **a default run
-deletes motifs**. That rule is checksummed in
+**What a default run does.** The default adjudication criteria are
+`adjudicate/criteria.v1.yaml`, whose `TRUE_DUPLICATE` is
+`CRITERION_NOT_YET_DEFINED`: every duplicate is **deferred and recorded**, the
+compiled lexicon is **undeduplicated**, and **a default run removes no motifs**.
+That is the conservative direction on purpose — an under-deduplicated lexicon
+carries a duplicate the reader can still see and still merge, while an
+over-deduplicated one has lost a motif and does not record which.
+
+A preregistered `TRUE_DUPLICATE` rule that *does* deduplicate ships as
+`adjudicate/criteria.v2.yaml`. It is **available and asked for, not administered
+by default**: pass it to `--criteria`. It is checksummed in
 [`docs/MERGE_CRITERION_PREREGISTRATION.md`](docs/MERGE_CRITERION_PREREGISTRATION.md)
 together with what it predicted, what would falsify it, and what happened on
 held-out data — where it fired two of its own falsifiers on the single-context
-configuration. Three properties matter more than the fact that it exists:
+configuration. Three properties are why it is not the default:
 
 - its error direction is **deletion**, which the reader of a lexicon cannot undo;
 - it merges on geometry, while this package's own stated principle is that merges
@@ -65,9 +73,6 @@ configuration. Three properties matter more than the fact that it exists:
 - against plain TomTom merging it wins by **refusing**, not by finding: on the
   reference registry every pair it merged, TomTom merged too, and it merged none
   that TomTom did not.
-
-Pass `--criteria` the packaged `criteria.v1.yaml` to defer every duplicate and
-compile an undeduplicated lexicon, which is what earlier releases did.
 
 `report` renders markdown only and prints `NOT RECORDED` for the fields no
 artifact carries. The per-module table in
@@ -354,10 +359,16 @@ though it were a measured *p* value.
 >
 > What *is* checkable from a checkout: the [Quickstart](#quickstart), which
 > generates its own inputs and is executed by the test suite, and
-> [`docs/CASE_STUDY.md`](docs/CASE_STUDY.md), which runs the pipeline on real
-> discovery output and reports what it found. Reproducing finding 1 would need the
-> hit caller re-run at two scales on a shared peak set, which is the smallest
-> experiment that would move these claims into this repository.
+> [`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md) with
+> [`examples/input_scale_invariance.py`](examples/input_scale_invariance.py),
+> which re-measure finding 1 below and report what they found. (The
+> `docs/CASE_STUDY.md` referenced elsewhere in this file is **not in the
+> repository**; that link is dangling and the run it describes is not shipped
+> here.)
+>
+> **Findings 1 and 2 have since been measured here**, and neither survived
+> unchanged. Each carries its own correction below, in place, rather than being
+> silently left standing because the design depends on it.
 
 **1. The hit caller is not input-scale invariant.** The same regions produce
 different *discrete* retention decisions depending on which other regions share
@@ -366,10 +377,31 @@ base — a **9.67%** increase in scale suffices. Consequence: every specificatio
 must be a subset of **one frozen run**. That is an architecture constraint, not an
 implementation detail.
 
+> **Instability confirmed here; the scale attribution withdrawn.** Measured on
+> K562 ALLPEAKS ([`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md)):
+> the discrete output does move, by 3.4–6.3% of shared regions against a 0-change
+> instrument floor. But **growing the input changes nothing** — +9.67% and +100%
+> both give exactly 0 decision changes when each region keeps its row position.
+> Re-ordering the same 6,460 regions changes 876; changing only `--batch-size`
+> changes 1,557. The operative variable is the caller's per-region *iteration
+> count*, which scale does not move and which order and batch size do. **The
+> "(6,460, 7,085]" bracket and the "9.67% suffices" figure do not reproduce and
+> should not be cited as a scale threshold.** The consequence above survives —
+> strengthened, since re-calling perturbs decisions even at identical scale — but
+> it now rests on re-call instability, not on region count. See
+> [`guards.single_scale`](src/motifmultiverse/guards/__init__.py), which keys on
+> that count and is therefore under-keyed for the effect that actually exists.
+
 **2. Numeric and discrete divergence are independent axes.** Permuting input order
 produced the largest coefficient displacement measured (**2.07×** the median
 coefficient) and **zero** discrete flips. Measure and gate them separately; never
 let one license the other.
+
+> **Both halves contradicted here.** The same measurement permuted input order at
+> fixed scale and got **876 discrete flips** across 4.69% of regions, not zero,
+> and a largest displacement of **104×** the median coefficient, not 2.07×. The
+> *advice* — measure and gate the two axes separately — is unaffected and is what
+> the package implements. The *numbers* are not reproduced on this substrate.
 
 **3. Writing a rule down is not executing it.** A four-state missingness encoding
 was specified and still silently destroyed by a table pivot returning `0.0` for an
@@ -464,10 +496,13 @@ the affected subset of frozen standardized hit tables. An all-peak delta remains
 a dilution diagnostic: fewer than 30 affected peaks are recorded as
 `LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim.
 
-One threshold has been frozen and the rest have not. `TRUE_DUPLICATE` now carries
-a preregistered rule in `adjudicate/criteria.v2.yaml`, the default, so a default
-run collapses duplicates and **removes motifs**. `FRAGMENT_MATCH` remains
-`CRITERION_NOT_YET_DEFINED` and every fragment still defers.
+One threshold has been frozen and the rest have not, and the frozen one is **not
+in force by default**. `TRUE_DUPLICATE` carries a preregistered rule in
+`adjudicate/criteria.v2.yaml`, which collapses duplicates and **removes motifs**;
+it is reached with `--criteria`. The default registry is
+`adjudicate/criteria.v1.yaml`, where `TRUE_DUPLICATE` and `FRAGMENT_MATCH` are
+both `CRITERION_NOT_YET_DEFINED`, so a default run defers every duplicate and
+every fragment and removes no motifs.
 
 The frozen rule is a declared heuristic and says so in its own status field. Its
 magnitudes were anchored on one registry, its predictions were registered and
@@ -477,10 +512,13 @@ of the rule's own falsifiers fired. What no run available to this project can
 establish is **correctness**: there is no labelled set of same-motif pairs, and
 the downstream test the design principle asks for has no power at this operating
 point. A held-out run therefore shows the rule is *consistent*, never that it is
-*right*, and nothing here reports it otherwise.
+*right*, and nothing here reports it otherwise. A rule in that state is one a user
+should be able to choose; it is not one to administer to everybody who types
+`adjudicate`.
 
-`adjudicate/criteria.v1.yaml` still ships. Pass it to `--criteria` for the earlier
-behaviour: every duplicate deferred, an undeduplicated lexicon, no motif removed.
+That a default run removes no motifs is pinned as a property rather than as a
+file name, by `tests/test_default_removes_no_motifs.py`, on a fixture the
+`criteria.v2.yaml` rule demonstrably does delete from.
 
 [`docs/ROADMAP.md`](docs/ROADMAP.md) states milestones M0–M5 by completion criteria
 rather than dates.

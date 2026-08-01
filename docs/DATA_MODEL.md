@@ -229,9 +229,12 @@ silently answers both questions with one value.
 
 ## Criterion registry — criterion before implementation
 
-Implemented in `src/motifmultiverse/schema/criteria.py`; the frozen data lives in
-`config/criteria.v1.yaml`. See `docs/CONSTRAINTS.md` (`FP-04`, `FP-08`, `FP-13`)
-and `docs/CONCEPT.md` ("A merge is validated downstream, not by similarity").
+Implemented in `src/motifmultiverse/schema/criteria.py`; the data lives in
+`src/motifmultiverse/adjudicate/criteria.v1.yaml`, which is the registry a run
+loads when `--criteria` is not given. (`criteria.v2.yaml` ships beside it and is
+described in `docs/MERGE_CRITERION_PREREGISTRATION.md`; it is not the default.)
+See `docs/CONSTRAINTS.md` (`FP-04`, `FP-08`, `FP-13`) and `docs/CONCEPT.md`
+("A merge is validated downstream, not by similarity").
 
 A `Criterion` is one versioned, executable rule for one candidate relationship
 between two motifs (`TRUE_DUPLICATE`, `FRAGMENT_MATCH`, `SAME_FAMILY_VARIANT`,

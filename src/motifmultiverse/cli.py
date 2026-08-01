@@ -210,10 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     a.add_argument("--criteria", default=None,
                    help="versioned executable criterion registry (default: the "
-                        "criteria.v2.yaml packaged with adjudicate, whose TRUE_DUPLICATE "
-                        "is a FROZEN_DECLARED_HEURISTIC and therefore DEDUPLICATES; pass "
-                        "the packaged criteria.v1.yaml for the pre-v2 meaning, which "
-                        "always defers and leaves the lexicon undeduplicated)")
+                        "criteria.v1.yaml packaged with adjudicate, whose TRUE_DUPLICATE "
+                        "is CRITERION_NOT_YET_DEFINED and therefore always DEFERS, so a "
+                        "default run REMOVES NO MOTIFS and the compiled lexicon is "
+                        "undeduplicated; pass the packaged criteria.v2.yaml to apply the "
+                        "preregistered TRUE_DUPLICATE heuristic, which DELETES motifs -- "
+                        "read docs/MERGE_CRITERION_PREREGISTRATION.md first)")
     a.add_argument("--review", default="review.yaml",
                    help="human review file to emit. It is one of this subcommand's three "
                         "output artifacts, so a RELATIVE path is resolved against --out "

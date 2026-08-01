@@ -15,7 +15,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from motifmultiverse.adjudicate import packaged_criteria_path
+from motifmultiverse.adjudicate import (
+    packaged_criteria_path,
+    packaged_v1_criteria_path,
+    packaged_v2_criteria_path,
+)
 from motifmultiverse.schema import (
     MISSING_SENTINEL,
     REGISTRY_SCHEMA_VERSION,
@@ -25,6 +29,7 @@ from motifmultiverse.schema import (
 )
 from motifmultiverse.schema.criteria import (
     CRITERIA_SCHEMA_VERSION,
+    EVALUABLE_STATUSES,
     CriteriaError,
     Criterion,
     CriterionEvaluation,
@@ -34,7 +39,14 @@ from motifmultiverse.schema.criteria import (
     load_criteria,
 )
 
+#: The DEFAULT registry -- what `adjudicate` loads with no `--criteria`. Tests
+#: below that use it are about the stage's behaviour under the default, and their
+#: expectations move when the default moves; that is intended, and is why the two
+#: tests about a *specific* criterion's content use `V2_CRITERIA_PATH` instead.
 CRITERIA_PATH = packaged_criteria_path()
+
+#: The v2 registry, named explicitly. Only the tests that assert what v2 says.
+V2_CRITERIA_PATH = packaged_v2_criteria_path()
 
 
 def _complete_duplicate_evidence():
@@ -91,43 +103,60 @@ def _write_registry(tmp_path, entries, schema_version=CRITERIA_SCHEMA_VERSION):
 # Loader / parser tests -- select with `-k criterion`.
 # ---------------------------------------------------------------------------
 
-def test_criterion_loader_loads_the_four_v1_relationships():
-    criteria = load_criteria(CRITERIA_PATH)
-    assert set(criteria) == {
-        "TRUE_DUPLICATE", "FRAGMENT_MATCH", "SAME_FAMILY_VARIANT", "AMBIGUOUS_CROSS_FAMILY",
-    }
+def test_criterion_loader_loads_the_four_relationships_from_every_shipped_registry():
+    """ABOUT THE FORMAT, so it is asked of every registry the wheel ships.
+
+    This used to be named `..._the_four_v1_relationships` and read the DEFAULT,
+    which is the exact coupling the rest of this file was untangled to remove: the
+    name claimed v1, the body would have followed the default wherever it went.
+    Neither reading is right. The four relationships are the schema's closed set,
+    so the claim holds of v1 and v2 alike, and asking it of both is strictly
+    stronger than asking it of either.
+    """
+    for path in (packaged_v1_criteria_path(), V2_CRITERIA_PATH):
+        assert set(load_criteria(path)) == {
+            "TRUE_DUPLICATE", "FRAGMENT_MATCH", "SAME_FAMILY_VARIANT",
+            "AMBIGUOUS_CROSS_FAMILY",
+        }, path.name
 
 
-def test_criterion_loader_marks_undefined_thresholds_correctly():
-    """FRAGMENT_MATCH still needs a magnitude the frozen design does not state and
+def test_criterion_loader_marks_v2s_statuses_correctly():
+    """ABOUT v2, so it names v2 -- this is what each status is in that file.
+
+    FRAGMENT_MATCH still needs a magnitude the frozen design does not state and
     stays CRITERION_NOT_YET_DEFINED; the two structural, categorical criteria stay
     FROZEN; TRUE_DUPLICATE is FROZEN_DECLARED_HEURISTIC, which is evaluable but can
-    never be mistaken for one whose numbers were derived.
+    never be mistaken for one whose numbers were derived. Only v2 has a
+    FROZEN_DECLARED_HEURISTIC at all, so reading this off "the default" asserted
+    something about the default that was never the subject.
     """
-    criteria = load_criteria(CRITERIA_PATH)
+    criteria = load_criteria(V2_CRITERIA_PATH)
     assert criteria["TRUE_DUPLICATE"].status is CriterionStatus.FROZEN_DECLARED_HEURISTIC
     assert criteria["FRAGMENT_MATCH"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
     assert criteria["SAME_FAMILY_VARIANT"].status is CriterionStatus.FROZEN
     assert criteria["AMBIGUOUS_CROSS_FAMILY"].status is CriterionStatus.FROZEN
 
 
-def test_the_legacy_v1_registry_still_ships_and_still_means_what_it_meant():
-    """`--criteria .../criteria.v1.yaml` must keep reproducing a pre-v2 run.
+def test_the_v1_registry_defers_every_duplicate_and_is_the_default():
+    """ABOUT v1, and separately about the fact that v1 is what a bare run loads.
 
-    Freezing TRUE_DUPLICATE changed the DEFAULT, not the meaning of an existing
-    pinned registry. A v1 file's thresholds carry no `provenance` because the key
-    did not exist when it was written; the loader must keep reading it, and
-    TRUE_DUPLICATE there must still be CRITERION_NOT_YET_DEFINED with no predicates.
+    Both halves are asserted here because they are different claims and the file
+    used to conflate them. v1's TRUE_DUPLICATE is CRITERION_NOT_YET_DEFINED with
+    no predicates and defers on complete evidence -- that is true whether or not
+    it is the default. That it IS the default is the second assertion, and it is
+    what makes `adjudicate` remove no motifs unless asked.
     """
-    from motifmultiverse.adjudicate import packaged_legacy_criteria_path
+    from motifmultiverse.adjudicate import packaged_v1_criteria_path
 
-    legacy = load_criteria(packaged_legacy_criteria_path())
-    assert legacy["TRUE_DUPLICATE"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
-    assert legacy["TRUE_DUPLICATE"].predicates == ()
-    assert legacy["TRUE_DUPLICATE"].version == "1"
+    v1 = load_criteria(packaged_v1_criteria_path())
+    assert v1["TRUE_DUPLICATE"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED
+    assert v1["TRUE_DUPLICATE"].predicates == ()
+    assert v1["TRUE_DUPLICATE"].version == "1"
     assert evaluate_criterion(
-        legacy["TRUE_DUPLICATE"], _complete_duplicate_evidence()
+        v1["TRUE_DUPLICATE"], _complete_duplicate_evidence()
     ).decision is Decision.DEFERRED
+
+    assert packaged_criteria_path() == packaged_v1_criteria_path()
 
 
 def test_criterion_loader_rejects_unknown_predicate_operator(tmp_path):
@@ -331,9 +360,17 @@ def test_criterion_loader_present_operator_is_recognised():
     assert result.matched is True
 
 
-def test_criterion_loader_every_v1_criterion_carries_its_own_version():
-    for criterion in load_criteria(CRITERIA_PATH).values():
-        assert criterion.version
+def test_every_criterion_in_every_shipped_registry_carries_its_own_version():
+    """ABOUT THE FORMAT. Same reasoning as the four-relationships test above.
+
+    A per-criterion `version` is what `stable_decision_id` hashes, so a registry
+    that shipped one without it would make decisions that cannot be told apart
+    across registry revisions. That must hold of whichever file is default AND of
+    whichever file is not.
+    """
+    for path in (packaged_v1_criteria_path(), V2_CRITERIA_PATH):
+        for criterion_id, criterion in load_criteria(path).items():
+            assert criterion.version, f"{path.name}:{criterion_id} carries no version"
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +421,14 @@ def test_predicate_eq_operator_also_requires_a_comparison_value():
 # ---------------------------------------------------------------------------
 
 def test_undefined_criterion_returns_deferred_not_a_guessed_decision():
-    criterion = load_criteria(CRITERIA_PATH)["TRUE_DUPLICATE"]
+    """Demoting an EVALUABLE criterion must silence it, so it starts from v2.
+
+    Taken from the default (v1) the demotion would be a no-op -- v1's
+    TRUE_DUPLICATE is already CRITERION_NOT_YET_DEFINED -- and the test would pass
+    without exercising the branch it is named after.
+    """
+    criterion = load_criteria(V2_CRITERIA_PATH)["TRUE_DUPLICATE"]
+    assert criterion.status in EVALUABLE_STATUSES, "the demotion below must demote something"
     criterion = replace(criterion, status=CriterionStatus.CRITERION_NOT_YET_DEFINED)
     decision = evaluate_criterion(criterion, _complete_duplicate_evidence())
     assert decision.decision is Decision.DEFERRED
@@ -396,8 +440,10 @@ def test_true_duplicate_v2_no_longer_reads_the_underpowered_reconstruction_evide
     field, so supplying them can no longer make the criterion evaluable -- and
     their absence can no longer block it. The old evidence bundle alone is now
     simply insufficient: DEFERRED, not a guess in either direction.
+
+    ABOUT v2, so it names v2 rather than the default.
     """
-    criterion = load_criteria(CRITERIA_PATH)["TRUE_DUPLICATE"]
+    criterion = load_criteria(V2_CRITERIA_PATH)["TRUE_DUPLICATE"]
     assert "paired_delta_reconstruction_affected" not in criterion.required_evidence
     assert "family_coefficient_share" not in criterion.required_evidence
 
@@ -1285,7 +1331,15 @@ def _write_adjudication_registry(
 
 
 def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
-    """Routing to the skeleton or ignoring --review fails this end-to-end path."""
+    """Routing to the skeleton or ignoring --review fails this end-to-end path.
+
+    ABOUT THE DEFAULT: no `--criteria` is passed. The summary line is therefore
+    checked against the decision the run actually wrote rather than against a
+    literal outcome word. It used to assert `refuse_merge`, which was true only
+    while the default was v2 -- under the default (v1) this component's
+    TRUE_DUPLICATE is CRITERION_NOT_YET_DEFINED and the outcome is `deferred`.
+    Neither word is what this test is for.
+    """
     import json
 
     import pandas as pd
@@ -1328,7 +1382,15 @@ def test_cli_adjudicate_reads_evidence_and_honors_review_path(tmp_path, capsys):
     provenance = json.loads((out / "provenance.json").read_text())
     assert len(provenance) == 1
     assert provenance[0]["subcommand"] == "adjudicate"
-    assert "refuse_merge" in capsys.readouterr().out.lower()
+    written = pd.read_parquet(out / "ontology_decisions.parquet")
+    assert len(written) == 1
+    outcome = written["decision"].iat[0]
+    stdout = capsys.readouterr().out.lower()
+    assert f"{outcome}=1" in stdout, (
+        f"the summary line does not report the decision that was written ({outcome}): {stdout}"
+    )
+    # A default run may not report a collapse, whatever else it reports.
+    assert "collapse" not in stdout
 
 
 def test_cli_adjudicate_requires_an_authoritative_registry():
@@ -1637,8 +1699,15 @@ def test_packaged_criteria_resolve_without_the_repository_tree():
 
 
 def test_criteria_resource_is_declared_as_package_data():
-    """A resource that is loaded but not declared ships only by accident."""
+    """A resource that is loaded but not declared ships only by accident.
+
+    Asked of `CRITERIA_RESOURCE` rather than of a file name spelled out here: the
+    subject is "whatever the default loads must be in the wheel", and a literal
+    goes stale silently the moment the default moves -- which it has, twice.
+    """
     import tomllib
+
+    from motifmultiverse.adjudicate import CRITERIA_RESOURCE
 
     root = Path(__file__).resolve().parents[1]
     pyproject = root / "pyproject.toml"
@@ -1646,8 +1715,8 @@ def test_criteria_resource_is_declared_as_package_data():
         pytest.skip("source tree not present in this installation")
     data = tomllib.loads(pyproject.read_text())
     declared = data["tool"]["setuptools"]["package-data"]["motifmultiverse"]
-    assert any("criteria.v1.yaml" in entry for entry in declared), (
-        f"criteria.v1.yaml is loaded at runtime but not in package-data: {declared}"
+    assert any(CRITERIA_RESOURCE in entry for entry in declared), (
+        f"{CRITERIA_RESOURCE} is loaded at runtime but not in package-data: {declared}"
     )
 
 

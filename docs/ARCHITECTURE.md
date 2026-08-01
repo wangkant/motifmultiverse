@@ -68,6 +68,14 @@ regions share the input. In the reference implementation the onset of divergence
 was bracketed to under 10% growth on the base set (see `CONCEPT.md`). Re-calling
 per specification would confound the specification axis with the caller.
 
+`INPUT_SCALE_INVARIANCE.md` re-measured this here and found the instability real
+but **not driven by scale**: growth alone changed no decisions, while re-ordering
+the input or changing the caller's batch size did, at identical region counts. The
+rule in bold above holds unchanged — it is a rule against re-calling, and
+re-calling is exactly what was shown to be unsafe. What does not hold is the idea
+that a *small enough* growth would be safe, or that `guards.single_scale`'s
+equal-`input_scale` check is sufficient to detect a substrate change.
+
 Consequences, stated because they are expensive:
 
 - `input_scale` is a provenance field on **every** result, and `guards.single_scale`

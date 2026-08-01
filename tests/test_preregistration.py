@@ -11,6 +11,13 @@ That is the whole mechanism. It cannot tell whether the recorded checksum
 predates the evidence -- nothing in a repository can, since a timestamp is as
 editable as the file -- so it enforces the part that is enforceable and the
 document states the part that is not.
+
+Every assertion here names `criteria.v2.yaml` EXPLICITLY, through
+`packaged_v2_criteria_path`. The document registers one specific criterion, and
+whether that criterion is also the package default is a separate question with a
+separate answer (it is not, and `tests/test_default_removes_no_motifs.py` owns
+that one). Reaching the registered file through "whatever the default is" would
+make this suite fail on a default change that did not touch the registration.
 """
 from __future__ import annotations
 
@@ -20,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-from motifmultiverse.adjudicate import packaged_criteria_path
+from motifmultiverse.adjudicate import packaged_v2_criteria_path
 from motifmultiverse.schema.criteria import load_criteria
 
 PREREGISTRATION = Path(__file__).resolve().parents[1] / "docs" / "MERGE_CRITERION_PREREGISTRATION.md"
@@ -41,7 +48,7 @@ def test_the_registered_checksum_is_the_shipped_criteria_file():
     registered = re.search(r"\*\*sha256\*\*\s*\|\s*`([0-9a-f]{64})`", document)
     assert registered, "the preregistration document states no sha256"
 
-    actual = hashlib.sha256(packaged_criteria_path().read_bytes()).hexdigest()
+    actual = hashlib.sha256(packaged_v2_criteria_path().read_bytes()).hexdigest()
     assert registered.group(1) == actual, (
         "criteria.v2.yaml no longer matches the checksum recorded in "
         f"{PREREGISTRATION.name}. Either the edit was unintended, or the "
@@ -55,7 +62,7 @@ def test_the_registered_checksum_is_the_shipped_criteria_file():
 def test_the_document_registers_the_two_declared_magnitudes_that_are_in_force():
     """The prose must name the values the loader actually applies."""
     document = _document()
-    criterion = load_criteria(packaged_criteria_path())["TRUE_DUPLICATE"]
+    criterion = load_criteria(packaged_v2_criteria_path())["TRUE_DUPLICATE"]
 
     declared = {p.field: p.value for p in criterion.predicates if p.provenance == "declared"}
     assert declared == {"ppm_similarity": 0.90, "overlap_bp": 8}, (

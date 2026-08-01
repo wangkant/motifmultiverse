@@ -42,25 +42,49 @@ __all__ = [
     "write_adjudication_artifacts",
     "adjudicate_evidence",
     "packaged_criteria_path",
-    "packaged_legacy_criteria_path",
+    "packaged_v1_criteria_path",
+    "packaged_v2_criteria_path",
     "run",
 ]
 
 ADJUDICATION_SCHEMA_VERSION = "1"
 
-#: The registry loaded when ``--criteria`` is not given. Moved from
-#: ``criteria.v1.yaml`` to ``criteria.v2.yaml`` when TRUE_DUPLICATE was frozen as
-#: a declared heuristic: leaving the default on v1 would have kept the default
-#: pipeline compiling an UNDEDUPLICATED lexicon, which is the whole failure the
-#: freeze was authorised to end. ``criteria.v1.yaml`` still ships and still loads
-#: -- pass it explicitly to reproduce a pre-v2 run bit for bit, including its
-#: recorded ``criteria_sha256``.
-CRITERIA_RESOURCE = "criteria.v2.yaml"
-LEGACY_CRITERIA_RESOURCE = "criteria.v1.yaml"
+#: The registry loaded when ``--criteria`` is not given: ``criteria.v1.yaml``,
+#: whose ``TRUE_DUPLICATE`` is ``CRITERION_NOT_YET_DEFINED`` and therefore always
+#: ``DEFERRED``. **A default run removes no motifs.**
+#:
+#: It was briefly ``criteria.v2.yaml`` -- the preregistered ``TRUE_DUPLICATE``
+#: heuristic -- and that is reverted here rather than defended. The two error
+#: directions are not symmetric: an under-deduplicated lexicon carries a
+#: duplicate a reader can still see and still merge, while an over-deduplicated
+#: one has lost a motif and does not record which. On its own preregistered
+#: held-out set the v2 rule fired two of its own falsifiers. A criterion in that
+#: state should be *available and asked for*, not administered by default.
+#:
+#: v2 is unchanged, still packaged in the wheel, and still reachable --
+#: ``--criteria`` with :func:`packaged_v2_criteria_path`, which reproduces a v2
+#: run bit for bit including its recorded ``criteria_sha256``.
+CRITERIA_RESOURCE = "criteria.v1.yaml"
+V1_CRITERIA_RESOURCE = "criteria.v1.yaml"
+V2_CRITERIA_RESOURCE = "criteria.v2.yaml"
+
+
+def _packaged(resource: str) -> Path:
+    from importlib.resources import as_file, files
+
+    with as_file(files(__package__).joinpath(resource)) as concrete:
+        return Path(concrete)
 
 
 def packaged_criteria_path() -> Path:
-    """Locate the versioned criterion registry that ships with the package.
+    """Locate the criterion registry used when ``--criteria`` is not given.
+
+    This is *the default*, by definition, and callers that want a particular
+    criterion's behaviour must ask for that criterion by name
+    (:func:`packaged_v1_criteria_path`, :func:`packaged_v2_criteria_path`)
+    instead. Reading "the default" to reach a specific registry is what made
+    changing the default look like a regression in tests that were never about
+    the default at all.
 
     The default used to be ``Path(__file__).parents[3] / "config" / ...``, which
     resolves to the repository root only when running from a source checkout. In
@@ -73,27 +97,32 @@ def packaged_criteria_path() -> Path:
     decision (``criteria_sha256``), so it belongs beside the module that reads it
     rather than in the repository's ``config/``, which holds user-facing examples.
     """
-    from importlib.resources import as_file, files
-
-    resource = files(__package__).joinpath(CRITERIA_RESOURCE)
-    with as_file(resource) as concrete:
-        return Path(concrete)
+    return _packaged(CRITERIA_RESOURCE)
 
 
-def packaged_legacy_criteria_path() -> Path:
-    """Locate the v1 registry, retained so a pre-v2 run stays reproducible.
+def packaged_v1_criteria_path() -> Path:
+    """Locate the v1 registry by name: ``TRUE_DUPLICATE`` is undefined, so it defers.
 
-    v1 is not loaded by anything on the default path. It ships because
-    ``--criteria <this>`` is the documented way to get the pre-v2 meaning back --
-    ``TRUE_DUPLICATE`` ``CRITERION_NOT_YET_DEFINED``, always ``DEFERRED`` -- and a
-    wheel that dropped the file would make that impossible from an installed
-    package rather than merely inconvenient.
+    v1 is currently also what :func:`packaged_criteria_path` returns. The two are
+    separate functions anyway, because they answer different questions -- "what
+    does a run with no ``--criteria`` do" and "what does v1 say" -- and a test
+    that means the second must not be written against the first.
     """
-    from importlib.resources import as_file, files
+    return _packaged(V1_CRITERIA_RESOURCE)
 
-    resource = files(__package__).joinpath(LEGACY_CRITERIA_RESOURCE)
-    with as_file(resource) as concrete:
-        return Path(concrete)
+
+def packaged_v2_criteria_path() -> Path:
+    """Locate the v2 registry, the preregistered ``TRUE_DUPLICATE`` heuristic.
+
+    v2 is not loaded by anything on the default path: it COLLAPSES motifs, and
+    deletion is the one direction a reader of a compiled lexicon cannot undo. It
+    ships, and is reached by name here rather than by a path literal, because
+    ``--criteria <this>`` is the supported way to run it -- with the caveats in
+    ``docs/MERGE_CRITERION_PREREGISTRATION.md``, including the two falsifiers it
+    fired on its own held-out set -- and a wheel that dropped the file would make
+    that impossible from an installed package rather than merely inconvenient.
+    """
+    return _packaged(V2_CRITERIA_RESOURCE)
 
 
 _MEDOID_TIE_FIELDS = (

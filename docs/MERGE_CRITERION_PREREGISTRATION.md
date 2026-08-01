@@ -10,6 +10,16 @@
 | Tuning set | K562 ALLPEAKS, 13 Leiden clusters, one ChromBPNet counts-head MoDISco run each; 139 registry nodes |
 | Validation set | GM12878, `region_v3/gm12878/interpret_cbp_par_hyp/modisco.h5` and siblings |
 | Written | before any GM12878 artifact was opened, and before any number in this document was computed from one |
+| In force by default? | **No.** The default registry is `criteria.v1.yaml`; this criterion applies only when `--criteria` names `criteria.v2.yaml`. It collapses motifs, and deletion is the one error direction a reader of a compiled lexicon cannot undo. |
+
+> **Note on one stale line inside the frozen file.** `criteria.v2.yaml`'s own
+> header comment still reads "This is the registry the package ships and loads by
+> default". It was true when the file was sealed and is not true now. It is left
+> uncorrected **on purpose**: the sha256 above covers the file's bytes, comments
+> included, so editing that sentence would invalidate this registration and
+> require re-registering the criterion — which `FP-13` reserves for a change to
+> the *rule*, not to a comment. The authoritative statement of what is default is
+> the row above, `adjudicate/README.md`, and `adjudicate.CRITERIA_RESOURCE`.
 
 This document exists because of a specific failure, named plainly in the next
 section. Everything after it is either a number computed on the tuning set, a
@@ -462,7 +472,10 @@ version pay it properly.
 1. Do not modify `criteria.v2.yaml`. Verify its sha256 matches the value in the
    header of this document before running anything.
 2. Run `ingest` → `align` → `annotate` → `adjudicate` → `compile` on GM12878 with
-   the packaged default criteria and `--null-shuffles 1000`.
+   `--criteria` pointing at the packaged `criteria.v2.yaml` and
+   `--null-shuffles 1000`. **Not the default criteria**: the default is
+   `criteria.v1.yaml`, which defers every duplicate, so a default run would test
+   nothing in this document.
 3. Record: `N`, `E`, the edge funnel of Section 3.2, the decision counts of
    Section 3.3, and the collapse membership of every component.
 4. Re-run `adjudicate` at `ppm ∈ {0.70, 0.80, 0.90, 0.95}` × `bp ∈ {8, 10}` to

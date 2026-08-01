@@ -43,6 +43,25 @@ bracket is a threshold, not a gradient, and "my subsets are only a bit smaller" 
 not an argument. Relaxing this means re-deriving the onset first, on your own
 caller and your own data.
 
+**Re-measured here, and the lesson changes shape.**
+[`INPUT_SCALE_INVARIANCE.md`](INPUT_SCALE_INVARIANCE.md) re-ran the caller on K562
+ALLPEAKS with one frozen lexicon. The instability reproduced; **the attribution to
+scale did not.** Growing the input 9.67% and 100%, with each region left at its
+original row index, changed 0 decisions out of 219,203 hits. Re-ordering the same
+6,460 regions changed 876, and changing only `--batch-size` changed 1,557. The
+caller's own `peaks_qc.tsv` shows why: those manipulations change how many solver
+iterations a region receives (up to 497 steps' difference for the same region),
+and growing the input does not. So the constraint above is *right* but its stated
+reason is wrong — the danger is **re-calling at all**, not re-calling at a
+different size, and "there is no measured safe zone" is if anything an
+understatement. It also means `guards.single_scale`, which compares a region
+*count*, cannot see the effect that actually exists.
+
+**And the meta-lesson survives its own test.** The paragraph above about the two
+intervals — one a measurement, one an absence of one — was the right instinct
+aimed at the wrong target. Both intervals were reported in the same units and with
+the same confidence, and neither was a scale threshold at all.
+
 ## 2. Two axes, two gates
 
 **The constraint.** Rerun invariance and batch-scale invariance are measured
@@ -54,6 +73,16 @@ without one. (`FP-18`)
 displacement of any perturbation measured — 2.07× the median coefficient — and
 exactly zero discrete flips.** The two axes moved independently, in opposite
 directions, in the same run.
+
+**Both numbers are contradicted by the re-measurement**
+([`INPUT_SCALE_INVARIANCE.md`](INPUT_SCALE_INVARIANCE.md)): permuting order at
+fixed scale moved the discrete axis by **876 flips** across 4.69% of regions, and
+the largest displacement was **104×** the median coefficient. The constraint is
+unaffected — separate gates are exactly what let the two be reported as different
+answers here rather than one being read off the other — but this section's
+illustration is no longer a case of "one axis moved and the other did not". A
+better reading of the same evidence: the numeric axis is so noisy that it fires on
+a run against itself, which is precisely why the discrete gate has to be separate.
 
 **What it blocks.** A single "reproducible" verdict. Whichever axis you measure
 will look clean and license the other, and which one you happen to measure decides

@@ -1,4 +1,12 @@
-"""The shipped TRUE_DUPLICATE v2 criterion, exercised on real registered pairs.
+"""The packaged TRUE_DUPLICATE v2 criterion, exercised on real registered pairs.
+
+v2 is NOT the package default -- `criteria.v1.yaml` is, and a default run removes
+no motifs. Everything below therefore names v2 explicitly, through
+`packaged_v2_criteria_path`, and none of it is evidence about what a user gets
+with no `--criteria`. That question belongs to
+`tests/test_default_removes_no_motifs.py`, and keeping the two apart is the whole
+reason this file stopped reading "the default" to reach a specific criterion.
+
 
 Every number in this file is a value that ``align`` actually produced on the K562
 13-cluster run (thirteen TF-MoDISco outputs, one per Leiden cluster of the ALLPEAKS
@@ -23,7 +31,7 @@ The three behaviours pinned here are the three a criterion can have:
 """
 from __future__ import annotations
 
-from motifmultiverse.adjudicate import adjudicate_component, packaged_criteria_path
+from motifmultiverse.adjudicate import adjudicate_component, packaged_v2_criteria_path
 from motifmultiverse.align import AlignmentEvidence
 from motifmultiverse.schema import Decision
 from motifmultiverse.schema.criteria import CriterionStatus, load_criteria
@@ -41,20 +49,22 @@ SEED = 20260731
 NULL_FLOOR_P = 0.000999
 
 
-def test_the_shipped_duplicate_criterion_is_an_evaluable_declared_heuristic():
+def test_the_v2_duplicate_criterion_is_an_evaluable_declared_heuristic():
     """The precondition for everything else in this file, asserted once and named.
 
-    v1 shipped this criterion as CRITERION_NOT_YET_DEFINED, which always DEFERS, so
-    none of the behaviours below were reachable at all.
+    v1 -- which is the package default -- carries this criterion as
+    CRITERION_NOT_YET_DEFINED, which always DEFERS, so none of the behaviours
+    below are reachable without asking for v2 by name.
     """
-    criterion = load_criteria(packaged_criteria_path())["TRUE_DUPLICATE"]
+    criterion = load_criteria(packaged_v2_criteria_path())["TRUE_DUPLICATE"]
     assert criterion.status is CriterionStatus.FROZEN_DECLARED_HEURISTIC
     assert criterion.version == "2"
     assert criterion.decision_if_matched is Decision.COLLAPSE
 
 
-def _shipped():
-    return load_criteria(packaged_criteria_path())
+def _v2():
+    """The v2 registry, named -- never `packaged_criteria_path()`, which is v1."""
+    return load_criteria(packaged_v2_criteria_path())
 
 
 def _metadata(**nodes):
@@ -81,7 +91,7 @@ def _metadata(**nodes):
 # 1. It collapses a real duplicate.
 # --------------------------------------------------------------------------- #
 
-#: One arm of the five-way CTCF component the shipped criterion collapses on the
+#: One arm of the five-way CTCF component the v2 criterion collapses on the
 #: real run: cl0/pattern_3 against the elected medoid cl6/pattern_2. Both nodes'
 #: best TomTom match is CTCF_MA0139.1 (q = 2.02e-10 and 4.13e-09 respectively,
 #: casestudy/evidence/annotation_candidates.parquet). The geometry is transcribed
@@ -119,14 +129,15 @@ def _ctcf_metadata():
 def test_it_collapses_a_real_duplicate():
     """Two CTCF detectors found independently in two Leiden clusters collapse.
 
-    This is the package's core promise, and until TRUE_DUPLICATE was frozen it was
-    undelivered: v1 was CRITERION_NOT_YET_DEFINED, so this pair -- the same motif,
-    same model, same readout, discovered twice -- could only ever be DEFERRED, and
-    the compiled lexicon carried both copies.
+    Under v2, which has to be asked for. Under the default (v1) TRUE_DUPLICATE is
+    CRITERION_NOT_YET_DEFINED, so this pair -- the same motif, same model, same
+    readout, discovered twice -- is DEFERRED and the compiled lexicon carries both
+    copies. That is the trade this file exists to make legible: v2 delivers the
+    deduplication and pays for it in deletions it cannot take back.
     """
     decision = adjudicate_component(
         [CTCF_SOURCE, CTCF_TARGET], [_ctcf_edge()], [], [],
-        _shipped(), "test", node_metadata=_ctcf_metadata(),
+        _v2(), "test", node_metadata=_ctcf_metadata(),
     )
 
     assert decision.relationship == "TRUE_DUPLICATE"
@@ -143,7 +154,7 @@ def test_the_collapse_carries_the_declared_magnitudes_into_the_decision_record()
     """
     decision = adjudicate_component(
         [CTCF_SOURCE, CTCF_TARGET], [_ctcf_edge()], [], [],
-        _shipped(), "test", node_metadata=_ctcf_metadata(),
+        _v2(), "test", node_metadata=_ctcf_metadata(),
     )
 
     assert "DECLARED-NOT-DERIVED" in decision.rationale
@@ -163,10 +174,10 @@ def test_every_predicate_is_load_bearing_on_the_real_duplicate():
     """
     # Positive control first: without it, a criterion that collapses NOTHING would
     # satisfy every `is not COLLAPSE` assertion below and this test would pass
-    # vacuously -- which is exactly what it looks like on the pre-v2 package.
+    # vacuously -- which is exactly what it looks like under v1, the default.
     assert adjudicate_component(
         [CTCF_SOURCE, CTCF_TARGET], [_ctcf_edge()], [], [],
-        _shipped(), "test", node_metadata=_ctcf_metadata(),
+        _v2(), "test", node_metadata=_ctcf_metadata(),
     ).decision is Decision.COLLAPSE
 
     breaks = {
@@ -180,7 +191,7 @@ def test_every_predicate_is_load_bearing_on_the_real_duplicate():
     for field, edge in breaks.items():
         decision = adjudicate_component(
             [CTCF_SOURCE, CTCF_TARGET], [edge], [], [],
-            _shipped(), "test", node_metadata=_ctcf_metadata(),
+            _v2(), "test", node_metadata=_ctcf_metadata(),
         )
         assert decision.decision is not Decision.COLLAPSE, (
             f"breaking {field} left the collapse standing, so that predicate does "
@@ -191,7 +202,7 @@ def test_every_predicate_is_load_bearing_on_the_real_duplicate():
     # relationship, and it must be routed to the criterion that owns it.
     fragment = adjudicate_component(
         [CTCF_SOURCE, CTCF_TARGET], [_ctcf_edge(overlap_frac_source=0.777778)], [], [],
-        _shipped(), "test", node_metadata=_ctcf_metadata(),
+        _v2(), "test", node_metadata=_ctcf_metadata(),
     )
     assert fragment.relationship == "FRAGMENT_MATCH"
     assert fragment.decision is Decision.DEFERRED
@@ -238,13 +249,13 @@ def test_it_refuses_a_real_non_duplicate():
     """A driver and a repressor, 0.977 similar on unsigned ppm, are not collapsed.
 
     The refusal is a REFUSAL, not a deferral: the evidence is complete and a
-    predicate did not hold. v1 could not express that distinction -- it deferred
-    everything -- so "we looked and said no" and "we could not look" were the same
-    record.
+    predicate did not hold. v1 cannot express that distinction -- it defers
+    everything -- so under the default "we looked and said no" and "we could not
+    look" are the same record.
     """
     decision = adjudicate_component(
         [FLIPPED_POS, FLIPPED_NEG], [FLIPPED_EDGE], [], [],
-        _shipped(), "test", node_metadata=_flipped_metadata(),
+        _v2(), "test", node_metadata=_flipped_metadata(),
     )
 
     assert decision.relationship == "TRUE_DUPLICATE"
@@ -268,7 +279,7 @@ def test_the_refusal_survives_raising_similarity_to_the_maximum():
     decision = adjudicate_component(
         [FLIPPED_POS, FLIPPED_NEG],
         [replace(FLIPPED_EDGE, ppm_similarity=1.0, overlap_bp=13)],
-        [], [], _shipped(), "test", node_metadata=_flipped_metadata(),
+        [], [], _v2(), "test", node_metadata=_flipped_metadata(),
     )
     assert decision.decision is Decision.REFUSE_MERGE
 
@@ -293,7 +304,7 @@ def test_it_defers_when_the_null_was_never_computed():
 
     decision = adjudicate_component(
         [CTCF_SOURCE, CTCF_TARGET], [uncalibrated], [], [],
-        _shipped(), "test", node_metadata=_ctcf_metadata(),
+        _v2(), "test", node_metadata=_ctcf_metadata(),
     )
 
     assert decision.relationship == "TRUE_DUPLICATE"
@@ -355,10 +366,10 @@ PARALOG_EDGE = AlignmentEvidence(
 def test_the_criterion_merges_ctcf_with_its_paralog_and_this_is_not_fixed():
     """KNOWN COST, pinned as a passing assertion so it cannot be forgotten.
 
-    This is one of the four collapses the shipped criterion licenses on the real
-    run -- 25% of its output -- and the error direction is DELETION, which is
-    irreversible for the reader of the lexicon, rather than the status quo's
-    inflation. It is not a near-miss: every predicate is cleared with room to
+    This is one of the four collapses v2 licenses on the real run -- 25% of its
+    output -- and the error direction is DELETION, which is irreversible for the
+    reader of the lexicon, rather than the default's inflation. It is the single
+    clearest reason v2 is not administered by default. It is not a near-miss: every predicate is cleared with room to
     spare. No predicate in v2 can distinguish these two, because the evidence that
     does (tomtom's best match, five orders of magnitude apart) is not carried on a
     field any criterion can read.
@@ -373,7 +384,7 @@ def test_the_criterion_merges_ctcf_with_its_paralog_and_this_is_not_fixed():
     })
     decision = adjudicate_component(
         [PARALOG_CTCF, PARALOG_CTCFL], [PARALOG_EDGE], [], [],
-        _shipped(), "test", node_metadata=metadata,
+        _v2(), "test", node_metadata=metadata,
     )
     assert decision.decision is Decision.COLLAPSE, (
         "the paralog merge stopped happening; if that is because a sub-family "
@@ -381,7 +392,7 @@ def test_the_criterion_merges_ctcf_with_its_paralog_and_this_is_not_fixed():
     )
 
     # The criterion's own exit route names this as the first thing to fix.
-    criterion = load_criteria(packaged_criteria_path())["TRUE_DUPLICATE"]
+    criterion = load_criteria(packaged_v2_criteria_path())["TRUE_DUPLICATE"]
     assert any(
         "best_matched_motif_id" in entry for entry in criterion.replacement_evidence
     ), "the fix for the paralog merge must stay written down in replacement_evidence"
@@ -404,7 +415,7 @@ def test_the_rationale_reports_that_a_stricter_threshold_removes_MORE_motifs():
     A reader deciding whether 0.90 is conservative has to be told that "higher" is
     not "safer" here. This test fails if that disclosure is deleted.
     """
-    criterion = load_criteria(packaged_criteria_path())["TRUE_DUPLICATE"]
+    criterion = load_criteria(packaged_v2_criteria_path())["TRUE_DUPLICATE"]
     prose = (criterion.declared_rationale or "") + " ".join(
         p.basis or "" for p in criterion.predicates
     )
@@ -423,27 +434,29 @@ def test_the_rationale_names_the_fp08_evidence_v2_dropped():
     neither. Dropping reconstruction is argued (it lacks power). Dropping
     `affected_coefficient_share` was never mentioned at all.
 
-    Both absences are pinned here against the legacy registry, so this test states
-    the regression rather than describing it.
+    Both absences are pinned here against v1 by name, so this test states the
+    regression rather than describing it. v1 is also the default, but that is not
+    what makes it the baseline here -- it is the baseline because it is the
+    version FP-08's two fields were last required by.
     """
-    from motifmultiverse.adjudicate import packaged_legacy_criteria_path
+    from motifmultiverse.adjudicate import packaged_v1_criteria_path
 
-    legacy = load_criteria(packaged_legacy_criteria_path())["TRUE_DUPLICATE"]
-    shipped = load_criteria(packaged_criteria_path())["TRUE_DUPLICATE"]
+    v1 = load_criteria(packaged_v1_criteria_path())["TRUE_DUPLICATE"]
+    v2 = load_criteria(packaged_v2_criteria_path())["TRUE_DUPLICATE"]
 
     fp08_fields = {"paired_delta_reconstruction_affected", "affected_coefficient_share"}
-    assert fp08_fields <= set(legacy.required_evidence), (
+    assert fp08_fields <= set(v1.required_evidence), (
         "v1 is the baseline this regression is measured against"
     )
-    assert not (fp08_fields & set(shipped.required_evidence)), (
+    assert not (fp08_fields & set(v2.required_evidence)), (
         "if v2 has reacquired either field, this test has become a lie -- delete "
         "it and delete the KNOWN COST 2 paragraph with it"
     )
-    assert "FP-08" in (shipped.declared_rationale or ""), (
+    assert "FP-08" in (v2.declared_rationale or ""), (
         "a dropped constraint that is not named is a dropped constraint nobody "
         "will find"
     )
-    assert "affected_coefficient_share" in (shipped.declared_rationale or ""), (
+    assert "affected_coefficient_share" in (v2.declared_rationale or ""), (
         "reconstruction's removal is argued; the coefficient share's removal must "
         "at least be admitted"
     )

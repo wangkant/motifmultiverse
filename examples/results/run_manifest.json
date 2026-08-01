@@ -1,0 +1,76 @@
+{
+  "caller": {
+    "batch_size": 2000,
+    "cwm_trim_threshold": 0.3,
+    "global_lambda": 0.7,
+    "mode": "pp"
+  },
+  "device_null_abs_coefficient_delta": 3.63e-07,
+  "lexicon_h5": "NOT_A_RECOVERABLE_PATH: the lexicon was compiled in an ephemeral working directory that no longer exists. Its identity is the sha256 below; rebuild it by running the case study's compile step.",
+  "lexicon_sha256": "13d6ff0c83d9b3066279a358d9b050899f9ed2d0214fc9d9e3fceb6acf68455a",
+  "lexicon_sha256_note": "Content identity of the lexicon the runs used, recorded because the path it sat at was session-ephemeral. A path nobody can resolve is not provenance.",
+  "n_universe": 33917,
+  "note": "steps listed are those whose hit table was actually produced; see docs/INPUT_SCALE_INVARIANCE.md \"What was not run\"",
+  "region_width": 2114,
+  "seed": 20260731,
+  "steps": [
+    {
+      "arm": "append",
+      "label": "base",
+      "n": 6460,
+      "regions_npz": "regions/append_base.npz"
+    },
+    {
+      "arm": "append",
+      "label": "ctrl",
+      "n": 6460,
+      "regions_npz": "regions/append_base.npz",
+      "repeat_of": "base"
+    },
+    {
+      "arm": "append",
+      "label": "sup_7085",
+      "n": 7085,
+      "regions_npz": "regions/append_sup_7085.npz"
+    },
+    {
+      "arm": "append",
+      "label": "sup_12920",
+      "n": 12920,
+      "regions_npz": "regions/append_sup_12920.npz"
+    },
+    {
+      "arm": "sorted",
+      "label": "base",
+      "n": 6460,
+      "regions_npz": "regions/sorted_base.npz"
+    },
+    {
+      "arm": "sorted",
+      "label": "ctrl",
+      "n": 6460,
+      "regions_npz": "regions/sorted_base.npz",
+      "repeat_of": "base"
+    },
+    {
+      "arm": "sorted",
+      "label": "sup_7085",
+      "n": 7085,
+      "regions_npz": "regions/sorted_sup_7085.npz"
+    },
+    {
+      "arm": "sorted",
+      "label": "sup_6525",
+      "n": 6525,
+      "regions_npz": "regions/sorted_sup_6525.npz"
+    },
+    {
+      "arm": "sorted",
+      "label": "sup_6783",
+      "n": 6783,
+      "regions_npz": "regions/sorted_sup_6783.npz"
+    }
+  ],
+  "universe_npz": "NOT_A_PUBLISHABLE_PATH: the contribution/sequence archive lives on the authoring machine and its path carries a user name. Identity is the sha256 recorded beside this field; the file itself is not distributed with this repository.",
+  "universe_npz_sha256": "30f45918b13b53b1e94e25aece64de12869ada5c93d3cc3c9d803228e3a08adc"
+}

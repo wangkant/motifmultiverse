@@ -18,6 +18,46 @@ summarise across baseline populations. Read this as an auditable lexicon compile
 plus a specification-multiverse inference reference implementation.
 
 ### Added
+- `examples/input_scale_invariance.py` + `docs/INPUT_SCALE_INVARIANCE.md`: README
+  finding 1 -- the load-bearing one, previously marked *externally sourced, not
+  reproducible from this repository* -- turned into a measurement on K562 ALLPEAKS
+  with one frozen lexicon. **The instability reproduces; its stated cause does
+  not.** 3.4-6.3% of shared regions change their discrete hit decisions, against a
+  0-1 change floor from a same-input repeat (independently re-run from a rebuilt
+  input on a third GPU: 0 changes, Jaccard 1.000000). But growing the input by
+  9.67% -- the reference's own bracket -- or by 100%, with each region left at its
+  row index, changes **zero** decisions; re-ordering the same 6,460 regions changes
+  876, and changing only `--batch-size` changes 1,557. The caller's own `num_steps`
+  moves the same way, so the operative variable is the solver schedule, not the
+  region count. **The "(6,460, 7,085]" onset and the "9.67% suffices" figure are
+  withdrawn as scale claims** in `README.md`, `docs/CONCEPT.md`, `docs/LESSONS.md`,
+  `docs/ARCHITECTURE.md`, `docs/BIAS_LEDGER.md` and `infer/README.md`. README
+  finding 2's "zero discrete flips under permutation" and "2.07x displacement" are
+  contradicted outright (876 flips; 104x). The architecture constraint that rests
+  on all this -- every specification is a subset of one frozen run -- is unchanged
+  and better supported, since re-calling now demonstrably perturbs decisions at
+  identical scale. `guards.single_scale` is recorded as **under-keyed**: it
+  compares a region *count*, and two runs with the same count disagree on 876 hits.
+  Fixing the guard's contract is left as a separate decision.
+- `adjudicate/criteria.v2.yaml`: a preregistered, frozen `TRUE_DUPLICATE` --
+  `FROZEN_DECLARED_HEURISTIC`, two declared magnitudes (`ppm_similarity ge 0.90`,
+  `overlap_bp ge 8`), checksummed in `docs/MERGE_CRITERION_PREREGISTRATION.md` before the
+  held-out run, with its known costs stated in its own `declared_rationale` and its exit
+  conditions in `replacement_evidence`. It ships in the wheel and is reached by
+  `--criteria` or `adjudicate.packaged_v2_criteria_path()`. It is deliberately **NOT the
+  default**: it collapses, and deletion is the one error direction a reader of a compiled
+  lexicon cannot undo — an under-deduplicated lexicon carries a duplicate that can still
+  be seen and merged, an over-deduplicated one has lost a motif and does not record which.
+  On its own preregistered held-out set it fired two of its own falsifiers. A criterion in
+  that state is one to offer, not one to administer. `tests/test_default_removes_no_motifs.py`
+  pins the resulting invariant as a property rather than as a file name: a default run
+  removes no motifs, checked on a fixture `criteria.v2.yaml` demonstrably does delete from.
+- `adjudicate.packaged_v1_criteria_path()` / `packaged_v2_criteria_path()`: each packaged
+  registry is reachable **by name**. `packaged_criteria_path()` keeps its own meaning --
+  "whatever `--criteria` defaults to" -- and `packaged_legacy_criteria_path()` is gone,
+  because "legacy" named the file that is now the default. Callers that want a specific
+  criterion's behaviour must say which criterion; reading it off the default is what made
+  a default change look like a regression in tests that were never about the default.
 - `multiverse`: the predeclared specification grid over one frozen dataset. Three
   axes as three types — `Estimand` (query and **baseline population**, with its type
   and construction rule), `Measurement` (lexicon and frozen hit table), and
@@ -327,13 +367,15 @@ plus a specification-multiverse inference reference implementation.
   emits neither `selection_rule` nor `selection_feature_names` — so a report over a real
   run states those as unknown rather than as checked, and `docs/ROADMAP.md` M4 does not
   close until the producing stages carry them.
-- The packaged `adjudicate/criteria.v1.yaml` leaves `TRUE_DUPLICATE` and `FRAGMENT_MATCH`
-  `CRITERION_NOT_YET_DEFINED`, so the **default** pipeline defers every duplicate and
-  every fragment and `compile` emits an undeduplicated lexicon by design. That is a
-  statement about the science -- no frozen document says how much reconstruction loss a
-  collapse may cost -- not about the code: the collapse path is implemented and exercised
-  end to end, but against thresholds a caller supplies, so this release is a strict
-  adjudication framework rather than a harmonizer with a validated merge policy.
+- The **default** criterion registry is `adjudicate/criteria.v1.yaml`, which leaves
+  `TRUE_DUPLICATE` and `FRAGMENT_MATCH` `CRITERION_NOT_YET_DEFINED`, so a default run
+  defers every duplicate and every fragment, **removes no motifs**, and `compile` emits
+  an undeduplicated lexicon by design. That is a statement about the science -- no frozen
+  document says how much reconstruction loss a collapse may cost -- not about the code:
+  the collapse path is implemented and exercised end to end, but against a criterion the
+  caller asks for, so this release is a strict adjudication framework rather than a
+  harmonizer with a validated merge policy. `adjudicate/criteria.v2.yaml` is the one
+  frozen exception and is not on the default path (see *Added*).
 - `compile`'s round-trip verification is **skipped, not passed**, wherever the `finemo`
   backend is absent, and a skipped test is unverified. It is no longer absent in CI: the
   `roundtrip` job installs the backend, requires `status`'s capability probe to pass, and

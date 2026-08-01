@@ -607,16 +607,17 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     ``annotation_candidates.parquet`` and nothing else. So the component below
     loses the family conflict that refused its merge, and adjudicates as a
     duplicate instead, on annotation evidence it has no way to know is partial.
-    This USED to be a DEFERRED rather than a collapse, only because TRUE_DUPLICATE
-    was CRITERION_NOT_YET_DEFINED. TRUE_DUPLICATE v2 is a FROZEN_DECLARED_HEURISTIC
-    that decides, so the limitation is no longer hypothetical, and the assertions
-    below say exactly how far it gets. On this fixture the shipped criterion
-    REFUSES -- but only by an accident of the fixture's numbers: its
-    ``empirical_p_value`` is 0.001, a hair above its own null floor of
-    1/(1000+1) = 0.000999. Move it to the floor, which real duplicate pairs sit
-    at, and the shipped criterion collapses a pair whose own annotation evidence
-    said FAM_ALPHA vs FAM_BETA. That is pinned below too, because that is the
-    live severity, and nothing in v2 pays it down.
+    How far the limitation actually gets depends on which criterion is loaded, so
+    this test names ONE -- v2, by name, via ``packaged_v2_criteria_path``. Under
+    the package default (v1) every branch below would be DEFERRED and the test
+    would demonstrate nothing about the seam; under v2's
+    FROZEN_DECLARED_HEURISTIC the criterion decides, which is what makes the
+    limitation biting rather than hypothetical. On this fixture v2 REFUSES -- but
+    only by an accident of the fixture's numbers: its ``empirical_p_value`` is
+    0.001, a hair above its own null floor of 1/(1000+1) = 0.000999. Move it to
+    the floor, which real duplicate pairs sit at, and v2 collapses a pair whose
+    own annotation evidence said FAM_ALPHA vs FAM_BETA. That is pinned below too,
+    because that is the live severity, and nothing in v2 pays it down.
 
     It is pinned rather than patched because both obvious repairs invent a rule
     the design has not decided. Keeping the good rows contradicts the retention
@@ -626,7 +627,7 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
     "annotation evidence is incomplete" has to become a declared adjudication
     input by design before it can become one in code. See annotate/README.md.
     """
-    from motifmultiverse.adjudicate import adjudicate_component, packaged_criteria_path
+    from motifmultiverse.adjudicate import adjudicate_component, packaged_v2_criteria_path
     from motifmultiverse.align import AlignmentEvidence
     from motifmultiverse.annotate import annotate_nodes
     from motifmultiverse.schema import Decision
@@ -679,25 +680,25 @@ def test_a_dropped_backend_names_its_reason_but_the_adjudicator_cannot_see_it():
         return adjudicate_component(["node-a", "node-b"], [edge], candidates, [],
                                     criteria, "test", node_metadata=metadata)
 
-    shipped = load_criteria(packaged_criteria_path())
-    assert _adjudicate(complete.candidates, shipped).relationship == "AMBIGUOUS_CROSS_FAMILY"
-    assert _adjudicate(complete.candidates, shipped).decision == Decision.REFUSE_MERGE
-    assert _adjudicate(dropped.candidates, shipped).relationship == "TRUE_DUPLICATE"
+    v2 = load_criteria(packaged_v2_criteria_path())
+    assert _adjudicate(complete.candidates, v2).relationship == "AMBIGUOUS_CROSS_FAMILY"
+    assert _adjudicate(complete.candidates, v2).decision == Decision.REFUSE_MERGE
+    assert _adjudicate(dropped.candidates, v2).relationship == "TRUE_DUPLICATE"
     # Complete evidence, one unmet predicate (p = 0.001 > the 1/1001 null floor)
-    # -> the fail-safe REFUSE_MERGE, which v1 could not express and v2 can.
-    assert _adjudicate(dropped.candidates, shipped).decision == Decision.REFUSE_MERGE
+    # -> the fail-safe REFUSE_MERGE, which v1 cannot express and v2 can.
+    assert _adjudicate(dropped.candidates, v2).decision == Decision.REFUSE_MERGE
 
-    # ...and the live severity, one number away. At the null floor the shipped
+    # ...and the live severity, one number away. At the null floor the v2
     # heuristic COLLAPSES the pair, on annotation evidence it cannot know is
-    # partial. This is the cost of freezing the criterion, stated as a passing
-    # assertion rather than as prose.
+    # partial. This is the cost of the criterion, stated as a passing assertion
+    # rather than as prose -- and one reason it is not the default.
     at_floor = replace(edge, empirical_p_value=1.0 / (edge.null_shuffles + 1))
     assert adjudicate_component(
-        ["node-a", "node-b"], [at_floor], dropped.candidates, [], shipped, "test",
+        ["node-a", "node-b"], [at_floor], dropped.candidates, [], v2, "test",
         node_metadata=metadata,
     ).decision == Decision.COLLAPSE
 
-    frozen_duplicate = dict(shipped)
+    frozen_duplicate = dict(v2)
     frozen_duplicate["TRUE_DUPLICATE"] = Criterion(
         criterion_id="TRUE_DUPLICATE", version="project-1",
         status=CriterionStatus.FROZEN_DECLARED_HEURISTIC,

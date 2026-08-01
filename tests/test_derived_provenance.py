@@ -249,17 +249,26 @@ def test_the_domain_table_is_the_one_the_alignment_validator_enforces():
                 edge(**{name: outside})
 
 
-def test_every_derived_threshold_in_the_shipped_registry_resolves():
-    """Whatever else changes, the shipped file may not reacquire a bare label."""
-    from motifmultiverse.adjudicate import packaged_criteria_path
+def test_every_derived_threshold_in_the_v2_registry_resolves():
+    """Whatever else changes, v2 may not reacquire a bare `derived` label.
 
-    for criterion in load_criteria(packaged_criteria_path()).values():
+    ABOUT v2 by name, not about the default. `provenance`/`derived_from` are a v2
+    format feature -- the default registry (v1) has no predicates carrying them at
+    all -- so asking this of "whatever is default" would pass vacuously the moment
+    the default is a v1 file, which is exactly what it is.
+    """
+    from motifmultiverse.adjudicate import packaged_v2_criteria_path
+
+    resolved = 0
+    for criterion in load_criteria(packaged_v2_criteria_path()).values():
         for predicate in criterion.predicates:
             if predicate.provenance == "derived":
                 assert predicate.derived_from, (
                     f"{criterion.criterion_id}.{predicate.field} claims 'derived' with "
                     "nothing a loader can resolve"
                 )
+                resolved += 1
+    assert resolved, "no derived predicate was examined; this test proved nothing"
 
 
 def test_a_v1_registry_is_not_held_to_the_new_requirement():
@@ -267,14 +276,16 @@ def test_a_v1_registry_is_not_held_to_the_new_requirement():
 
     v1 files carry no `provenance` at all, so there is nothing for `derived_from`
     to attach to, and a v1 run must not start failing because a later release grew
-    a field.
+    a field. v1 is also the default, which makes this the ordinary case rather
+    than the compatibility case -- but the claim is about the v1 FORMAT, so it
+    names v1.
     """
-    from motifmultiverse.adjudicate import packaged_legacy_criteria_path
+    from motifmultiverse.adjudicate import packaged_v1_criteria_path
 
-    legacy = load_criteria(packaged_legacy_criteria_path())
-    assert legacy["TRUE_DUPLICATE"].predicates == ()
+    v1 = load_criteria(packaged_v1_criteria_path())
+    assert v1["TRUE_DUPLICATE"].predicates == ()
     assert all(
         p.provenance is None
-        for criterion in legacy.values()
+        for criterion in v1.values()
         for p in criterion.predicates
     )

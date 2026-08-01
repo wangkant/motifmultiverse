@@ -65,12 +65,27 @@ def _fail(gid: str, detail: str) -> GuardResult:
 def single_scale(records: Iterable[Mapping[str, Any]]) -> GuardResult:
     """All results in one analysis must carry the same ``input_scale``.
 
-    The hit caller is not input-scale invariant: in the reference implementation
-    the same regions produced different discrete retention decisions depending on
-    which *other* regions shared the input, with the onset measured between
-    6,460 and 7,085 regions -- under 10% growth on the base set. Specifications
-    must therefore be subsets of ONE frozen run, never re-called per
-    specification.
+    The hit caller is not re-call invariant: the same regions produce different
+    discrete retention decisions depending on what else was in the input.
+    Specifications must therefore be subsets of ONE frozen run, never re-called
+    per specification. That rule is why this guard exists and it is not in doubt.
+
+    THIS GUARD IS UNDER-KEYED, KNOWINGLY. The reference implementation attributed
+    the effect to input *scale* and bracketed an onset between 6,460 and 7,085
+    regions; ``docs/INPUT_SCALE_INVARIANCE.md`` re-measured that on K562 ALLPEAKS
+    and the attribution did not survive. Growing the input by 9.67% and by 100%,
+    with each region left at its original row index, changed ZERO decisions.
+    Re-ordering the same 6,460 regions changed 876 hits across 303 regions, and
+    changing only the caller's batch size changed 1,557 across 408 -- both at
+    identical ``input_scale``. The operative variable is how many solver
+    iterations a region receives, which the region count does not determine.
+
+    So a run pair can pass this guard and still disagree: ``input_scale`` is a
+    COUNT, and the count is not an identity for the run. Keying on a content
+    identity of the frozen substrate -- which ``provenance`` already carries as
+    ``substrate_id`` -- would close the gap. Changing this predicate is a
+    contract change and is deliberately not made here; the limitation is recorded
+    so that a passing ``single_scale`` is not read as more than it is.
     """
     gid = "single_scale"
     scales = {r.get("input_scale") for r in records}

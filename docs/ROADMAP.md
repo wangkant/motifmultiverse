@@ -49,7 +49,15 @@ lexicons on the regression fixtures, with refusals recorded as refusals.
 path.** Alignment persists the full-search null; adjudication records refusals and
 selects observed medoids from authoritative registry metadata. The remaining M2
 work is validation against the external reference regression fixtures. Criteria
-whose scientific magnitude was never frozen remain `DEFERRED`, by design.
+whose scientific magnitude was never frozen remain `DEFERRED`, by design — and
+that is what a DEFAULT run gets: the default registry is
+`adjudicate/criteria.v1.yaml`, in which `TRUE_DUPLICATE` and `FRAGMENT_MATCH` are
+both `CRITERION_NOT_YET_DEFINED`, so a default run removes no motifs. One frozen
+`TRUE_DUPLICATE` exists — a declared heuristic, preregistered in
+`docs/MERGE_CRITERION_PREREGISTRATION.md` — and ships as
+`adjudicate/criteria.v2.yaml`, reached with `--criteria`. It is not the default
+because its error direction is deletion, which the reader of a compiled lexicon
+cannot undo.
 
 ## M3 — stability adapters (FIMO / HOMER / FiNeMo)
 

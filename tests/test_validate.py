@@ -921,13 +921,13 @@ def test_the_coefficient_share_field_is_named_for_the_subset_it_actually_measure
     arithmetic left disagreeing with the name. `criteria.v1.yaml` names this
     field as TRUE_DUPLICATE evidence, so the two must agree.
 
-    Pinned against the LEGACY registry, not the default one. The default moved to
-    `criteria.v2.yaml`, whose TRUE_DUPLICATE requires the pair geometry and not
-    this field at all -- a change this test must not be read as approving. What
-    this test owns is the field NAME, and v1 is where the name is still spoken;
-    that v2 dropped it is a separate, deliberate regression, recorded as a known
-    cost in the v2 criterion's own `declared_rationale` and pinned by
-    tests/test_true_duplicate_criterion.py.
+    Pinned against v1 BY NAME, not against "the default". v1 happens to be the
+    default again, and that is beside the point: what this test owns is the field
+    NAME, and v1 is the registry that speaks it. v2's TRUE_DUPLICATE requires the
+    pair geometry and not this field at all -- a separate, deliberate regression,
+    recorded as a known cost in the v2 criterion's own `declared_rationale` and
+    pinned by tests/test_true_duplicate_criterion.py. If the default moves again,
+    this assertion must not move with it.
     """
     from motifmultiverse.schema.criteria import load_criteria
     from motifmultiverse.validate import _REQUIRED_COLUMNS
@@ -950,7 +950,7 @@ def test_the_coefficient_share_field_is_named_for_the_subset_it_actually_measure
     assert not hasattr(result, "family_coefficient_share")
     assert "family_id" not in _REQUIRED_COLUMNS and "variant_id" not in _REQUIRED_COLUMNS
 
-    criteria = load_criteria(adjudicate.packaged_legacy_criteria_path())
+    criteria = load_criteria(adjudicate.packaged_v1_criteria_path())
     assert "affected_coefficient_share" in criteria["TRUE_DUPLICATE"].required_evidence
     assert "family_coefficient_share" not in criteria["TRUE_DUPLICATE"].required_evidence
 

@@ -37,11 +37,12 @@ import motifmultiverse
 #: this list, which is what `test_every_declared_package_data_entry_matches_a_file`
 #: exists to notice.
 PACKAGED_RESOURCES = {
-    # v1 is no longer the default, but it must still SHIP: `--criteria` pointing at
-    # it is the documented way to reproduce a pre-v2 run, and a wheel that dropped
-    # it would make that impossible from an installed package.
-    "adjudicate/criteria.v1.yaml": "motifmultiverse.adjudicate:packaged_legacy_criteria_path",
-    "adjudicate/criteria.v2.yaml": "motifmultiverse.adjudicate:packaged_criteria_path",
+    # v1 is the default registry: a run with no `--criteria` loads this file.
+    "adjudicate/criteria.v1.yaml": "motifmultiverse.adjudicate:packaged_v1_criteria_path",
+    # v2 is not the default, and must still SHIP: `--criteria` pointing at it is
+    # the supported way to apply the preregistered TRUE_DUPLICATE heuristic, and a
+    # wheel that dropped it would make that impossible from an installed package.
+    "adjudicate/criteria.v2.yaml": "motifmultiverse.adjudicate:packaged_v2_criteria_path",
     "report/bias_ledger.tsv": "motifmultiverse.report:packaged_bias_ledger_path",
 }
 

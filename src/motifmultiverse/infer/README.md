@@ -8,6 +8,8 @@ Every specification is a subset of ONE frozen hit substrate, and a specificity c
 
 The hit caller is not input-scale invariant: the same regions produced different discrete retention decisions depending on which other regions shared the input, with onset measured under 10% growth on the base set. Re-calling per specification would confound the specification with the caller.
 
+Re-measured in `docs/INPUT_SCALE_INVARIANCE.md`: the divergence is real but is not caused by scale. Growth alone changed no decisions; re-ordering the input, or changing the caller's batch size, changed decisions at an identical region count. The rule this section states — never re-call per specification — is what the re-measurement supports; the "under 10% growth" onset is not reproduced.
+
 ## How to check it
 
 `guards.single_scale` runs (`interpret.interpret_query` calls it on every query). `guards.interaction_required`, `guards.estimability_floor` and `guards.stratum_parity` have **no call site**: this stage estimates one family's effect against one comparator, so nothing it emits carries an interaction, a stratum, or an N-and-interval-against-a-reference for them to read. `guards.GUARDS_AWAITING_INPUT` records what each is waiting for.

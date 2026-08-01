@@ -16,13 +16,13 @@ Two things this file deliberately does NOT do:
   actually loads the reference run's lexicon, which is the only assertion in this
   file that depends on software outside the package. Where the backend is absent
   the last one skips, and a green run is then not evidence that a lexicon loads.
-* It does not use the shipped `config/criteria.v1.yaml` to demonstrate a
-  collapse. Two of that file's four criteria are `CRITERION_NOT_YET_DEFINED` on
-  purpose, so the shipped pipeline defers every duplicate and every fragment.
-  The collapse path is exercised with a criteria file written *inside this test*
-  and named as such, and a companion assertion pins that the shipped file still
-  defers -- otherwise this test would quietly become the thing that made a
-  threshold look decided.
+* It does not use the DEFAULT criteria (`adjudicate/criteria.v1.yaml`) to
+  demonstrate a collapse. Two of that file's four criteria are
+  `CRITERION_NOT_YET_DEFINED` on purpose, so a default run defers every duplicate
+  and every fragment and removes no motifs. The collapse path is exercised with a
+  criteria file written *inside this test* and named as such, and a companion
+  assertion pins that the default still defers -- otherwise this test would
+  quietly become the thing that made a threshold look decided.
 """
 from __future__ import annotations
 
@@ -343,17 +343,25 @@ def test_every_declared_artifact_parses_as_its_own_format(reference_run):
     assert {"candidate_id", "node_id", "proposed_family_id", "source"} <= set(candidates.columns)
 
     decisions = pd.read_parquet(reference_run / "adjudication" / "ontology_decisions.parquet")
-    # TWO considered clusters over three fully-connected nodes, not one. The
-    # unrestricted connectivity pass proposes the whole {0,1,2} component; the
-    # duplicate criterion's own predicates, read as FP-05's declared distance
-    # ceiling, additionally propose the tighter {0,1} sub-clique -- pattern_2 is
-    # sign-flipped against both others (signed_cwm_similarity -1.0), so its edges
-    # are not admitted. Both proposals are recorded, which is the point: the wide
-    # one is the record that the 3-node cluster was considered.
-    assert len(decisions) == 2
+    # ONE considered cluster over three fully-connected nodes, and the count is a
+    # property of THE DEFAULT rather than of this fixture. `edge_admits_duplicate
+    # _candidate` reads the duplicate criterion's own predicates as FP-05's
+    # declared distance ceiling, and the default criterion (v1 TRUE_DUPLICATE,
+    # CRITERION_NOT_YET_DEFINED) has none -- so no tighter sub-clique is proposed
+    # and only the unrestricted connectivity pass's {0,1,2} component is
+    # considered. That is FP-05's open half, recorded rather than hidden: a
+    # default run proposes wide and then declines to decide. Under `--criteria`
+    # v2 the same run additionally proposes the {0,1} sub-clique, because
+    # pattern_2 is sign-flipped against both others (signed_cwm_similarity -1.0)
+    # and its edges are not admitted.
+    assert len(decisions) == 1
     assert set(decisions["relationship"]) == {"TRUE_DUPLICATE"}
     assert set(decisions["criterion_id"]) == {"TRUE_DUPLICATE"}
-    assert {len(json.loads(ids)) for ids in decisions["node_ids"]} == {2, 3}
+    assert {len(json.loads(ids)) for ids in decisions["node_ids"]} == {3}
+    assert set(decisions["decision"]) == {"deferred"}, (
+        "a default run decided something; the default may propose widely but it "
+        "may not collapse"
+    )
 
     manifest = json.loads((reference_run / "lexicons" / "core.manifest.json").read_text())
     assert len(manifest["lexicon_content_hash"]) == 64
@@ -515,12 +523,13 @@ TEST_CRITERIA = """\
 schema_version: "1"
 criteria:
   - criterion_id: TRUE_DUPLICATE
-    # Must track the SHIPPED TRUE_DUPLICATE's version. `stable_decision_id` hashes
-    # (members, relationship, criterion_id, criterion_version), so a version that
-    # disagrees with pass 1's gives pass 2 a different decision_id, and the
-    # stability row written for pass 1 silently stops matching -- the second pass
-    # would defer for missing evidence and the collapse path would go untested.
-    version: "2"
+    # Must track the DEFAULT TRUE_DUPLICATE's version, because pass 1 runs with no
+    # `--criteria`. `stable_decision_id` hashes (members, relationship,
+    # criterion_id, criterion_version), so a version that disagrees with pass 1's
+    # gives pass 2 a different decision_id, and the stability row written for
+    # pass 1 silently stops matching -- the second pass would defer for missing
+    # evidence and the collapse path would go untested.
+    version: "1"
     status: FROZEN
     relationship: TRUE_DUPLICATE
     required_evidence:
@@ -657,38 +666,34 @@ def adjudication_run(tmp_path_factory) -> dict:
     }
 
 
-def test_the_first_pass_collapses_nothing_under_the_shipped_criteria(adjudication_run):
-    """Under the SHIPPED criteria, nothing collapses HERE -- and that is not luck.
+def test_the_first_pass_collapses_nothing_under_the_default_criteria(adjudication_run):
+    """Pass 1 runs with no `--criteria`, so it is a test ABOUT THE DEFAULT.
 
-    What changed with TRUE_DUPLICATE v2 is the SHAPE of the non-collapse, not the
-    absence of one, and the shape is checked here rather than asserted in prose.
-    All three of this fixture's edges DO sit at their null floor (p = 0.0909 =
-    1/(10+1)), so the derived null-floor predicate is satisfied; each pair is then
-    stopped by a different, named gate:
+    The default is `criteria.v1.yaml`, whose TRUE_DUPLICATE and FRAGMENT_MATCH are
+    both CRITERION_NOT_YET_DEFINED. Every considered cluster is therefore DEFERRED
+    -- not refused -- and no motif is removed. All three of this fixture's edges
+    sit at their null floor (p = 0.0909 = 1/(10+1)) and one pair is geometrically
+    a textbook duplicate, so the deferrals are the criterion declining to decide
+    and not the evidence being thin.
 
-      pattern_0 / pattern_1 -- overlap_bp 7, under the DECLARED `overlap_bp ge 8`
-      pattern_4 / pattern_5 -- signed_cwm_similarity -1.0, under the derived sign gate
-      pattern_2 / pattern_3 -- FRAGMENT_MATCH geometry, still CRITERION_NOT_YET_DEFINED
-
-    So two are REFUSE_MERGE (complete evidence, one unmet predicate -- the fail-safe
-    branch, which v1 could not express because it could only ever say "deferred")
-    and one is DEFERRED. Neither is a collapse, which is the property this test
-    guards. The two refusals must also carry the declared-magnitude caveat, because
-    "this pair missed a threshold" means something different when the threshold was
-    chosen rather than derived.
+    This assertion changed when the default was returned to v1, and the change is
+    the point rather than a casualty: under v2 two of the three came back
+    REFUSE_MERGE with a declared-magnitude caveat, because v2 had thresholds to
+    miss. A test about the default is supposed to move when the default moves.
+    What may not change is the property in the name -- pass 1 collapses nothing --
+    and `tests/test_default_removes_no_motifs.py` defends that on a fixture built
+    to collapse, which this one is not.
     """
     first = adjudication_run["first"]
     assert len(first) == 3
-    assert "collapse" not in set(first["decision"])
-    assert set(first["decision"]) == {"deferred", "refuse_merge"}
+    assert set(first["decision"]) == {"deferred"}
     assert set(first["relationship"]) == {"TRUE_DUPLICATE", "FRAGMENT_MATCH"}
     assert first["representative_node_id"].isna().all()
 
-    refusals = first[first["decision"] == "refuse_merge"]
-    assert len(refusals) == 2
-    for rationale in refusals["rationale"]:
-        assert "DECLARED-NOT-DERIVED" in rationale
-        assert "overlap_bp ge 8" in rationale and "ppm_similarity ge 0.9" in rationale
+    # Deferred for the criterion's own stated reason, not for absent evidence:
+    # the reader has to be able to tell "no rule exists" from "no data arrived".
+    for rationale in first["rationale"]:
+        assert "CRITERION_NOT_YET_DEFINED" in rationale, rationale
 
 
 def test_adjudication_emits_collapse_refusal_and_deferral_in_one_run(adjudication_run):
@@ -737,30 +742,35 @@ def test_every_considered_cluster_appears_including_the_ones_that_did_not_collap
     assert len(collapsing) == 1
 
 
-def test_the_shipped_criteria_never_hide_a_guessed_threshold():
-    """The guard on the test above, restated for a registry that now decides.
+def test_the_v2_criteria_never_hide_a_guessed_threshold():
+    """The guard on the test above, restated for the registry that DOES decide.
 
-    TRUE_DUPLICATE v2 ships a heuristic on the maintainer's explicit authorisation,
-    so "it must not decide" is no longer the rule that can be enforced. The rule
-    that can be, and the one that actually protects a reader, is: it must not
-    decide while LOOKING derived. A chosen magnitude may never sit under plain
-    FROZEN, must be labelled predicate by predicate, must carry a stated rationale,
-    and must name the evidence that would retire it. FRAGMENT_MATCH states no
-    magnitude anywhere, so it must still refuse outright.
+    ABOUT v2, and it names v2. v2 ships a heuristic on the maintainer's explicit
+    authorisation, so for that file "it must not decide" is not the rule that can
+    be enforced. The rule that can be, and the one that actually protects a
+    reader, is: it must not decide while LOOKING derived. A chosen magnitude may
+    never sit under plain FROZEN, must be labelled predicate by predicate, must
+    carry a stated rationale, and must name the evidence that would retire it.
+    FRAGMENT_MATCH states no magnitude anywhere, so even in v2 it must refuse
+    outright.
+
+    Reading this off `packaged_criteria_path()` conflated two claims -- "v2 is
+    honest about its thresholds" and "v2 is what you get by default" -- and only
+    the first was ever the subject.
     """
-    from motifmultiverse.adjudicate import packaged_criteria_path
+    from motifmultiverse.adjudicate import packaged_v2_criteria_path
     from motifmultiverse.schema.criteria import CriterionStatus, load_criteria
 
-    shipped = load_criteria(packaged_criteria_path())
+    v2 = load_criteria(packaged_v2_criteria_path())
 
-    assert shipped["FRAGMENT_MATCH"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED, (
+    assert v2["FRAGMENT_MATCH"].status is CriterionStatus.CRITERION_NOT_YET_DEFINED, (
         "FRAGMENT_MATCH became evaluable: no document states a containment ceiling "
         "for it, and TRUE_DUPLICATE's bilateral geometry does not transfer, because "
         "containment is not transitive"
     )
-    assert shipped["FRAGMENT_MATCH"].predicates == ()
+    assert v2["FRAGMENT_MATCH"].predicates == ()
 
-    duplicate = shipped["TRUE_DUPLICATE"]
+    duplicate = v2["TRUE_DUPLICATE"]
     assert duplicate.status is CriterionStatus.FROZEN_DECLARED_HEURISTIC, (
         "TRUE_DUPLICATE contains chosen magnitudes; presenting it as plain FROZEN "
         "would make an invented threshold indistinguishable from a derived one"

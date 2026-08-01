@@ -1,0 +1,7 @@
+{
+  "decision_change": "hit key present on one side and absent on the other; key = (peak_name, motif_name, start_untrimmed, strand)",
+  "device_null_abs_coefficient_delta": 3.63e-07,
+  "lexicon_sha256": "13d6ff0c83d9b3066279a358d9b050899f9ed2d0214fc9d9e3fceb6acf68455a",
+  "universe_npz": "NOT_A_PUBLISHABLE_PATH: the contribution/sequence archive lives on the authoring machine and its path carries a user name. Identity is the sha256 recorded beside this field; the file itself is not distributed with this repository.",
+  "universe_npz_sha256": "30f45918b13b53b1e94e25aece64de12869ada5c93d3cc3c9d803228e3a08adc"
+}

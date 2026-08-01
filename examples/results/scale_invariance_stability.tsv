@@ -1,0 +1,8 @@
+comparison	n_other	n_peaks_compared	n_peaks_excluded_no_hits_one_side	n_affected_peaks	n_affected_hits	hit_jaccard	coefficient_conservation	status	affected_definition
+append:base_6460_vs_ctrl	6460	6460	0	158	5482	1.0	0.9999999901071949	CHANGED_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+append:base_6460_vs_sup_7085	7085	6460	625	170	6134	1.0	0.9999999925687245	STABLE_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+append:base_6460_vs_sup_12920	12920	6460	6460	167	5765	1.0	0.9999999996993859	STABLE_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+sorted:base_6460_vs_ctrl	6460	6460	0	157	5472	0.9998172514619883	0.9999999455640927	STABLE_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+sorted:base_6460_vs_sup_7085	7085	6460	625	2220	75910	0.9870372809906468	0.9991130123731887	STABLE_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+sorted:base_6460_vs_sup_6525	6525	6460	65	2043	69840	0.9862542955326461	0.9994178430744988	CHANGED_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07
+sorted:base_6460_vs_sup_6783	6783	6460	323	2065	70623	0.9896351047109299	0.9991391724098773	CHANGED_AFFECTED_SUBSET	hit_set_change|abs_coefficient_delta>3.63e-07

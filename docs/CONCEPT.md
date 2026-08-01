@@ -85,10 +85,25 @@ the input. A bisection bracketed the onset to **(6,460, 7,085] regions** on a
 6,460-region base — a **9.67%** increase in scale is enough. There is no usable
 safe zone, so all specifications must be subsets of one frozen run.
 
+> **Re-measured in this repository; the scale attribution did not survive.**
+> [`INPUT_SCALE_INVARIANCE.md`](INPUT_SCALE_INVARIANCE.md) re-ran the caller over
+> nested peak sets on K562 ALLPEAKS. The instability is real (3.4–4.7% of shared
+> regions, against a 0-change floor on a repeat run), but **scale is not what
+> drives it**: +9.67% and +100% growth with every region left at its row index
+> changed 0 decisions, while re-ordering the same 6,460 regions changed 876 and
+> changing only the batch size changed 1,557. The bracket and the 9.67% figure
+> should not be cited as a scale threshold. "All specifications must be subsets of
+> one frozen run" is unaffected and, if anything, more strongly supported.
+
 **2. Numeric and discrete divergence are independent axes.** Permuting input order
 produced the **largest** coefficient displacement of any perturbation measured
 (**2.07×** the median coefficient) while flipping **zero** retention decisions.
 Neither axis predicts the other; both are measured and gated separately.
+
+> **Both figures contradicted by the same re-measurement.** At fixed scale,
+> permuting order gave **876** discrete flips (4.69% of regions), not zero, and a
+> largest displacement of **104×** the median coefficient, not 2.07×. Gating the
+> two axes separately remains the right practice; these numbers do not transfer.
 
 **3. Writing a rule down is not executing it.** A four-state missingness encoding
 was specified and still silently destroyed by a table pivot that coerces an
