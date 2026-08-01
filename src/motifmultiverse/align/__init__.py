@@ -48,6 +48,48 @@ sequences at one fixed alignment", not "how surprising is it to find SOME
 alignment this good" -- a different, easier question that inflates every
 p-value computed against it.
 
+**The only other speed lever is deleting repeated work, never weakened work.**
+A pair's null re-registers ~1000 times against the SAME source matrix and the
+same two core lengths; only the target's row order changes. So the admissible
+window list, and the flattened source view and norm behind every candidate's
+cosine, were being recomputed ~1000 times each to the same bits.
+`calibrate_pair_null` now builds them once per pair (`_prepare_source`) and
+hands them to each shuffle's `register_pair` call. Three things this is NOT: it
+is not a cache (the plan is built inside one call, used by that call, and
+dropped -- nothing is keyed, nothing crosses a pair boundary, so the parallelism
+argument below is untouched); it is not a weaker null (every shuffle still
+re-optimises offset AND orientation over every candidate, and the count of
+cosine evaluations is unchanged -- 76,128,000 on the thirteen-analysis run at
+the default shuffles, before and after); and it is not a different answer (what
+moved is *when* a value is computed, not which value, so both output tables are
+byte-identical, which `tests/test_align.py` pins rather than leaving to this
+paragraph).
+
+Measured on the inner function and not on the CLI, because wall-clock over the
+whole CLI is what produced the wrong answer the last time this module was
+optimised. Both builds are loaded into one process and alternated within each
+round, timed on `time.process_time` so being descheduled on a shared box does
+not count against a build, over >=100,000 calls each, reported as the minimum
+over rounds. The noise floor is measured the same way on two loads of IDENTICAL
+code and came out 0.88-1.14x, so nothing below ~1.15x would be reported at all.
+One full null shuffle on real trimmed cores from the thirteen-analysis registry,
+as a range over THREE independent runs rather than one run's third digit:
+
+    core widths      baseline ns      hoisted ns      speedup
+    6x6            34,416- 40,318   20,327- 23,345   1.71-1.73x
+    8x8            83,174-100,662   38,618- 41,613   2.11-2.42x
+    12x11         168,952-196,525   71,769- 74,050   2.35-2.69x
+    30x29         421,195-442,218  183,150-185,317   2.30-2.39x
+
+Corroborated end to end, and labelled as corroboration rather than as the
+measurement: the whole stage on that registry (9,591 pairs, `--null-shuffles
+1000 --workers 8`) costs 788 CPU-seconds before and 362 after, with all four
+output files byte-identical.
+
+The target-side norm, the dot product and the permutation itself are the
+shuffle. Nothing is proposed against them, and the count of cosine evaluations
+is the same number after this change as before it.
+
 **Parallelism buys wall-clock and nothing else.** `workers` splits the pair loop
 across processes; it is the one speed lever that does not weaken the null, and
 it is admissible only because it cannot reach the arithmetic. Each pair's null
@@ -118,7 +160,7 @@ from dataclasses import asdict, dataclass, replace
 from itertools import combinations
 from numbers import Integral, Real
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 __all__ = [
     "AlignmentError", "AlignmentEvidence", "AlignmentRunSummary",
@@ -354,41 +396,49 @@ def _reverse_complement(mat: Any):
     return mat[::-1, [3, 2, 1, 0]]
 
 
-def _cosine(a: Any, b: Any) -> float:
-    """Cosine of two motif windows, on the unsigned PPM content.
+def _norm_flat(flat: Any) -> float:
+    """Euclidean norm of an already-flat float64 window.
 
-    This was briefly replaced by ``sqrt(v @ v)`` to avoid ``np.linalg.norm``'s
-    dispatch cost, on a measurement of 3.2s -> 1.83s for a 29-pattern registry.
-    That measurement was wall-clock over the whole CLI and was dominated by
-    interpreter start-up and I/O: re-measured on the inner loop alone, the
-    replacement was worth about 10%, and the ``np.errstate`` needed to make it
-    safe cost more than it saved -- the "optimised" version benchmarked *slower*
-    than this one (5.78 vs 5.26 us/call over 120,000 calls, median of 5). It is
-    reverted rather than tuned further, because the complexity it carried (an
-    underflow fallback, a suppressed warning context, a subnormal-range caveat)
-    bought nothing measurable.
+    This is not an approximation of ``np.linalg.norm`` -- it is that function's
+    own body for the only case this module ever calls it with. For
+    ``ord=None, axis=None`` on a real array, ``numpy/linalg/_linalg.py`` takes a
+    fast path whose entire content is ``x = x.ravel(order='K')``,
+    ``sqnorm = x.dot(x)``, ``ret = sqrt(sqnorm)``. The ravel is a no-op on the
+    contiguous 1-D views passed here, so what is skipped is the dispatch around
+    that arithmetic -- an ``__array_function__`` round trip, a dtype coercion
+    test, an ``isComplexType``/``issubclass`` pair, a second ravel -- and not one
+    operation on the data. ``math.sqrt`` and ``np.sqrt`` are both IEEE-754
+    correctly rounded, so the returned double is identical bit for bit at every
+    input, including ``dot`` overflowing to ``inf`` and underflowing to ``0.0``.
+    Verified as well as argued: 6,605 vectors -- every candidate window slice of
+    every real trimmed core in a registry, plus random vectors at scales from
+    1e-320 to 1e308 and the inf/NaN/zero degenerate cases -- compared as raw
+    float64 bit patterns, 0 differing bits.
 
-    What the detour did surface is a real defect, and it is not about speed.
-    ``np.linalg.norm`` rescales internally; ``np.dot`` does not. Above about
-    1e153 the numerator overflows to +/-inf while the denominator overflows too,
-    the quotient is NaN -- and ``max(-1.0, min(1.0, nan))`` silently yields
-    **+1.0**, because a NaN comparison is False and the clamp keeps its first
-    argument. Measured: two exactly anti-correlated windows at 1e155 reported
-    ``+1``. In *this* module that is the failure the docstring above is written
-    about: a sign-flipped pair reported as a perfect positive match. Below about
-    1e-165 the numerator underflows instead and the cosine comes back 0.0.
-
-    So a non-finite quotient now falls back to a scale-normalised computation,
-    which is exact at any representable magnitude. Cosine is scale-invariant, so
-    this changes no value it did not previously get wrong, and it costs one
-    ``math.isfinite`` on the path everything real takes.
+    `_cosine` records why the substitution was tried and reverted once before,
+    and why the reason it was reverted for was not true.
     """
-    import numpy as np
+    return math.sqrt(flat.dot(flat))
 
-    flat_a, flat_b = a.ravel(), b.ravel()
-    norm_a, norm_b = float(np.linalg.norm(flat_a)), float(np.linalg.norm(flat_b))
+
+def _cosine_flat(flat_a: Any, flat_b: Any, norm_a: float, norm_b: float) -> float:
+    """Cosine of two flattened windows whose norms the caller already has.
+
+    Split out of `_cosine` so the search can supply a source-side norm it
+    computed once per pair instead of once per shuffle, WITHOUT there being two
+    copies of the cosine: `_cosine` is a thin wrapper over this, so the
+    overflow/underflow fallback below exists in exactly one place and cannot
+    drift between the two entry points. That mattered enough to be worth the
+    indirection -- the fallback is the fix for a defect that silently reported
+    sign-flipped pairs as perfect matches, and a duplicated copy of it is the
+    obvious way to reintroduce that.
+
+    ``numpy`` is imported inside the fallback rather than at the top of this
+    function: it is needed only there, and this is the function the whole stage's
+    cost lives in.
+    """
     if norm_a and norm_b:
-        value = float(np.dot(flat_a, flat_b) / (norm_a * norm_b))
+        value = float(flat_a.dot(flat_b) / (norm_a * norm_b))
     elif not (flat_a.any() and flat_b.any()):
         # An all-zero window has no direction. A window whose norm merely
         # underflowed still does, so the two cannot share this exit -- and telling
@@ -398,14 +448,69 @@ def _cosine(a: Any, b: Any) -> float:
     else:
         value = math.nan
     if not math.isfinite(value):
+        import numpy as np
+
         scale_a, scale_b = float(np.max(np.abs(flat_a))), float(np.max(np.abs(flat_b)))
         unit_a, unit_b = flat_a / scale_a, flat_b / scale_b
-        denominator = float(np.linalg.norm(unit_a)) * float(np.linalg.norm(unit_b))
-        value = float(np.dot(unit_a, unit_b)) / denominator if denominator else 0.0
+        denominator = _norm_flat(unit_a) * _norm_flat(unit_b)
+        value = float(unit_a.dot(unit_b)) / denominator if denominator else 0.0
     # Roundoff can place a mathematically bounded cosine a few ulps outside
     # [-1, 1]; clamp the computed value before schema validation. NaN can no
     # longer reach here, which matters: the clamp would turn it into +1.0.
     return max(-1.0, min(1.0, value))
+
+
+def _cosine(a: Any, b: Any) -> float:
+    """Cosine of two motif windows, on the unsigned PPM content.
+
+    This was briefly replaced by ``sqrt(v @ v)`` to avoid ``np.linalg.norm``'s
+    dispatch cost, on a measurement of 3.2s -> 1.83s for a 29-pattern registry.
+    That measurement was wall-clock over the whole CLI and was dominated by
+    interpreter start-up and I/O, so the revert was right to distrust it. The
+    revert's *stated reason*, however, was wrong, and it is written down here
+    because it kept a real 1.5x off the table for a whole release:
+
+        ``np.linalg.norm`` rescales internally; ``np.dot`` does not.
+
+    It does not. Its ``ord=None`` fast path is ``sqrt(x.ravel(order='K').dot(x))``
+    and nothing else (see `_norm_flat`), so it overflows at exactly the same
+    magnitude ``np.dot`` does -- this package's own test run has been emitting
+    ``RuntimeWarning: overflow encountered in dot`` from *inside*
+    ``numpy/linalg/_linalg.py`` the entire time. The ``np.errstate`` that made
+    the earlier attempt benchmark *slower* (5.78 vs 5.26 us/call) was therefore
+    guarding against a warning the unpatched code already raised: it was never
+    this substitution's obligation. Removed, and re-measured on this function
+    rather than on the CLI (550,000 calls per build, alternated in one process,
+    process_time, min of 11 rounds, noise floor 0.92-1.00x), the substitution is
+    worth 1.42-1.57x here and a further 1.12-1.25x comes from what it enables:
+    ``numpy`` is now needed only by the fallback below, so the ``import numpy``
+    that every call used to execute moves inside it.
+
+    This wrapper itself is ~3-8% SLOWER than an inlined version, because it pays
+    one extra Python frame to reach `_cosine_flat`. That is deliberate and it is
+    off the hot path: the offset search calls `_cosine_flat` directly, and what
+    reaches here is the once-per-registration signed-CWM score. Paying 8% on one
+    call per pair to keep exactly one copy of the fallback is the right side of
+    that trade.
+
+    What the original detour surfaced is a real defect, and it is not about
+    speed. Above about 1e153 the numerator overflows to +/-inf while the
+    denominator overflows too, the quotient is NaN -- and
+    ``max(-1.0, min(1.0, nan))`` silently yields **+1.0**, because a NaN
+    comparison is False and the clamp keeps its first argument. Measured: two
+    exactly anti-correlated windows at 1e155 reported ``+1``. In *this* module
+    that is the failure the module docstring is written about: a sign-flipped
+    pair reported as a perfect positive match. Below about 1e-165 the numerator
+    underflows instead and the cosine comes back 0.0.
+
+    So a non-finite quotient falls back to a scale-normalised computation, which
+    is exact at any representable magnitude. Cosine is scale-invariant, so this
+    changes no value it did not previously get wrong, and it costs one
+    ``math.isfinite`` on the path everything real takes. That fallback lives in
+    `_cosine_flat`, which this function and the offset search share.
+    """
+    flat_a, flat_b = a.ravel(), b.ravel()
+    return _cosine_flat(flat_a, flat_b, _norm_flat(flat_a), _norm_flat(flat_b))
 
 
 def _candidate_windows(source_len: int, target_len: int):
@@ -425,6 +530,118 @@ def _candidate_windows(source_len: int, target_len: int):
         t_start = s_start - offset
         t_end = s_end - offset
         yield offset, s_start, s_end, t_start, t_end, overlap_bp
+
+
+def _admissible_windows(source_len: int, target_len: int,
+                        min_overlap_bp: int, min_overlap_frac: float,
+                        ) -> tuple[tuple[int, int, int, int, int, int, float, float], ...]:
+    """The candidate windows that CLEAR the bilateral overlap floor, ascending offset.
+
+    The floor is applied HERE, while the list is built, and not by the scoring
+    loop that consumes it. That is the same structural guarantee the module
+    docstring is written about, moved rather than weakened: an inadmissible
+    window is absent from candidacy, so it is never scored and can never be
+    compared against a valid one. It is not filtered out afterwards, and there is
+    no path by which a 3-4bp window's chance-perfect cosine reaches the
+    comparison.
+
+    Pure integer geometry over the two LENGTHS plus two divisions -- this
+    function never sees a matrix, which is the whole point. A null draw permutes
+    the target's rows, and a row permutation changes neither length, so all
+    ~1000 of a pair's null registrations were re-deriving this identical list.
+    """
+    windows = []
+    for offset, s_start, s_end, t_start, t_end, overlap_bp in _candidate_windows(
+        source_len, target_len,
+    ):
+        frac_source = overlap_bp / source_len
+        frac_target = overlap_bp / target_len
+        if (overlap_bp < min_overlap_bp
+                or frac_source < min_overlap_frac
+                or frac_target < min_overlap_frac):
+            continue
+        windows.append((offset, s_start, s_end, t_start, t_end, overlap_bp,
+                        frac_source, frac_target))
+    return tuple(windows)
+
+
+class _PreparedSource(NamedTuple):
+    """Everything about the offset x orientation search that the target cannot reach.
+
+    `calibrate_pair_null` builds one of these per PAIR and hands it to each of
+    that pair's ~1000 shuffle registrations. Every field is a function of the
+    source matrix, the two core lengths and the two floor parameters, and a null
+    draw is `tgt[rng.permutation(tgt.shape[0])]` -- a row permutation, which
+    changes neither length and does not touch the source at all. So this is
+    repeated work removed, not an approximation traded for speed: the null still
+    re-runs the full search on every shuffle, over the same candidates in the
+    same order, and nothing is rescored at a remembered offset.
+
+    It is NOT a cache. It is built inside one `calibrate_pair_null` call, used
+    only by that call, and dropped when it returns -- no map keyed by anything,
+    nothing carried from one pair to the next, nothing that could make a pair's
+    result depend on which pairs a worker happened to handle first. That
+    distinction is what keeps `align/README.md`'s "nothing is cached across
+    pairs" literally true and the module docstring's parallelism argument intact.
+
+    `src` is carried so `register_pair` can refuse a plan built for a different
+    source rather than silently searching the wrong one.
+    """
+
+    src: Any
+    source_len: int
+    target_len: int
+    min_overlap_bp: int
+    min_overlap_frac: float
+    #: One entry per admissible window: the flattened source view, its norm, the
+    #: target rows to slice, and the window tuple to report if it wins. The four
+    #: are zipped at build time so the scoring loop unpacks once per candidate
+    #: instead of indexing three parallel sequences.
+    plan: tuple[tuple[Any, float, int, int, tuple[int, int, int, int, int, int, float, float]], ...]
+
+
+def _prepare_source(src: Any, target_len: int,
+                    min_overlap_bp: int, min_overlap_frac: float) -> _PreparedSource:
+    """Build the shuffle-independent half of the search for one source matrix.
+
+    `src[s_start:s_end].ravel()` and `_norm_flat(...)` of it are the *same
+    expressions* the scoring loop used to evaluate inline, evaluated once each
+    instead of once per shuffle per orientation. Deliberately not
+    `src.ravel()[4 * s_start:4 * s_end]`, which addresses the same elements and
+    would save one view construction: that equivalence needs an argument about
+    `ravel`'s order for a non-C-contiguous source, and this one needs none.
+    """
+    windows = _admissible_windows(
+        src.shape[0], target_len, min_overlap_bp, min_overlap_frac,
+    )
+    plan = []
+    for window in windows:
+        _offset, s_start, s_end, t_start, t_end = window[0], window[1], window[2], window[3], window[4]
+        flat_source = src[s_start:s_end].ravel()
+        plan.append((flat_source, _norm_flat(flat_source), t_start, t_end, window))
+    return _PreparedSource(
+        src, src.shape[0], target_len, min_overlap_bp, min_overlap_frac, tuple(plan),
+    )
+
+
+def _search(prepared: _PreparedSource, tgt: Any):
+    """The offset x orientation search: the best-scoring admissible window, or None.
+
+    Visiting order is part of the answer and is preserved exactly: orientation
+    '+' before '-', ascending offset within each, and a strict `score > best[0]`
+    so the FIRST of two equally-scoring windows still wins. Which of two ties is
+    reported would otherwise move without any number in the table looking wrong.
+    """
+    best: tuple[float, str, tuple[int, int, int, int, int, int, float, float]] | None = None
+    for orientation, tgt_oriented in (("+", tgt), ("-", _reverse_complement(tgt))):
+        for flat_source, norm_source, t_start, t_end, window in prepared.plan:
+            flat_target = tgt_oriented[t_start:t_end].ravel()
+            score = _cosine_flat(
+                flat_source, flat_target, norm_source, _norm_flat(flat_target),
+            )
+            if best is None or score > best[0]:
+                best = (score, orientation, window)
+    return best
 
 
 def _declared_core(node: dict[str, Any], length: int) -> tuple[int, int] | None:
@@ -458,6 +675,7 @@ def register_pair(source_ppm: Any, target_ppm: Any,
                   *, min_overlap_bp: int = DEFAULT_MIN_OVERLAP_BP,
                   min_overlap_frac: float = DEFAULT_MIN_OVERLAP_FRAC,
                   source_node_id: str = "source", target_node_id: str = "target",
+                  _prepared_source: _PreparedSource | None = None,
                   ) -> AlignmentEvidence:
     """Register one pair: search offset x orientation on PPM, score signed CWM
     only at the winner.
@@ -465,29 +683,41 @@ def register_pair(source_ppm: Any, target_ppm: Any,
     `source_node_id`/`target_node_id` are metadata only, not part of the search;
     `align_registry` fills in the real ids afterwards. This keeps the function
     usable directly on raw arrays, exactly as the brief's interface specifies.
+
+    `_prepared_source` is private and exists for exactly one caller:
+    `calibrate_pair_null` builds the shuffle-independent half of the search once
+    per pair (see `_PreparedSource`) and passes it back in on each of that pair's
+    ~1000 shuffles. It is threaded through this function rather than letting the
+    null call `_search` directly ON PURPOSE -- the null calling `register_pair`
+    once per shuffle is the executable form of the constraint that the null
+    re-runs the full registration, and two tests count these calls to enforce it.
+    A plan that does not belong to this call's source and floor is refused rather
+    than used, so a future caller that hands in a stale one gets a loud failure
+    instead of a quietly wrong p-value.
     """
     src = _as_matrix(source_ppm, "PPM")
     tgt = _as_matrix(target_ppm, "PPM")
     source_len, target_len = src.shape[0], tgt.shape[0]
 
-    best: tuple[float, str, int, int, int, int, int, int, float, float] | None = None
-    for orientation, tgt_oriented in (("+", tgt), ("-", _reverse_complement(tgt))):
-        for offset, s_start, s_end, t_start, t_end, overlap_bp in _candidate_windows(
-            source_len, target_len,
-        ):
-            frac_source = overlap_bp / source_len
-            frac_target = overlap_bp / target_len
-            # The bilateral overlap requirement: a candidate that fails it is
-            # not scored down, it is not a candidate. A 3-4bp window reaching a
-            # perfect local cosine must never reach the comparison below.
-            if (overlap_bp < min_overlap_bp
-                    or frac_source < min_overlap_frac
-                    or frac_target < min_overlap_frac):
-                continue
-            score = _cosine(src[s_start:s_end], tgt_oriented[t_start:t_end])
-            if best is None or score > best[0]:
-                best = (score, orientation, offset, s_start, s_end, t_start, t_end,
-                        overlap_bp, frac_source, frac_target)
+    if _prepared_source is None:
+        prepared = _prepare_source(src, target_len, min_overlap_bp, min_overlap_frac)
+    else:
+        prepared = _prepared_source
+        if (prepared.src is not src
+                or prepared.source_len != source_len
+                or prepared.target_len != target_len
+                or prepared.min_overlap_bp != min_overlap_bp
+                or prepared.min_overlap_frac != min_overlap_frac):
+            raise AlignmentError(
+                "the supplied _prepared_source was not built for this call's source "
+                f"matrix and overlap floor (plan: source_len={prepared.source_len}, "
+                f"target_len={prepared.target_len}, min_overlap_bp={prepared.min_overlap_bp}, "
+                f"min_overlap_frac={prepared.min_overlap_frac}; call: "
+                f"source_len={source_len}, target_len={target_len}, "
+                f"min_overlap_bp={min_overlap_bp}, min_overlap_frac={min_overlap_frac}); "
+                "refusing to search a plan built for a different pair"
+            )
+    best = _search(prepared, tgt)
 
     if best is None:
         raise AlignmentError(
@@ -497,8 +727,9 @@ def register_pair(source_ppm: Any, target_ppm: Any,
             "rather than return an offset that does not meet it"
         )
 
-    (score, orientation, offset, s_start, s_end, t_start, t_end,
-     overlap_bp, frac_source, frac_target) = best
+    score, orientation, window = best
+    (offset, s_start, s_end, t_start, t_end,
+     overlap_bp, frac_source, frac_target) = window
 
     signed_similarity: float | None = None
     if source_cwm is not None and target_cwm is not None:
@@ -560,8 +791,22 @@ def calibrate_pair_null(source_ppm: Any, target_ppm: Any, *, null_shuffles: int,
     src = _as_matrix(source_ppm, "PPM")
     tgt = _as_matrix(target_ppm, "PPM")
 
+    # The half of the search no shuffle can reach, built ONCE for this pair
+    # instead of `null_shuffles` times: the admissible window list (pure integer
+    # geometry over the two lengths and the floor) and the source side of every
+    # cosine (flattened view and norm). A null draw permutes the target's rows,
+    # which changes neither length and does not touch the source, so every one
+    # of these quantities was previously recomputed ~1000 times to the same bits.
+    # What is NOT hoisted is the search itself: `register_pair` below still
+    # re-optimises offset AND orientation over every candidate on each freshly
+    # permuted target, and the target-side norm and the dot product -- the
+    # arithmetic that actually depends on the shuffle -- are recomputed every
+    # time, as they must be.
+    prepared = _prepare_source(src, tgt.shape[0], min_overlap_bp, min_overlap_frac)
+
     observed = register_pair(src, tgt, min_overlap_bp=min_overlap_bp,
-                             min_overlap_frac=min_overlap_frac)
+                             min_overlap_frac=min_overlap_frac,
+                             _prepared_source=prepared)
     observed_score = observed.ppm_similarity
 
     rng = np.random.default_rng(seed)
@@ -571,7 +816,7 @@ def calibrate_pair_null(source_ppm: Any, target_ppm: Any, *, null_shuffles: int,
         try:
             shuffle_evidence = register_pair(
                 src, shuffled_target, min_overlap_bp=min_overlap_bp,
-                min_overlap_frac=min_overlap_frac,
+                min_overlap_frac=min_overlap_frac, _prepared_source=prepared,
             )
         except AlignmentError:
             # The overlap floor depends only on the two lengths, which a row
