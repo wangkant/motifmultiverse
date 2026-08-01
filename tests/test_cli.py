@@ -1648,3 +1648,60 @@ def test_adjudicate_help_states_that_a_relative_review_path_is_joined_to_out(
     assert not (out / "review.yaml").exists()
     assert not (cwd / "probe").exists(), "a relative --review is not relative to the cwd"
     assert f"written: {out / 'probe' / 'review.yaml'}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("boom", [
+    MemoryError("cannot allocate the bootstrap matrix"),
+    KeyboardInterrupt(),
+])
+def test_a_crashed_run_marks_the_directory_rather_than_leaving_a_success_standing(
+    tmp_path, monkeypatch, boom,
+):
+    """The REFUSED path has this test; the CRASHED path, which is riskier, had none.
+
+    `main`'s `except BaseException` says what it is for: "a crashed run must not
+    leave a `--out` whose newest statement is an earlier run's success". Nothing
+    checked it. Deleting the `_record_outcome(ns, "CRASHED", ...)` line and
+    printing to stderr instead left the whole suite green and ruff clean --
+    `test_run_status.py` exercises the writer directly and proves it CAN record
+    CRASHED, which is a different claim from `main` calling it.
+
+    The state that leaves behind is the one the whole `run_status.json` mechanism
+    exists to prevent, and it is worse than a refusal: the second run has already
+    written its provenance record into the directory and may have overwritten
+    artifacts, but the newest status still reads SUCCESS from the first run. The
+    documented rule for a downstream reader is one line -- trust the artifacts
+    only when `status == "SUCCESS"` -- and here that rule returns the wrong answer.
+
+    `KeyboardInterrupt` is parametrised alongside `MemoryError` because it is the
+    realistic one: Ctrl-C on a long bootstrap is a `BaseException` that no
+    `except Exception` would catch, and it is how a directory actually ends up
+    half-written.
+    """
+    hits, q, c = _tiny_substrate(tmp_path)
+    out = tmp_path / "o"
+    argv = ["interpret", str(hits), "--peaks", str(q), "--comparator", str(c),
+            "--comparator-id", "odd", "--selection-provenance", "EXTERNAL",
+            "--bootstrap", "50", "--seed", "1", "--out", str(out), *_floors()]
+
+    assert main(argv) == 0
+    first = json.loads((out / "run_status.json").read_text())
+    assert first["status"] == "SUCCESS"
+    succeeded_at = first["finished_utc"]
+
+    from motifmultiverse import interpret as interpret_mod
+
+    def raiser(*args, **kwargs):
+        raise boom
+
+    monkeypatch.setattr(interpret_mod, "interpret_query", raiser)
+    with pytest.raises(type(boom)):
+        main(argv)
+
+    after = json.loads((out / "run_status.json").read_text())
+    assert after["status"] == "CRASHED", (
+        "a crashed run left the directory claiming the earlier run's success"
+    )
+    assert type(boom).__name__ in after["detail"]
+    assert after["artifacts_are_from"]["status"] == "SUCCESS"
+    assert after["artifacts_are_from"]["finished_utc"] == succeeded_at

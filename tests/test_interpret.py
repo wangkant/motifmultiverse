@@ -242,6 +242,60 @@ def test_health_numbers_carry_their_denominators():
     assert h.explained_fraction == pytest.approx(h.n_with_used_hit / h.n_searched)
 
 
+def test_min_blocks_floors_the_BLOCK_count_and_not_the_peak_count():
+    """The two counts were never separated, so the floor could read either one.
+
+    `HealthFloors` states the rule it exists to enforce: "for a clustered peak set
+    the effective sample size is the number of blocks, not the number of peaks."
+    Every other health test submits peaks that are spread one-or-two per block, so
+    `len(searched)` and `len(blocks)` move together and reading the wrong one is
+    invisible. Held apart: swapping `len(blocks)` for `len(searched)` in the floor
+    check left the whole suite green and ruff clean.
+
+    What that ships is a suppression that stops suppressing. Six peaks packed into
+    three blocks is three independent units of evidence, not six; a floor reading
+    the peak count passes a query the preregistered floor was written to refuse,
+    and the reading is emitted with no `floor_failures` beside it. Clustering is
+    the normal shape of a peak set, so this is not a corner.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+    ids = _ids(0, range(0, 3))          # 2 query peaks per block x 3 blocks
+
+    health = interpret.health_report(
+        peaks, ids, HealthFloors(min_blocks=5, min_intersection_coverage=0.0,
+                                 min_explained_fraction=0.0), BLOCK)
+
+    assert health.n_searched == 6, "the fixture must have MORE peaks than the floor"
+    assert health.n_blocks == 3, "and FEWER blocks than the floor"
+    assert health.floor_failures == ["n_blocks=3 < floor 5"]
+    assert not health.passed
+
+
+def test_a_not_searched_peak_never_enters_composes_denominator():
+    """`compose`'s denominator had no test that a NOT_SEARCHED peak is excluded.
+
+    `health_report` has one; `compose` did not, and no test anywhere put a
+    NOT_SEARCHED peak into its `region_ids`. Dropping the `.searched` filter was
+    green.
+
+    A peak the hit caller never looked at is not evidence of absence -- that
+    distinction is the thing this package says it exists to keep. Counting one in
+    the denominator dilutes every descriptive composition number: a family present
+    in all of the searched peaks reports a `peak_share` below 1.0 and a
+    `mean_coefficient_per_peak` scaled down by the same factor, and both are
+    printed as measurements of a family that was, in fact, everywhere it was
+    looked for.
+    """
+    peaks = interpret.peak_universe(_rows(), BLOCK)
+
+    only_searched = interpret.compose(peaks, _ids(0))
+    with_unsearched = interpret.compose(peaks, _ids(0) + [NOT_SEARCHED_PEAK])
+
+    assert with_unsearched == only_searched, (
+        "a NOT_SEARCHED peak changed a composition number, so it reached a denominator"
+    )
+
+
 def test_not_searched_blocks_do_not_satisfy_min_blocks():
     peaks = interpret.peak_universe(_rows(), BLOCK)
     ids = [NOT_SEARCHED_PEAK, NO_MATCH_PEAK]
