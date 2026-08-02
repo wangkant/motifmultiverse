@@ -114,11 +114,24 @@ class ProvenanceRecord:
         which identifies the discovery run better than any path does. A
         provenance record that loses an input describes nothing, and a recorder
         that guesses at the difference describes something else.
+
+        A ``root``-relative key is recorded in POSIX spelling, always. ``str()``
+        of a relative Path uses the *host* separator, so the identical pipeline
+        over the identical bytes recorded ``sub/dir/hits.tsv`` on Linux and
+        ``sub\\dir\\hits.tsv`` on Windows. These keys are not decoration: they are
+        hashed verbatim into ``adjudicate``'s ``ontology-decisions:`` and
+        ``review:`` artifact ids (via ``_scientific_artifact_id``) and into the
+        ``merge-decisions:`` id from ``schema.decision_bundle_artifact_id``, which
+        ``schema`` re-derives and refuses on mismatch. Two collaborators running
+        the same stage on the same inputs would get different artifact ids and
+        conclude their runs differed -- the exact failure mode content identity
+        exists to rule out, produced by nothing but the operating system.
+        ``as_posix()`` is the same string on every platform.
         """
         p = Path(path)
         digest = sha256_file(p)
         if key is None:
-            key = str(p.relative_to(root)) if root else p.name
+            key = p.relative_to(root).as_posix() if root else p.name
         previous = self.inputs.get(key)
         if previous is not None and previous != digest:
             raise ProvenanceError(

@@ -127,6 +127,16 @@ def test_the_bias_ledger_exists_exactly_once_in_the_repository():
     resolves by declaring the TSV authoritative.
     """
     root = _repo_root()
-    found = sorted(p.relative_to(root) for p in root.rglob("bias_ledger.tsv")
+    # `as_posix()`, never `str()`: on Windows `str(PurePath)` spells the separator
+    # `\`, so this compared `src\\motifmultiverse\\report\\bias_ledger.tsv` against
+    # a forward-slash literal and failed on a repository that was in fact correct.
+    # The property asserted is unchanged and is still exact -- the full relative
+    # path of every match, and that there is exactly one -- it is only spelled the
+    # one way on both platforms. The sort runs over the spellings rather than the
+    # `Path` objects only so a failure MESSAGE reads identically on both:
+    # `PureWindowsPath` orders case-insensitively and `PurePosixPath` does not.
+    # It cannot change the verdict -- the assertion is equality against a
+    # one-item list, so a second copy fails on every platform however the two sort.
+    found = sorted(p.relative_to(root).as_posix() for p in root.rglob("bias_ledger.tsv")
                    if ".git" not in p.parts and "build" not in p.parts)
-    assert [str(p) for p in found] == ["src/motifmultiverse/report/bias_ledger.tsv"], found
+    assert found == ["src/motifmultiverse/report/bias_ledger.tsv"], found

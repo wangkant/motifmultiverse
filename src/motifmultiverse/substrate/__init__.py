@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from motifmultiverse.schema import SchemaError
@@ -28,14 +28,47 @@ class SubstrateError(SchemaError):
     """An invalid semantic substrate identity or manifest."""
 
 
+def _absolute_in_any_spelling(text: str) -> bool:
+    """Whether ``text`` names an absolute location under POSIX *or* Windows rules.
+
+    ``Path.is_absolute`` is the *running host's* opinion, and the two hosts
+    disagree in opposite directions. Measured on Windows 11 / CPython 3.11:
+
+        '/tmp/run/hits.tsv'   Path=False  PureWindows=False  PurePosix=True
+        'C:\\work\\hits.tsv'    Path=True   PureWindows=True   PurePosix=False
+
+    so the original ``Path(value).is_absolute() or PureWindowsPath(value)`` pair
+    caught both spellings on Linux -- where ``Path`` *is* the POSIX flavour -- and
+    on Windows silently admitted every POSIX-absolute path, because there ``Path``
+    is a second copy of the Windows flavour and nothing asks the POSIX question at
+    all. A machine-local path then reached ``compute_substrate_id`` and the
+    substrate id became a fact about the workstation, which is the one thing a
+    semantic identity may not be: the whole point of the id is that it commits to
+    what produced the artifact, not to where it was produced.
+
+    Both flavours are asked explicitly, so the answer no longer depends on which
+    OS is running. ``.root``/``.drive`` are deliberately NOT consulted: this guard
+    sees every string in the payload, not only filenames, and
+    ``PureWindowsPath('p:0.05').drive == 'p:'`` would turn an ordinary parameter
+    value into a refusal.
+    """
+    return PurePosixPath(text).is_absolute() or PureWindowsPath(text).is_absolute()
+
+
 def _normalise_json(value: Any, *, key: str | None = None) -> Any:
     """Return strict JSON values, rejecting ambiguous identity inputs."""
     if isinstance(value, Path):
-        if value.is_absolute():
-            raise SubstrateError("absolute filenames cannot contribute to semantic identity")
-        return str(value)
+        # Reduced to its POSIX spelling before anything else looks at it, for two
+        # reasons that are the same reason. ``str()`` of a *relative* Path uses the
+        # host separator, so ``Path("sub/dir/peaks.tsv")`` hashed as
+        # ``sub\dir\peaks.tsv`` on Windows and ``sub/dir/peaks.tsv`` on Linux --
+        # one input, two substrate ids, decided by the OS. And
+        # ``WindowsPath("/tmp/run/hits.tsv")`` is rooted but drive-less, which
+        # pathlib does not call absolute on Windows, so the guard below could not
+        # see it either; ``as_posix()`` hands it over as the absolute path it is.
+        value = value.as_posix()
     if isinstance(value, str):
-        if Path(value).is_absolute() or PureWindowsPath(value).is_absolute():
+        if _absolute_in_any_spelling(value):
             raise SubstrateError("absolute filenames cannot contribute to semantic identity")
         return value
     if value is None or isinstance(value, bool) or isinstance(value, int):

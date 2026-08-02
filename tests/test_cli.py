@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pandas as pd
 import pytest
@@ -1502,6 +1503,17 @@ PUBLISHED_VALIDATE_FILES = {
 }
 
 
+#: POSIX permission bits are a POSIX subject. Windows `os.stat` reports mode
+#: 0o777 for every directory it can see, there is no umask (the CRT `_umask`
+#: that `os.umask` wraps reads back 0 and governs only the S_IWRITE bit of newly
+#: created FILES), and `os.chmod` on a directory can only toggle
+#: FILE_ATTRIBUTE_READONLY. So `0o777 & ~umask` is not a claim that can be true
+#: or false there, and the tests that assert it are skipped rather than softened
+#: -- the claim they make on Linux, where the defect was found and where CI
+#: runs, is worth more intact than diluted into something both platforms can pass.
+_POSIX_MODE_BITS = os.name != "nt"
+
+
 @pytest.mark.parametrize("umask_value", [0o022, 0o027])
 def test_validate_publishes_its_output_at_the_process_umask_not_0700(tmp_path, umask_value):
     """The published directory is as readable as anything else the run wrote.
@@ -1514,9 +1526,14 @@ def test_validate_publishes_its_output_at_the_process_umask_not_0700(tmp_path, u
     The mode is compared against a directory this test creates with a plain
     `mkdir` under the same umask rather than against a literal, because the claim
     is "the mode the run would otherwise have produced", not "0755".
-    """
-    import os
 
+    The two mode assertions are POSIX-only, and only those two: the run itself
+    and the "did it publish a complete artifact" assertion execute everywhere,
+    because those halves regressed on Windows too and would otherwise have gone
+    unwatched. On Windows the staging directory inherits the destination
+    parent's ACL, so "as readable as the rest of the run" holds by construction
+    with nothing to measure -- see `_POSIX_MODE_BITS` above.
+    """
     base = _validate_inputs(tmp_path)
     out = tmp_path / f"validation-{umask_value:03o}"
     control = tmp_path / f"control-{umask_value:03o}"
@@ -1527,11 +1544,26 @@ def test_validate_publishes_its_output_at_the_process_umask_not_0700(tmp_path, u
     finally:
         os.umask(previous)
 
-    assert os.stat(out).st_mode & 0o777 == os.stat(control).st_mode & 0o777
-    assert os.stat(out).st_mode & 0o777 == 0o777 & ~umask_value
+    if _POSIX_MODE_BITS:
+        assert os.stat(out).st_mode & 0o777 == os.stat(control).st_mode & 0o777
+        assert os.stat(out).st_mode & 0o777 == 0o777 & ~umask_value
     assert PUBLISHED_VALIDATE_FILES <= {entry.name for entry in out.iterdir()}
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the stub is unreachable on Windows, so the test would assert a falsehood. "
+        "_publish_directory_noreplace branches to os.rename before it ever names "
+        "ctypes there -- exactly the fix for the TypeError that ctypes.CDLL(None) "
+        "raised on this platform -- so monkeypatching ctypes.CDLL changes nothing "
+        "and `assert os.path.islink(out)` fails on a correctly published real "
+        "directory. The symlink form is also unavailable to Windows regardless: "
+        "os.symlink needs SeCreateSymbolicLinkPrivilege and fails with WinError "
+        "1314 without Developer Mode. The assertions below are left untouched so "
+        "the POSIX fallback keeps being proven where it can actually run."
+    ),
+)
 def test_validate_output_is_readable_where_renameat2_is_unavailable(tmp_path, monkeypatch):
     """The symlink fallback publishes a readable directory too.
 
@@ -1541,9 +1573,14 @@ def test_validate_output_is_readable_where_renameat2_is_unavailable(tmp_path, mo
     fallback is reached on every filesystem: it is the path where the mode
     matters most, since the published name is a symlink and `cp -r` of it copies
     the link rather than the results.
+
+    Stubbing ctypes wholesale is also what HID the Windows defect: this test
+    passed on Linux by replacing the very call, `ctypes.CDLL(None,
+    use_errno=True)`, that raised TypeError on Windows before any artifact was
+    written. See `test_validate_publishes_a_real_directory_without_consulting_libc`
+    for the case this one cannot cover.
     """
     import ctypes
-    import os
 
     base = _validate_inputs(tmp_path)  # imports h5py/pyarrow before libc is stubbed
     import pyarrow.parquet  # noqa: F401  - likewise; nothing may load a library later
@@ -1563,6 +1600,46 @@ def test_validate_output_is_readable_where_renameat2_is_unavailable(tmp_path, mo
 
     assert os.path.islink(out), "this test is meaningless unless the fallback ran"
     assert os.stat(out).st_mode & 0o777 == 0o755
+    assert PUBLISHED_VALIDATE_FILES <= {entry.name for entry in out.iterdir()}
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="asserts the Windows publish branch; POSIX must reach libc, not skip it",
+)
+def test_validate_publishes_a_real_directory_without_consulting_libc(tmp_path, monkeypatch):
+    """`validate --out` must not touch libc on Windows, and must publish a real directory.
+
+    `_publish_directory_noreplace` opened libc with `ctypes.CDLL(None,
+    use_errno=True)` unconditionally. On Windows that is not a failed lookup but
+    a TypeError raised inside ctypes itself -- "argument of type 'NoneType' is
+    not iterable" -- thrown before the rename was attempted, so `validate`
+    produced no output whatsoever and 26 tests failed downstream of it, all
+    eighteen `test_end_to_end` cases among them. The test above could never have
+    caught that, because it stubs `ctypes.CDLL` out on its way past.
+
+    So this one does the opposite of stubbing: `ctypes.CDLL` is made to raise if
+    anything calls it, which pins the fix as "Windows does not go near libc"
+    rather than "Windows happens to survive going near it". The published name is
+    then asserted to be a real directory -- not the POSIX symlink fallback, which
+    would need a privilege Windows does not grant by default (WinError 1314) and
+    which `cp -r` copies as a link instead of as results.
+    """
+    import ctypes
+
+    base = _validate_inputs(tmp_path)
+    import pyarrow.parquet  # noqa: F401  - load libraries before CDLL is poisoned
+
+    def _forbidden(*args, **kwargs):
+        raise AssertionError("the Windows publish path must not open a shared library")
+
+    monkeypatch.setattr(ctypes, "CDLL", _forbidden)
+
+    out = tmp_path / "validation-windows"
+    assert main([*base, "--out", str(out)]) == 0
+
+    assert out.is_dir()
+    assert not out.is_symlink(), "Windows publishes the directory itself, not a link to it"
     assert PUBLISHED_VALIDATE_FILES <= {entry.name for entry in out.iterdir()}
 
 

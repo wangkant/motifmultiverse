@@ -289,3 +289,60 @@ def test_a_v1_registry_is_not_held_to_the_new_requirement():
         for criterion in v1.values()
         for p in criterion.predicates
     )
+
+
+# --------------------------------------------------------------------------- #
+# The other way a provenance claim goes wrong: not unresolvable, but resolvable
+# to a different string depending on which machine resolved it.
+#
+# Above, `derived` was a claim the reader could not check. Below, the recorded
+# input keys are checkable -- and were checkably different on two hosts that ran
+# the same command over the same bytes. Same failure shape: something that reads
+# as evidence about the run is actually evidence about the environment.
+# --------------------------------------------------------------------------- #
+
+def test_a_root_relative_input_key_is_recorded_in_posix_spelling_on_every_host(tmp_path):
+    """`add_input(..., root=)` keys must not carry the host's path separator.
+
+    The key was built with ``str(p.relative_to(root))``, and ``str()`` of a
+    relative Path is host-flavoured, so the identical pipeline over the identical
+    inputs recorded ``sub/dir/hits.tsv`` on Linux and ``sub\\dir\\hits.tsv`` on
+    Windows. Measured here before the fix:
+    ``tests/test_schema.py::test_add_input_root_distinguishes_same_basename``
+    failed on this box for exactly that reason and passes on CI.
+
+    That is an identity bug, not a cosmetic one. ``adjudicate_evidence`` copies
+    ``provenance_record.inputs`` verbatim into the mapping that
+    ``_scientific_artifact_id`` hashes into the ``ontology-decisions:`` and
+    ``review:`` ids -- which are then written into every row of
+    ``ontology_decisions.parquet`` and into its file metadata -- and into
+    ``schema.decision_bundle_artifact_id``, whose ``merge-decisions:`` id
+    ``schema`` re-derives on read and refuses on mismatch. Measured on the same
+    inputs, the two spellings gave ``merge-decisions:a372f62a...`` and
+    ``merge-decisions:fccd0571...``. Two collaborators would conclude their runs
+    differed when the only thing that differed was the operating system.
+
+    Asserting the POSIX spelling rather than ``os.sep`` is the point: a test that
+    asked for the host's separator would pass on both machines and re-describe
+    the bug as the contract.
+    """
+    from motifmultiverse.provenance import ProvenanceRecord, sha256_file
+    from motifmultiverse.schema import decision_bundle_artifact_id
+
+    nested = tmp_path / "sub" / "dir"
+    nested.mkdir(parents=True)
+    hits = nested / "hits.tsv"
+    hits.write_bytes(b"region_id\thit_coefficient\nr1\t1.0\n")
+
+    rec = ProvenanceRecord(command="mm adjudicate", subcommand="adjudicate")
+    rec.add_input(hits, root=tmp_path)
+
+    assert rec.inputs == {"sub/dir/hits.tsv": sha256_file(hits)}
+
+    # And the keys are load-bearing, so pinning the spelling is worth doing: the
+    # same digests under the two spellings are two different artifact ids.
+    digest = sha256_file(hits)
+    assert (
+        decision_bundle_artifact_id((), {}, {"inputs": dict(rec.inputs)})
+        != decision_bundle_artifact_id((), {}, {"inputs": {"sub\\dir\\hits.tsv": digest}})
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -125,6 +126,78 @@ def test_canonical_identity_refuses_ambiguous_or_path_dependent_values(bad):
     """Non-JSON and machine-dependent values must not silently become an identity."""
     with pytest.raises(SubstrateError):
         compute_substrate_id(bad)
+
+
+@pytest.mark.parametrize("absolute", [
+    "/private/project/peaks.tsv",
+    "C:\\private\\project\\peaks.tsv",
+    "C:/private/project/peaks.tsv",
+    "\\\\fileserver\\lab\\peaks.tsv",
+    "//fileserver/lab/peaks.tsv",
+], ids=["posix", "drive-backslash", "drive-slash", "unc-backslash", "unc-slash"])
+@pytest.mark.parametrize("spell", [str, Path], ids=["as-str", "as-Path"])
+def test_the_absolute_path_guard_gives_the_same_answer_on_every_host(absolute, spell):
+    """An absolute path is refused in either spelling, whichever OS is running.
+
+    The guard used to ask ``Path(value).is_absolute() or PureWindowsPath(value)``.
+    On Linux that covers both spellings, because ``Path`` there IS the POSIX
+    flavour. On Windows ``Path`` is a second copy of the Windows flavour, nothing
+    asks the POSIX question, and ``'/tmp/run/hits.tsv'`` sailed into
+    ``compute_substrate_id``. Measured on this box before the fix:
+    ``Path('/tmp/run/hits.tsv').is_absolute()`` and
+    ``PureWindowsPath('/tmp/run/hits.tsv').is_absolute()`` are both ``False``
+    while ``PurePosixPath`` says ``True``. The ``bad3``/``bad4`` cases of
+    `test_canonical_identity_refuses_ambiguous_or_path_dependent_values` failed
+    here and passed on CI for that reason alone.
+
+    The ``Path`` half of this parametrisation is not redundant with the ``str``
+    half. ``WindowsPath('/tmp/run/hits.tsv')`` is rooted but drive-less, which
+    pathlib does not classify as absolute on Windows at all, so the object route
+    needed the same normalisation the string route got and would otherwise have
+    stayed open after the string route closed.
+
+    Both directions matter, which is why the Windows spellings are here too: if
+    this were ever "fixed" by dropping ``PureWindowsPath`` and trusting the host,
+    a POSIX machine would start accepting ``C:\\private\\project\\peaks.tsv`` and
+    the defect would simply change which OS it lives on.
+
+    What this does NOT claim, because it is not achievable: agreement on
+    backslash spellings that are not drive-qualified. ``'\\etc\\passwd'`` is one
+    rooted path on Windows and one relative filename containing backslashes on
+    POSIX, and ``'sub\\dir\\peaks.tsv'`` is a two-level path on one host and a
+    single filename on the other. The same string genuinely denotes different
+    things, so no normalisation makes both hosts agree, and the guard closes the
+    forward-slash spellings rather than pretending otherwise. Nothing in this
+    package constructs such a path -- every caller passes a real filesystem path
+    from the host it is running on -- so the residual disagreement is reachable
+    only by handing the API a string by hand.
+    """
+    with pytest.raises(SubstrateError):
+        compute_substrate_id({"input_file": spell(absolute)})
+    with pytest.raises(SubstrateError):
+        compute_substrate_id({"parameters": {"working_dir": spell(absolute)}})
+
+
+def test_a_relative_path_contributes_one_spelling_whichever_host_hashed_it():
+    """The positive control, and the separator half of the same defect.
+
+    Two jobs. First, the refusals above are also satisfied by a guard that refuses
+    everything, so a relative path has to still reach the identity -- otherwise
+    the substrate id would depend on nothing.
+
+    Second, and this is the failure on this box: ``str()`` of a relative Path uses
+    the *host* separator, so the ``Path`` branch returned ``sub\\dir\\peaks.tsv``
+    on Windows and ``sub/dir/peaks.tsv`` on Linux for the same input. That is the
+    guard's own thesis inverted -- a machine-dependent value silently becoming an
+    identity -- arriving through the accepted value rather than through the
+    rejected one. The assertion is platform-independent by construction: it says
+    the object and the POSIX string agree, which is true everywhere once the
+    branch normalises with ``as_posix()``.
+    """
+    assert (
+        compute_substrate_id({"input_file": Path("sub/dir/peaks.tsv")})
+        == compute_substrate_id({"input_file": "sub/dir/peaks.tsv"})
+    )
 
 
 def test_manifest_keeps_file_checksums_as_provenance_not_semantic_identity(tmp_path):

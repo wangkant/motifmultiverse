@@ -943,6 +943,61 @@ def stability_result_id(
     return f"stability:{digest}"
 
 
+def _publish_directory_noreplace_windows(stage: Path, destination: Path) -> None:
+    """The Windows half of the no-clobber publish contract: one plain ``os.rename``.
+
+    On Windows ``os.rename`` calls ``MoveFileExW`` WITHOUT
+    ``MOVEFILE_REPLACE_EXISTING``, which is already exactly the contract
+    ``renameat2(RENAME_NOREPLACE)`` had to be reached for on Linux -- and it is
+    strictly stronger than POSIX ``rename``, which is what forced that syscall
+    in the first place.  Measured on this platform (Windows 11, CPython 3.11)
+    for a directory rename:
+
+        absent destination        -> published atomically, as a real directory
+        existing NON-EMPTY dir    -> FileExistsError (errno 17 / WinError 183)
+        existing EMPTY dir        -> FileExistsError (errno 17 / WinError 183)
+        existing FILE             -> FileExistsError (errno 17 / WinError 183)
+
+    The empty-directory row is the one that matters: replacing an empty
+    destination is the hazard the module docstring above singles out as the
+    reason a separate ``exists()`` check cannot provide this contract, and
+    Windows refuses it at the filesystem call.  In every refusing case both
+    ``stage`` and ``destination`` were left untouched, so the caller's
+    ``shutil.rmtree(stage)`` cleanup still owns exactly what it created.
+
+    ``os.replace`` would be wrong here even though it is the usual atomic-write
+    spelling: it passes ``MOVEFILE_REPLACE_EXISTING``, and on an existing empty
+    directory it was measured to raise ``PermissionError`` (WinError 5) rather
+    than ``FileExistsError`` -- a refusal the caller does not recognise as "the
+    destination is taken", reported as an unrelated failure class.
+
+    Windows also gets a REAL directory rather than the POSIX symlink fallback,
+    which is both better for readers (no ``cp -r`` copying a link instead of the
+    results) and the only option available: creating a symlink on Windows needs
+    SeCreateSymbolicLinkPrivilege, and without Developer Mode ``os.symlink``
+    fails here with WinError 1314, "a required privilege is not held".
+    """
+    # No umask/chmod dance on this branch, deliberately -- it is a POSIX repair
+    # that has nothing to repair here. Windows has no umask: the CRT `_umask`
+    # that `os.umask` wraps reads back 0 on this machine and governs only the
+    # S_IWRITE bit of newly created files, never directory access. Access is an
+    # ACL, and `tempfile.mkdtemp` gets its ACL by inheritance from `out.parent`
+    # -- the very directory being published into -- so the staged directory is
+    # already exactly as readable as the run that produced it, which is all the
+    # POSIX chmod was buying. `os.chmod` could not change that anyway: on a
+    # directory it can only toggle FILE_ATTRIBUTE_READONLY, and `os.stat` still
+    # reported mode 0o777 after `os.chmod(stage, 0o755)` when measured. Running
+    # it would be a no-op at best, and under a non-zero umask it would strip
+    # S_IWRITE and mark the published artifact read-only -- the opposite of the
+    # "as readable as the rest of the run" rule it exists to enforce.
+    try:
+        os.rename(stage, destination)
+    except FileExistsError as exc:
+        raise ValidationError(
+            f"validation output already exists and will not be overwritten: {destination}"
+        ) from exc
+
+
 def _publish_directory_noreplace(stage: Path, destination: Path) -> None:
     """Atomically publish ``stage`` only when ``destination`` is still absent.
 
@@ -952,7 +1007,22 @@ def _publish_directory_noreplace(stage: Path, destination: Path) -> None:
     one filesystem operation.  Filesystems without that flag publish an atomic
     no-replace symlink to the already-complete private directory; readers still
     see the complete directory at ``destination`` in one namespace operation.
+
+    Windows reaches neither of those.  ``ctypes.CDLL(None)`` is a POSIX-only
+    idiom -- it asks dlopen for "the main program", which has no Windows
+    counterpart -- and there it raised ``TypeError: argument of type 'NoneType'
+    is not iterable`` from inside ctypes itself, before a single artifact byte
+    was published.  That killed the entire ``validate`` stage on Windows, and
+    with it everything that consumes a validation directory: 26 of the 35
+    Windows-only failures in this suite went green on the branch below alone,
+    including all eighteen ``test_end_to_end`` errors, which never failed an
+    assertion -- they could not get an output directory to look at.  So Windows
+    is branched off ahead of the libc lookup rather than made to survive it.
     """
+    if os.name == "nt":
+        _publish_directory_noreplace_windows(stage, destination)
+        return
+
     import ctypes
     import errno
 

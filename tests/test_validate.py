@@ -41,6 +41,33 @@ from motifmultiverse.validate import (
 )
 
 
+def _probe_symlink_permission() -> bool:
+    """Whether THIS PROCESS may create a symlink -- a privilege, not an operating system.
+
+    Tests below build a symlink as a precondition, not as the thing under test.
+    Guarding them on ``sys.platform`` would be wrong in both directions: a
+    Windows box with Developer Mode on can create them and should run the tests,
+    and a POSIX box could in principle refuse.  So the capability is measured
+    once, here, the same way the test would use it.
+    """
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as probe:
+        try:
+            os.symlink(
+                os.path.join(probe, "target"),
+                os.path.join(probe, "link"),
+                target_is_directory=True,
+            )
+        except (OSError, NotImplementedError, AttributeError):
+            return False
+    return True
+
+
+_CAN_CREATE_SYMLINKS = _probe_symlink_permission()
+
+
 def _manifest():
     return build_peak_split_manifest({
         "p-discovery": "DISCOVERY",
@@ -1966,6 +1993,16 @@ def test_stability_writer_does_not_clobber_an_output_created_at_publish_time(
     assert not list(tmp_path.glob(".publication.stage-*"))
 
 
+@pytest.mark.skipif(
+    not _CAN_CREATE_SYMLINKS,
+    reason=(
+        "the precondition is a dangling symlink and this process may not create one; "
+        "on Windows os.symlink needs SeCreateSymbolicLinkPrivilege and fails with "
+        "WinError 1314 without Developer Mode. The rule under test -- os.path.lexists "
+        "refuses a destination that resolves to nothing -- is platform-neutral and is "
+        "asserted wherever the precondition can be built."
+    ),
+)
 def test_stability_writer_treats_a_dangling_output_symlink_as_existing(tmp_path):
     (
         binding, manifest, decision, validation, provenance,
@@ -1988,6 +2025,107 @@ def test_stability_writer_treats_a_dangling_output_symlink_as_existing(tmp_path)
 
     assert out.is_symlink()
     assert out.readlink() == tmp_path / "missing-target"
+
+
+def _staged_directory(tmp_path, name="stage"):
+    stage = tmp_path / name
+    stage.mkdir()
+    (stage / "stability_results.parquet").write_text("payload", encoding="utf-8")
+    return stage
+
+
+def test_publish_primitive_publishes_into_an_absent_destination(tmp_path):
+    """The publish primitive must be REACHABLE on the platform it is running on.
+
+    `_publish_directory_noreplace` opened libc with `ctypes.CDLL(None,
+    use_errno=True)`, which is a POSIX-only idiom; on Windows it raised
+    `TypeError: argument of type 'NoneType' is not iterable` from inside ctypes
+    before any publish was attempted, so the whole `validate` stage produced no
+    output at all there and 26 tests failed downstream of it.  Every
+    other test in this file reaches the primitive through
+    `write_stability_artifacts`, which wraps it in artifact construction; this
+    one calls it directly so a platform that cannot run it fails HERE, on one
+    line, instead of scattering the same TypeError across the suite.
+
+    What the destination looks like afterwards is NOT platform-neutral, and this
+    test must not pretend otherwise. The rename forms -- `renameat2` on Linux,
+    `os.rename` on Windows -- move the staging directory, so it is gone
+    afterwards. The symlink fallback deliberately does the opposite: it publishes
+    a link AT the staging directory, which therefore has to survive, and
+    destroying it would empty the artifact just published. macOS takes that
+    branch on every run, having no `renameat2` to reject anything, and so does
+    any POSIX filesystem that returns EINVAL for the flag. So the shape is
+    asserted per branch; only reachability and the payload are claimed for every
+    platform.
+    """
+    import motifmultiverse.validate as validate_mod
+
+    stage = _staged_directory(tmp_path)
+    out = tmp_path / "publication"
+
+    validate_mod._publish_directory_noreplace(stage, out)
+
+    assert out.is_dir()
+    assert (out / "stability_results.parquet").read_text(encoding="utf-8") == "payload"
+    if out.is_symlink():
+        assert stage.is_dir(), "the fallback publishes a link TO the stage, so the stage lives on"
+    else:
+        assert not stage.exists(), "the rename form moves the staging directory"
+
+
+@pytest.mark.parametrize("occupant", ["empty", "non_empty"])
+def test_publish_primitive_refuses_an_occupied_destination_including_an_empty_one(
+    tmp_path, occupant,
+):
+    """No-clobber is a property of the publish call, not of the check that precedes it.
+
+    `write_stability_artifacts` does test `os.path.lexists(out)` before staging,
+    but that check cannot carry the contract: the destination can appear between
+    it and the rename, which is the race
+    `test_stability_writer_does_not_clobber_an_output_created_at_publish_time`
+    injects.  So the guarantee has to live in the publish call itself, and this
+    asserts it there, on whatever primitive this platform uses -- renameat2 on
+    Linux, the symlink fallback where that flag is rejected, os.rename on
+    Windows.
+
+    The `empty` case is the one the function's docstring singles out and the
+    reason a plain rename is not enough on POSIX: `rename(2)` is *permitted* to
+    replace an empty destination directory, so a run that published into a
+    half-created `validation/` would silently destroy it.  Windows `os.rename`
+    refuses it (FileExistsError, WinError 183) and Linux needs
+    RENAME_NOREPLACE to refuse it; either way the refusal is what is asserted,
+    and it must be the caller-facing `ValidationError` carrying the message the
+    CLI turns into exit 4, not a bare OSError.
+
+    Both occupants are DIRECTORIES on purpose.  Windows also refuses a plain
+    file at the destination with the same FileExistsError (measured), but the
+    errno Linux returns for renaming a directory onto a file under
+    RENAME_NOREPLACE could not be executed from the Windows box this was written
+    on -- EEXIST and ENOTDIR are both defensible and only one of them is caught
+    here -- so that case is left unasserted rather than guessed.
+
+    The destination is asserted untouched afterwards because "refused" and
+    "refused after damage" are not the same outcome.
+    """
+    import motifmultiverse.validate as validate_mod
+
+    stage = _staged_directory(tmp_path)
+    out = tmp_path / "publication"
+    out.mkdir()
+    if occupant == "non_empty":
+        (out / "existing.txt").write_text("original", encoding="utf-8")
+
+    with pytest.raises(SchemaError, match="already exists and will not be overwritten"):
+        validate_mod._publish_directory_noreplace(stage, out)
+
+    if occupant == "non_empty":
+        assert (out / "existing.txt").read_text(encoding="utf-8") == "original"
+        assert [entry.name for entry in out.iterdir()] == ["existing.txt"]
+    else:
+        assert list(out.iterdir()) == [], "the empty destination must survive intact"
+    assert (stage / "stability_results.parquet").exists(), (
+        "a refused publish leaves the staging directory for the caller to clean up"
+    )
 
 
 def test_stability_result_id_changes_with_lexicon_identity_and_cannot_match_an_arbitrary_result_id(tmp_path):

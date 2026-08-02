@@ -278,7 +278,16 @@ def test_every_guard_call_in_src_records_what_the_guard_returned():
 
     offenders = []
     for path, tree in trees.items():
-        relative = str(path.relative_to(src))
+        # `as_posix()`, never `str()`: `UNRECORDED_GUARD_CALLS` is keyed by
+        # forward-slash paths, and on Windows `str(PurePath)` spells the same path
+        # with backslashes, so `("compile\\__init__.py", ...)` matched no key and
+        # the one deliberately-unrecorded call this module argues for was reported
+        # as an offender. The failure mode is the dangerous direction: the
+        # allowlist quietly stops applying, so a real exemption reads as a defect
+        # and the test says nothing about which platform it is on. It also keeps
+        # the offender strings below identical on both platforms, so a CI failure
+        # and a local one are the same sentence.
+        relative = path.relative_to(src).as_posix()
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         owner = _enclosing_function(tree)
         for node in ast.walk(tree):
