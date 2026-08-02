@@ -167,6 +167,18 @@ def _resolve_estimator(name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Reading
 # --------------------------------------------------------------------------- #
+#: Every spelling of "no value" a null can arrive as, once a table has been through a
+#: text format. Catching `float("nan")` is not enough: the same null written to TSV and
+#: read back is the *string* ``"nan"``, which is not the sentinel, so every check written
+#: against the sentinel passes it through -- which is how a family called ``nan`` was
+#: reported. These are the spellings pandas and the common writers actually emit.
+#: ``"NA"`` is already ``MISSING_SENTINEL``, so routing it here changes nothing for the
+#: columns that default to the sentinel, and makes a `used` row whose family reads ``nan``
+#: hit the refusal `HitRecord` already promises instead of naming a fabricated family.
+_NULL_TEXT = frozenset(
+    {"", "nan", "NaN", "NAN", "NA", "N/A", "None", "none", "null", "NULL", "<NA>", "NaT"})
+
+
 def _text(value: Any, column: str, *, default: str | None = None) -> str:
     """Read one text cell, treating every spelling of "no value" as absent.
 
@@ -191,9 +203,11 @@ def _text(value: Any, column: str, *, default: str | None = None) -> str:
             )
         return default
     text = str(value)
-    if text == "":
+    if text in _NULL_TEXT:
         if default is None:
-            raise InterpretError(f"hit table has an empty {column}; it is required on every row")
+            raise InterpretError(
+                f"hit table has an empty {column} (read as {text!r}); it is required on "
+                "every row")
         return default
     return text
 
@@ -1309,6 +1323,22 @@ def interpret_query(hits: Sequence[HitRecord], query: PeakSetQuery,
             "statistical license is unaffected -- what is limited is what the result can be "
             "evidence about: the model's own attribution surface, not structure external to "
             "it. output_mode cannot represent this, so read claim_scope."
+        )
+
+    # `peak_universe` excludes the sentinel from `families_measured` on purpose, and that
+    # exclusion is right: an unnamed family is not a measured zero. What was missing is that
+    # it happened in silence. A measured row naming no family leaves no trace in the
+    # composition, so a reader cannot tell an unassigned family from one that was never
+    # searched -- the very distinction `compose` says a missing row destroys. The rows are
+    # still excluded; now the exclusion is a number the reader can see.
+    n_unnamed = sum(1 for h in hits
+                    if h.missingness is not Missingness.NOT_SEARCHED
+                    and h.family_id == MISSING_SENTINEL)
+    if n_unnamed:
+        notes.append(
+            f"{n_unnamed} measured row(s) name no family_id and are excluded from the "
+            "composition: an unnamed family is not a measured zero. Their peaks still count as "
+            "searched, so this is a gap in the family assignment, not in the search."
         )
 
     peaks = peak_universe(hits, block_size)

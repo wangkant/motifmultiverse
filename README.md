@@ -237,9 +237,14 @@ Notes on individual steps:
   processes; each pair's null is drawn from the run seed alone, so the written
   tables are byte-identical at every worker count and only wall-clock changes.
   Progress goes to stderr, not stdout.
-- **`annotate --tomtom`** reads *precomputed* TomTom output named by `--databases`;
-  it does not run TomTom. `config/db.yaml` is site-specific and not shipped — copy
-  the shape from `config/db.example.yaml`. Without it the backend is logged
+- **`annotate --tomtom`** reads a versioned *transcription* of precomputed TomTom
+  output, named by `--databases`; it does not run TomTom, and it does not read
+  TomTom's own files. Pointing `--databases` at a `tomtom.tsv` or a TF-MoDISco
+  `motifs.html` will refuse: the transcription must supply a `version` and a
+  `proposed_family_id` per match, and those are exactly the two fields this package
+  will not invent for a caller — the release a label came from, and which grouping
+  of motifs counts as one family. `config/db.yaml` is site-specific and not shipped
+  — copy the shape from `config/db.example.yaml`. Without it the backend is logged
   `UNVERIFIED`, not skipped.
 - **`validate`** requires frozen, standardized before/after hit tables and the exact
   manifest-bound decision/validation split artifacts; see `validate --help`.

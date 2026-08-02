@@ -1235,8 +1235,16 @@ def test_a_used_hit_must_name_a_family_not_the_sentinel(tmp_path):
         read_hit_table(p)
 
 
-def test_a_not_searched_row_may_leave_family_unnamed(tmp_path):
-    """The refusal is about USED rows: absence still has no family to name."""
+def test_a_searched_but_unretained_row_may_leave_family_unnamed(tmp_path):
+    """The refusal is about USED rows: absence still has no family to name.
+
+    Named for the state the body actually exercises. It was
+    `test_a_not_searched_row_may_leave_family_unnamed`, but it replaces `used`
+    with `no_sequence_match` -- a MEASURED state, not `not_searched` -- and the two
+    are the distinction the whole four-state missingness discipline rests on. A
+    test whose name pins a different contract than its body is a contract nobody
+    is checking.
+    """
     from motifmultiverse.interpret import read_hit_table
     from motifmultiverse.schema import MISSING_SENTINEL
 
@@ -1480,6 +1488,36 @@ def test_an_unnamed_family_is_not_promoted_to_a_measured_zero():
     peaks = interpret.peak_universe(_rows(), BLOCK)
     assert peaks[NO_MATCH_PEAK].families_measured == set()
     assert interpret.compose(peaks, [NO_MATCH_PEAK]) == []
+
+
+def test_an_unnamed_family_is_reported_as_a_gap_not_only_dropped():
+    """Excluding the sentinel is right; excluding it in silence is not.
+
+    A measured row that names no family leaves no trace in the composition, so the
+    reader cannot tell an unassigned family from one that was never searched --
+    the distinction `compose`'s own docstring says a missing row destroys. The
+    rows stay excluded; the exclusion is now countable.
+    """
+    result = interpret.interpret_query(_rows(), _query(region_ids=_ids(0) + [NO_MATCH_PEAK]))
+    assert any("name no family_id" in n for n in result.notes), result.notes
+
+
+def test_a_family_read_back_as_the_string_nan_is_not_a_family():
+    """`_text`'s docstring already names this failure; it only caught the float.
+
+    A null written to TSV and read back is the *string* `nan`, which is not the
+    sentinel, so every check written against the sentinel passed it through and a
+    family called `nan` reached a composition table. The byte-equivalent parquet
+    was refused. Both must land in the same place.
+    """
+    for spelling in ("nan", "NaN", "None", "<NA>", "null"):
+        assert interpret._text(spelling, "family_id", default=MISSING_SENTINEL) == \
+            MISSING_SENTINEL, spelling
+    # A required column still refuses rather than defaulting.
+    with pytest.raises(interpret.InterpretError, match="region_id"):
+        interpret._text("nan", "region_id")
+    # A real value that merely contains one of the spellings is untouched.
+    assert interpret._text("NANOG", "family_id", default=MISSING_SENTINEL) == "NANOG"
 
 
 # --- regression: the shipped README said FP-15's estimators were absent -------
