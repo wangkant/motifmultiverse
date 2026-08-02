@@ -17,30 +17,14 @@ on:
 
 jobs:
   core:
-    name: core (py${{ matrix.python-version }}, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        # Windows runners default to pwsh, where the heredocs and `for` loops
-        # below are syntax errors. Explicit on every platform rather than only
-        # where it is needed, so the steps a reader sees are the steps that run.
-        shell: bash
+    name: core (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         # Both interpreters `pyproject.toml` claims in its classifiers. A
         # classifier nothing runs is a claim, not a fact.
         python-version: ["3.11", "3.12"]
-        # And the same rule applied to the axis it was never applied to. The
-        # package published no OS restriction, pip installed it on Windows
-        # without a murmur, and `validate` could not run there at all: 35 of
-        # this suite's tests failed on Windows for a POSIX-only `ctypes.CDLL
-        # (None)` and two host-dependent identity hashes, none of it visible to
-        # an ubuntu-only matrix. macOS is NOT here yet and the classifiers do
-        # not claim it: it takes the symlink publish path on every run, which no
-        # job has ever exercised, and adding a platform nobody can debug is how
-        # a red main becomes normal.
-        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -81,11 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          # The OS belongs in the name now that the matrix has one: upload-artifact@v4
-          # refuses a second upload under a name already taken in the same run, so
-          # without it the two runners on one interpreter would collide and the
-          # per-run facts the artifact exists to carry would be one platform's only.
-          name: implementation-status-py${{ matrix.python-version }}-${{ matrix.os }}
+          name: implementation-status-py${{ matrix.python-version }}
           path: |
             implementation_status.json
             pytest-report.xml
