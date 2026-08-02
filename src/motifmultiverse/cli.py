@@ -122,9 +122,21 @@ def _run(module: str, args: argparse.Namespace) -> int:
     raise _not_implemented(module)
 
 
+#: Both console scripts point at the same callable, so the usage line has to come from
+#: how the reader actually invoked it. argparse's own default would be right for the entry
+#: points and wrong for `python -m motifmultiverse.cli`, where argv[0] is a file path --
+#: hence the allow-list rather than a bare basename.
+_ENTRY_POINTS = ("motifmultiverse", "mmv")
+
+
+def _invoked_as() -> str:
+    name = Path(sys.argv[0]).name if sys.argv and sys.argv[0] else ""
+    return name if name in _ENTRY_POINTS else "motifmultiverse"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = _Parser(
-        prog="motifmultiverse",
+        prog=_invoked_as(),
         description=(
             "Bias-aware harmonization and robust inference of attribution-derived "
             "regulatory motifs across models and methods."

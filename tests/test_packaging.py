@@ -193,3 +193,29 @@ def test_no_product_code_reads_or_writes_text_at_the_locale_codepage():
         "text I/O in product code without an explicit encoding, so its result "
         "depends on the host's locale: " + ", ".join(offenders)
     )
+
+
+# --- the short alias ----------------------------------------------------------
+def test_both_console_scripts_are_declared_and_are_the_same_callable():
+    """`mmv` is an alias, not a second command.
+
+    Two entry points pointing at two callables is two argument surfaces, and the
+    second one drifts. Both must name `cli:main`.
+    """
+    pyproject = tomllib.loads(
+        (_repo_root() / "pyproject.toml").read_text(encoding="utf-8"))
+    scripts = pyproject["project"]["scripts"]
+    assert set(scripts) == {"motifmultiverse", "mmv"}, scripts
+    assert len(set(scripts.values())) == 1, scripts
+
+
+def test_the_usage_line_names_the_command_the_reader_typed(monkeypatch):
+    """One callable behind two names must not print usage for the other one."""
+    from motifmultiverse import cli
+
+    for name in ("motifmultiverse", "mmv"):
+        monkeypatch.setattr(cli.sys, "argv", [f"/usr/local/bin/{name}", "--help"])
+        assert cli.build_parser().prog == name
+    # `python -m motifmultiverse.cli` gives a file path, which is not a command name.
+    monkeypatch.setattr(cli.sys, "argv", ["/x/y/cli.py", "--help"])
+    assert cli.build_parser().prog == "motifmultiverse"

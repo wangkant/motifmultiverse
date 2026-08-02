@@ -42,12 +42,15 @@ it consumes their output. It does not average across baseline populations, and a
 guard refuses a summary that tries. It does not invent a threshold: a magnitude
 the frozen design does not state is either derived from a named artifact and
 column, or declared as a heuristic with its costs and an exit condition, and the
-loader refuses a file that claims the first without resolving to it.
+loader refuses a file that claims the first without resolving to it. The full list
+is [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.
 
 ## Status
 
-Pre-alpha; the API is unstable. All ten stages are implemented and no subcommand
-raises `NotImplementedError`.
+Pre-alpha; the API is unstable. All ten subcommands are implemented and none
+raises `NotImplementedError`. One module-level entry point still does:
+`infer.run()`, the module's own pipeline wrapper, which the CLI does not call —
+see [`infer/README.md`](src/motifmultiverse/infer/README.md).
 
 **What a default run does.** The default adjudication criteria are
 `adjudicate/criteria.v1.yaml`, whose `TRUE_DUPLICATE` is
@@ -62,17 +65,12 @@ A preregistered `TRUE_DUPLICATE` rule that *does* deduplicate ships as
 by default**: pass it to `--criteria`. It is checksummed in
 [`docs/MERGE_CRITERION_PREREGISTRATION.md`](docs/MERGE_CRITERION_PREREGISTRATION.md)
 together with what it predicted, what would falsify it, and what happened on
-held-out data — where it fired two of its own falsifiers on the single-context
-configuration. Three properties are why it is not the default:
-
-- its error direction is **deletion**, which the reader of a lexicon cannot undo;
-- it merges on geometry, while this package's own stated principle is that merges
-  are validated downstream — the reconstruction evidence that principle asks for
-  was measured on real data and found to have **no power** to distinguish a
-  correct merge from deleting motifs of comparable mass;
-- against plain TomTom merging it wins by **refusing**, not by finding: on the
-  reference registry every pair it merged, TomTom merged too, and it merged none
-  that TomTom did not.
+held-out data — where it fired two of its own falsifiers. Three properties keep it
+off by default: its error direction is **deletion**, which a reader cannot undo; it
+merges on geometry, while the package's own principle is that merges are validated
+downstream, and the reconstruction evidence that principle asks for was measured and
+found to have **no power**; and against plain TomTom merging it wins by *refusing*,
+not by finding.
 
 `report` renders markdown only and prints `NOT RECORDED` for the fields no
 artifact carries. The per-module table in
@@ -111,51 +109,31 @@ wall clock moves.
 is installed. That is the intended behaviour: it says what it did not do rather
 than returning an empty result that looks complete.
 
-Four files are worth opening afterwards. `decisions/review.yaml` lists what a
-human still has to decide. `evidence/alignment_null_summary.tsv` holds the
-per-pair null. `lexicons/core.manifest.json` carries the lexicon's content hash.
-Every output directory has a `provenance.json` and a `guard_outcomes.json`.
+Four files are worth opening afterwards: `decisions/review.yaml`, which lists what
+a human still has to decide; `evidence/alignment_null_summary.tsv`, the per-pair
+null; `lexicons/core.manifest.json`, the lexicon's content hash; and
+`lexicons/provenance.json`. Every output directory carries a `provenance.json`;
+`guard_outcomes.json` appears only where a stage ran an executable constraint,
+which is not all of them.
 
 Each stage also writes `run_status.json`. Trust an output directory only when it
 says `"status": "SUCCESS"`.
-
-For a run on real discovery output, see [docs/CASE_STUDY.md](docs/CASE_STUDY.md).
-
-## Contents
-
-[Overview](#overview) · [Installation](#installation) · [Usage](#usage) ·
-[Design and its empirical basis](#design-and-its-empirical-basis) ·
-[Implementation status](#implementation-status) ·
-[Executable constraints](#executable-constraints) ·
-[Scope and limitations](#scope-and-limitations) ·
-[Repository layout](#repository-layout) · [Citation](#citation) ·
-[Licence](#licence)
 
 ## Overview
 
 The ecosystem already solves the neighbouring steps: **TF-MoDISco** discovers
 motifs from attributions, **FIMO** scans sequence, **FiNeMo** calls instances,
-**HOMER** and **TomTom** annotate and compare.
+**HOMER** and **TomTom** annotate and compare. What is still project-local is the
+step between them — how several local TF-MoDISco outputs become one shared lexicon
+that is safe to compare across models. That is normally per-project scripts plus
+human judgement, and it is where the decisions that matter get made without a
+record.
 
-What is still project-local is the step between them — *how do you compile several
-local TF-MoDISco outputs into one shared lexicon that is safe to compare across
-models?* That is normally a pile of per-project scripts plus human judgement, and
-it is where the decisions that matter get made without a record.
-
-The missing piece is not another database. It is an **attribution lexicon
-compiler**: something that turns "should these merge", "what is this called",
-"does it enter the main lexicon" and "does this conclusion survive" into auditable
-decisions that carry their evidence, their uncertainty and their downstream
-validation. Concretely, the package normalises heterogeneous discovery output into
-one registry, builds an alignment evidence graph over it, adjudicates merges,
-compiles tiered content-addressed lexicons, validates those merges downstream, and
-answers subset queries over a frozen hit table at the strength the query's
-provenance licenses.
-
-It is **not** another motif clustering algorithm, **not** a motif database, and
-**not** an enrichment tool. See [`docs/CONCEPT.md`](docs/CONCEPT.md) for the
-self-contained statement of purpose and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-for the seven-layer, nine-module decomposition.
+This package is that step: an **attribution lexicon compiler**. It is **not** a
+motif clustering algorithm, **not** a motif database, and **not** an enrichment
+tool. [`docs/CONCEPT.md`](docs/CONCEPT.md) states the purpose;
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) gives the seven-layer, ten-module
+decomposition.
 
 ## Installation
 
@@ -165,21 +143,14 @@ Requires Python >= 3.11.
 pip install -e ".[dev,finemo]"
 ```
 
-The `finemo` extra is what makes the `compile` round trip **run** instead of skip:
-round-trip verification calls the real hit-caller loader rather than re-reading
-this package's own assumptions about the format. The extra is optional by design —
-a missing backend must produce a clear "backend not installed" message, never an
-`ImportError` traceback — but a run without it verifies less.
-
-To make that absence loud rather than quiet, set
-`MOTIFMULTIVERSE_REQUIRE_FINEMO=1`: a missing backend then fails the run instead of
-shrinking it. The round trip used to skip wherever the backend was absent —
-including in CI, where the extra named a distribution that does not exist on PyPI,
-so the documented way to stop it skipping could not be run. *A skipped test is
-unverified, not verified*, which is the same shape as a guard that can never fail.
-See [`compile/README.md`](src/motifmultiverse/compile/README.md) for what the round
-trip proves on a real TF-MoDISco lexicon, and for the incompatibility the skip was
-hiding.
+The `finemo` extra makes `compile`'s round trip **run** instead of skip: it reads
+each compiled lexicon back with the real hit-caller loader rather than with this
+package's assumptions about the format. It is optional by design — a missing
+backend must say so, never raise `ImportError` — but a run without it verifies
+less, and *a skipped verification is unverified, not verified*. Set
+`MOTIFMULTIVERSE_REQUIRE_FINEMO=1` to make that absence fail the run rather than
+shrink it. [`compile/README.md`](src/motifmultiverse/compile/README.md) records
+what the round trip proves, and the backend incompatibility the skip was hiding.
 
 Development checks:
 
@@ -190,8 +161,11 @@ pytest
 
 ## Usage
 
+Two console scripts are installed: `motifmultiverse` and the alias `mmv`. They are
+the same callable, and the usage line reports whichever was typed.
+
 ```bash
-motifmultiverse --help
+mmv --help
 ```
 
 A minimal path from discovery output through adjudication to a frozen lexicon, and
@@ -265,79 +239,52 @@ designed outcome: an undeclared peak set, a missing baseline, a health floor tha
 did not clear. It is deliberately distinct from `3`, which means nobody has written
 the code yet.
 
-### The exit code is also written into the output directory
+### What a results directory records
 
 By the time anyone opens a results folder the exit code is gone, so every run that
-names an `--out` leaves a **`run_status.json`** there: `SUCCESS` / `REFUSED` /
+names an `--out` leaves a **`run_status.json`**: `SUCCESS` / `REFUSED` /
 `UNIMPLEMENTED` / `INPUT_MISSING` / `CRASHED`, the exit code, and — for a refusal —
 the sentence that refused. Its `artifacts_are_from` field names the last run that
-actually succeeded in that directory, so a refusal that ran into a directory holding
-an earlier result **labels** that result instead of deleting it: destroying a real
-result to prevent a misreading of it is the worse trade. Provenance is still written
-*before* the body runs, because a record that arrives only on success is a record the
-runs you most want to explain never get; this file is the other half, written when the
-outcome is known.
+actually succeeded there, so a refusal running into a directory that holds an earlier
+result **labels** that result instead of deleting it.
 
 **A downstream reader's rule is one line: trust the artifacts only when
 `status == "SUCCESS"`.**
 
-### And so is the outcome of every guard that ran
-
-A stage that runs an executable constraint writes a **`guard_outcomes.json`** beside
-its results: which guard, on what the stage handed it, and what it returned — the
-guard's own pass/fail and its own sentence, copied and never rewritten. It is a
-separate file rather than a field of `provenance.json` because provenance is written
-*before* the body runs, and rather than a field of the result because a failing guard
-**raises**: the run whose outcome matters most is the one that produces no result at
-all, so each outcome is appended the moment the guard returns and survives the refusal
-that follows. What the file cannot say is the inverse: a guard that is absent from it
-is not thereby recorded as not having run.
+A stage that runs an executable constraint also writes a **`guard_outcomes.json`**:
+which guard, on what, and what it returned — the guard's own verdict and sentence,
+copied and never rewritten. It is separate from `provenance.json` because provenance
+is written *before* the body runs, and separate from the result because a failing
+guard raises, and the run whose outcome matters most is the one that produces no
+result at all. What the file cannot say is the inverse: a guard absent from it is not
+thereby recorded as not having run.
 
 ### What individual modules guarantee
 
 Running any subcommand writes a provenance record — input checksums, command line,
 software versions, seed, timestamp — **before** the body runs, including before it
-raises `NotImplementedError`. Provenance is the most expensive thing to add
-retroactively, so it is here from the first commit.
+raises. Provenance is the most expensive thing to add retroactively.
 
-**`ingest`** reads the discovery HDF5s a project declares into one registry, with a
-checksum per input. A metacluster group that contributes no patterns is recorded as
-one of `group_absent` / `group_empty` / `not_searched` — three different claims, and
-none of them is "no motifs".
+Each module states its own guarantee, and the failure that produced it, in its
+README:
 
-**`compile`** writes one hit-caller-compatible lexicon per tier, **in the order the
-loader emits**, each with a content hash and an explicit statement of what the tier
-contrast does and does not vary. Round-trip verification calls the real loader; without
-that backend installed it says so instead of claiming success.
+| module | guarantee, in one line |
+|---|---|
+| [`ingest`](src/motifmultiverse/ingest/README.md) | identifiers are opaque join tokens; a group contributing no patterns records **which** of three absences occurred |
+| [`align`](src/motifmultiverse/align/README.md) | registration is established on unsigned PPM similarity; signed similarity is never the thing maximised |
+| [`annotate`](src/motifmultiverse/annotate/README.md) | database matches propose labels and never adjudicate; family assignment is a declared design gap |
+| [`adjudicate`](src/motifmultiverse/adjudicate/README.md) | every candidate relationship becomes a record carrying its evidence and its criterion |
+| [`compile`](src/motifmultiverse/compile/README.md) | one lexicon per tier in the order the real loader emits, verified by reading it back with that loader |
+| [`validate`](src/motifmultiverse/validate/README.md) | a merge is checked downstream, on frozen before/after tables bound to a manifest |
+| [`infer`](src/motifmultiverse/infer/README.md) | effect estimates for one specification over one frozen substrate |
+| [`interpret`](src/motifmultiverse/interpret/README.md) | a query is answered at the strength its selection provenance licenses, and suppressed — not annotated — below a health floor |
+| [`multiverse`](src/motifmultiverse/multiverse/README.md) | stability is summarised within a fixed estimand and never across |
+| [`report`](src/motifmultiverse/report/README.md) | every number is the recorded field itself; nothing absent is defaulted, and nothing is recomputed |
 
-**`interpret`** answers subset queries over one frozen hit table. It was implemented
-first because it is the only module that needs neither TF-MoDISco nor a hit-caller
-backend, so it runs with nothing else installed and fixes the interface for the rest.
-What it does, in order: resolve what the query is *allowed* to emit from its declared
-selection provenance; compute three health numbers (intersection coverage, blocks
-spanned, fraction the frozen lexicon explains); then emit at that strength — full
-inference, held-out inference, or a descriptive decomposition with no interval and no
-*p* value. **If a health number is below its pre-registered floor the reading is
-suppressed, not annotated.** A caveat next to an effect size does not travel; the
-effect size does. Undeclared provenance is a recorded state (`DECLARATION_MISSING`)
-that costs the query its inference, and never resolves to the permissive grade.
-
-**`report`** renders one markdown audit report from what a stage recorded — an
-`interpretation.json` and the `provenance.json` log beside it — plus the
-`bias_ledger.tsv` that ships **inside the package**, so the default resolves from an
-installed wheel and not only from a checkout. Every number printed is the recorded field itself, beside the
-denominator the stage recorded and *named* (`n_submitted = 8277`); nothing is
-recomputed here, because a renderer that recomputes is a second implementation of the
-statistics that can disagree with the first. Nothing absent is defaulted: a withheld
-*p* value prints as `WITHHELD — inference_capability = ESTIMATION_ONLY` rather than
-blank, and a field no artifact carries — `baseline_population`, the lexicon *content*
-hash, `selection_rule` — prints as `NOT RECORDED` in a mandatory *What this report does
-not know* section that names the field that would have said it. Guard outcomes used to
-be on that list; where a run left a `guard_outcomes.json` the report now renders what
-each guard returned, verbatim, and where it did not it still says so rather than
-implying there was nothing to record.
-This is the module whose founding failure was a bootstrap resolution floor printed as
-though it were a measured *p* value.
+Two properties hold across all of them. Nothing absent is filled: a field no
+artifact carries prints as `NOT RECORDED`, naming the field that would have said
+it. And nothing downstream recomputes a statistic an upstream stage recorded, because
+a second implementation can disagree with the first.
 
 ## Design and its empirical basis
 
@@ -356,60 +303,47 @@ though it were a measured *p* value.
 
 ### Four findings from the reference implementation
 
-> **Externally sourced. Not reproducible from this repository.** Every number in
-> this section was measured in the reference implementation, whose data this
-> repository does not ship. Nothing here re-derives them and no test checks them.
-> Treat them as the motivation for the design, not as evidence produced by this
-> code. Figures and sources: [`docs/CONCEPT.md`](docs/CONCEPT.md).
->
-> What *is* checkable from a checkout: the [Quickstart](#quickstart), which
-> generates its own inputs and is executed by the test suite, and
+> **Externally sourced. Not reproducible from this repository.** Every number below
+> was measured in the reference implementation, whose data this repository does not
+> ship; nothing here re-derives them and no test checks them. Sources:
+> [`docs/CONCEPT.md`](docs/CONCEPT.md). What *is* checkable from a checkout is the
+> [Quickstart](#quickstart), which the test suite executes, and
 > [`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md) with
-> [`examples/input_scale_invariance.py`](examples/input_scale_invariance.py),
-> which re-measure finding 1 below and report what they found. (The
-> `docs/CASE_STUDY.md` referenced elsewhere in this file is **not in the
-> repository**; that link is dangling and the run it describes is not shipped
-> here.)
+> [`examples/input_scale_invariance.py`](examples/input_scale_invariance.py).
 >
-> **Findings 1 and 2 have since been measured here**, and neither survived
-> unchanged. Each carries its own correction below, in place, rather than being
-> silently left standing because the design depends on it.
+> **Findings 1 and 2 have since been measured here and neither survived unchanged.**
+> Each carries its correction in place rather than being left standing.
 
 **1. The hit caller is not input-scale invariant.** The same regions produce
-different *discrete* retention decisions depending on which other regions share
-the input. The onset was bracketed to **(6,460, 7,085] regions** on a 6,460-region
-base — a **9.67%** increase in scale suffices. Consequence: every specification
-must be a subset of **one frozen run**. That is an architecture constraint, not an
-implementation detail.
+different *discrete* retention decisions depending on which other regions share the
+input. Consequence: every specification must be a subset of **one frozen run** — an
+architecture constraint, not an implementation detail.
 
-> **Instability confirmed here; the scale attribution withdrawn.** Measured on
-> K562 ALLPEAKS ([`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md)):
-> the discrete output does move, by 3.4–6.3% of shared regions against a 0-change
-> instrument floor. But **growing the input changes nothing** — +9.67% and +100%
-> both give exactly 0 decision changes when each region keeps its row position.
-> Re-ordering the same 6,460 regions changes 876; changing only `--batch-size`
-> changes 1,557. The operative variable is the caller's per-region *iteration
-> count*, which scale does not move and which order and batch size do. **The
-> "(6,460, 7,085]" bracket and the "9.67% suffices" figure do not reproduce and
-> should not be cited as a scale threshold.** The consequence above survives —
-> strengthened, since re-calling perturbs decisions even at identical scale — but
-> it now rests on re-call instability, not on region count. See
-> [`guards.single_scale`](src/motifmultiverse/guards/__init__.py), which keys on
-> that count and is therefore under-keyed for the effect that actually exists.
+> **Instability confirmed; the scale attribution withdrawn.** On K562 ALLPEAKS
+> ([`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md)) the discrete
+> output moves by 3.4–6.3% of shared regions against a 0-change instrument floor,
+> but **growing the input changes nothing**: +9.67% and +100% both give exactly 0
+> changes when each region keeps its row position. Re-ordering the same 6,460
+> regions changes 876; changing only `--batch-size` changes 1,557. The operative
+> variable is the caller's per-region iteration count, which scale does not move and
+> which order and batch size do. **The original "(6,460, 7,085]" bracket and the
+> "9.67% suffices" figure do not reproduce and must not be cited as a scale
+> threshold.** The consequence survives, strengthened — re-calling perturbs decisions
+> at identical scale — but rests on re-call instability, not region count.
+> [`guards.single_scale`](src/motifmultiverse/guards/__init__.py) keys on region
+> count and is therefore under-keyed for the effect that actually exists.
 
-**2. Numeric and discrete divergence are independent axes.** Permuting input order
-produced the largest coefficient displacement measured (**2.07×** the median
-coefficient) and **zero** discrete flips. Measure and gate them separately; never
-let one license the other.
+**2. Numeric and discrete divergence are independent axes.** Measure and gate them
+separately; never let one license the other.
 
-> **Both halves contradicted here.** The same measurement permuted input order at
-> fixed scale and got **876 discrete flips** across 4.69% of regions, not zero,
+> **Both halves of the original measurement contradicted here.** Permuting input
+> order at fixed scale gave **876 discrete flips** across 4.69% of regions, not zero,
 > and a largest displacement of **104×** the median coefficient, not 2.07×. The
-> *advice* — measure and gate the two axes separately — is unaffected and is what
-> the package implements. The *numbers* are not reproduced on this substrate.
+> advice is unaffected and is what the package implements; the numbers are not
+> reproduced on this substrate.
 
-**3. Writing a rule down is not executing it.** A four-state missingness encoding
-was specified and still silently destroyed by a table pivot returning `0.0` for an
+**3. Writing a rule down is not executing it.** A four-state missingness encoding was
+specified and still silently destroyed by a table pivot returning `0.0` for an
 all-undefined group — and the coverage figure, computed after that fill, reported
 `1.000000`, so the error corroborated itself. Constraints must be executable
 assertions.
@@ -471,8 +405,11 @@ failed, never summed) are per-run facts, not repository facts: see
 ### What CI verifies, and what a `VERIFIED` backend means
 
 Three jobs, because "the tests passed" is three different claims and it used to be
-one. **`core`** runs lint and the suite on Python 3.11 *and* 3.12 — the classifiers
-claimed 3.12 and nothing ran it. **`roundtrip`** installs `.[dev,finemo]` and runs
+one. **`core`** runs lint and the suite over a 2x2 matrix, Python 3.11 and 3.12 by
+Linux and Windows. Both axes were added for the same reason: the classifiers
+claimed a platform nothing ran, and when the OS axis was finally applied 35 tests
+failed on Windows for a POSIX-only call. macOS is deliberately absent, and
+`pyproject.toml` says so rather than implying coverage. **`roundtrip`** installs `.[dev,finemo]` and runs
 the suite under `MOTIFMULTIVERSE_REQUIRE_FINEMO=1`, so the one check that proves what
 `compile` exists to guarantee fails when the backend is missing instead of skipping;
 it had skipped in every CI run this repository has ever had. **`wheel`** builds the
@@ -501,31 +438,14 @@ the affected subset of frozen standardized hit tables. An all-peak delta remains
 a dilution diagnostic: fewer than 30 affected peaks are recorded as
 `LOW_RISK_RARE_NOT_VALIDATED`, without an interval or equivalence claim.
 
-One threshold has been frozen and the rest have not, and the frozen one is **not
-in force by default**. `TRUE_DUPLICATE` carries a preregistered rule in
-`adjudicate/criteria.v2.yaml`, which collapses duplicates and **removes motifs**;
-it is reached with `--criteria`. The default registry is
-`adjudicate/criteria.v1.yaml`, where `TRUE_DUPLICATE` and `FRAGMENT_MATCH` are
-both `CRITERION_NOT_YET_DEFINED`, so a default run defers every duplicate and
-every fragment and removes no motifs.
-
-The frozen rule is a declared heuristic and says so in its own status field. Its
-magnitudes were anchored on one registry, its predictions were registered and
-checksummed before the held-out run, and the held-out run is reported whether or
-not it flattered them — it did not, on the single-context configuration, where two
-of the rule's own falsifiers fired. What no run available to this project can
-establish is **correctness**: there is no labelled set of same-motif pairs, and
-the downstream test the design principle asks for has no power at this operating
-point. A held-out run therefore shows the rule is *consistent*, never that it is
-*right*, and nothing here reports it otherwise. A rule in that state is one a user
-should be able to choose; it is not one to administer to everybody who types
-`adjudicate`.
-
-That a default run removes no motifs is pinned as a property rather than as a
-file name, by `tests/test_default_removes_no_motifs.py`, on a fixture the
+The merge-criterion situation — one frozen rule, not in force by default, and why
+— is stated once under [Status](#status) and in full in
+[`docs/MERGE_CRITERION_PREREGISTRATION.md`](docs/MERGE_CRITERION_PREREGISTRATION.md).
+That a default run removes no motifs is pinned as a property rather than as a file
+name, by `tests/test_default_removes_no_motifs.py`, on a fixture the
 `criteria.v2.yaml` rule demonstrably does delete from.
 
-[`docs/ROADMAP.md`](docs/ROADMAP.md) states milestones M0–M5 by completion criteria
+[`docs/ROADMAP.md`](docs/ROADMAP.md) states milestones M0–M5 (with M1b and M4a–d) by completion criteria
 rather than dates.
 
 ## Executable constraints
@@ -594,16 +514,20 @@ run the checks.
 | path | what it is |
 |---|---|
 | [`docs/CONCEPT.md`](docs/CONCEPT.md) | what the tool is for and why, self-contained |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | seven layers, nine modules, two architecture-level constraints |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | seven layers, ten modules, two architecture-level constraints |
 | [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) | node / edge schema and the four rules from real failures |
 | [`docs/BIAS_LEDGER.md`](docs/BIAS_LEDGER.md) | 20 bias axes `BA-01`…`BA-20`, mechanism and control; the authoritative TSV `report` renders ships in the package, at `src/motifmultiverse/report/bias_ledger.tsv` |
 | [`docs/CONSTRAINTS.md`](docs/CONSTRAINTS.md) | 25 principles `FP-01`…`FP-25`, honest enforcement status, criterion drafts |
 | [`docs/LESSONS.md`](docs/LESSONS.md) | every architecture constraint, indexed back to the failure that produced it |
 | [`docs/GOVERNANCE.md`](docs/GOVERNANCE.md) | stop-condition handoff protocol — the most portable file here |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | M0–M5, defined by completion criteria not dates |
-| `src/motifmultiverse/` | package: schema, guards, provenance, CLI, nine analysis modules |
-| `config/` | example project, specification and database configs |
-| `tests/` | schema, guard (incl. falsification), CLI and provenance tests |
+| [`docs/MERGE_CRITERION_PREREGISTRATION.md`](docs/MERGE_CRITERION_PREREGISTRATION.md) | the `TRUE_DUPLICATE` rule, checksummed, with its falsifiers and held-out outcome |
+| [`docs/MULTIVERSE_DESIGN.md`](docs/MULTIVERSE_DESIGN.md) · [`docs/K562_MULTIVERSE_AUDIT.md`](docs/K562_MULTIVERSE_AUDIT.md) | the specification grid, and a 36-cell run of it over frozen artifacts |
+| [`docs/INPUT_SCALE_INVARIANCE.md`](docs/INPUT_SCALE_INVARIANCE.md) | the re-measurement of findings 1 and 2, with `examples/input_scale_invariance.py` |
+| `docs/constraints.tsv` | the machine-readable twin of `CONSTRAINTS.md`, which the tally test reads |
+| `src/motifmultiverse/` | package: the ten analysis modules plus `schema/` (incl. `schema/family.py`), `guards/`, `substrate/`, `provenance/`, `guard_log.py`, `run_status.py`, `status.py`, `cli.py` |
+| `config/` · `examples/` | example project, specification and database configs; runnable examples |
+| `tests/` | 26 modules: schema, guards (incl. falsification), CLI, packaging, provenance and end-to-end |
 
 ## Citation
 
@@ -614,10 +538,11 @@ preprint exists its DOI goes in under `preferred-citation` so citations reach th
 paper; a Zenodo DOI for the software itself can only be minted once this repository
 is public, so it comes after that rather than before.
 
-Two tests keep the file honest — `CITATION.cff`'s version must equal
-`motifmultiverse.__version__`, and its `license` must match `LICENSE` — because a
-citation record naming the wrong version cites something else, and every other
-hand-maintained claim in this repository has drifted at least once.
+Three tests keep it honest: `CITATION.cff`'s version must equal
+`motifmultiverse.__version__`, its `license` must match `LICENSE`, and every file
+that states a version — `pyproject.toml`, this README's badge, the CHANGELOG
+heading — must state the same one. Every other hand-maintained claim in this
+repository has drifted at least once.
 
 ## Licence
 
