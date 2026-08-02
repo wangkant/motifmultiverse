@@ -36,7 +36,7 @@ PREREGISTRATION = Path(__file__).resolve().parents[1] / "docs" / "MERGE_CRITERIO
 def _document() -> str:
     if not PREREGISTRATION.exists():  # pragma: no cover - guarded by its own test
         pytest.fail(f"the preregistration document is missing: {PREREGISTRATION}")
-    return PREREGISTRATION.read_text()
+    return PREREGISTRATION.read_text(encoding="utf-8")
 
 
 def test_the_registered_checksum_is_the_shipped_criteria_file():

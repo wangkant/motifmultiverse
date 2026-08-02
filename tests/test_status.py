@@ -280,7 +280,7 @@ def test_the_generator_writes_a_parseable_document(tmp_path, capsys):
     out = tmp_path / "implementation_status.json"
     assert status_mod.main(["--out", str(out), "--passed", "5", "--skipped", "1",
                             "--failed", "0", "--test-command", "pytest -q"]) == 0
-    blob = json.loads(out.read_text())
+    blob = json.loads(out.read_text(encoding="utf-8"))
     assert blob["schema_version"] == status_mod.SCHEMA_VERSION
     assert blob["tests"] == {
         "status": "RUN", "passed": 5, "skipped": 1, "failed": 0,
@@ -331,7 +331,7 @@ def test_the_generator_accepts_a_junit_report_end_to_end(tmp_path):
     out = tmp_path / "implementation_status.json"
     assert status_mod.main(["--out", str(out), "--junit-xml", str(report),
                             "--test-command", "pytest --junitxml=report.xml"]) == 0
-    tests = json.loads(out.read_text())["tests"]
+    tests = json.loads(out.read_text(encoding="utf-8"))["tests"]
     assert (tests["passed"], tests["skipped"], tests["failed"]) == (98, 2, 0)
 
 
@@ -390,12 +390,13 @@ def test_constraint_tally_in_prose_matches_the_machine_readable_source():
         import pytest
         pytest.skip("docs/ not present in this installation")
     counts = collections.Counter(
-        r["enforcement"] for r in csv.DictReader(tsv.open(), delimiter="\t")
+        r["enforcement"]
+        for r in csv.DictReader(tsv.open(encoding="utf-8"), delimiter="\t")
     )
     spaced = f'{counts["ENFORCED"]} / {counts["PARTIAL"]} / {counts["DOC_ONLY"]}'
     tight = spaced.replace(" ", "")
-    readme = (root / "README.md").read_text()
-    constraints = (root / "docs" / "CONSTRAINTS.md").read_text()
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    constraints = (root / "docs" / "CONSTRAINTS.md").read_text(encoding="utf-8")
     assert spaced in readme, f"README tally disagrees with constraints.tsv ({spaced})"
     assert tight in constraints or spaced in constraints, (
         f"CONSTRAINTS.md tally disagrees with constraints.tsv ({tight})"
@@ -419,7 +420,7 @@ def test_no_module_readme_claims_to_be_unimplemented_while_it_is_implemented():
         readme = root / name / "README.md"
         if not readme.exists():
             continue
-        text = readme.read_text()
+        text = readme.read_text(encoding="utf-8")
         implemented = module_status(name)["status"] == "IMPLEMENTED"
         # A module that IS implemented must not say its own body raises.
         if implemented and "The body raises `NotImplementedError`" in text:
@@ -449,7 +450,7 @@ def test_every_readme_quickstart_command_parses():
 
     from motifmultiverse.cli import build_parser
 
-    readme = (_repo_root() / "README.md").read_text()
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
     commands: list[str] = []
     for block in readme.split("```")[1::2]:
         buffer = ""
@@ -614,7 +615,7 @@ def test_no_shipped_document_cites_a_guard_with_no_call_site_as_a_check():
 
     offenders = []
     for path in documents:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         for unit in _prose_units(text):
             named = [name for name in GUARDS_AWAITING_INPUT
                      if re.search(rf"(?<![\w.]){re.escape(name)}\b", unit)]
@@ -645,7 +646,7 @@ def test_the_readme_marks_exactly_the_guards_that_have_no_call_site():
 
     from motifmultiverse.guards import ALL_GUARDS, GUARDS_AWAITING_INPUT
 
-    readme = (_repo_root() / "README.md").read_text()
+    readme = (_repo_root() / "README.md").read_text(encoding="utf-8")
     marked = set(re.findall(r"`([a-z_]+)`†", readme))
     assert marked == set(GUARDS_AWAITING_INPUT), (
         "README daggers disagree with guards.GUARDS_AWAITING_INPUT: "
@@ -849,5 +850,5 @@ def test_the_readme_quickstart_actually_runs(tmp_path):
                      "lexicons/core.manifest.json", "lexicons/provenance.json"):
         assert (inputs / relative).exists(), relative
     for stage in ("registry", "evidence", "decisions", "lexicons"):
-        status = json.loads((inputs / stage / "run_status.json").read_text())
+        status = json.loads((inputs / stage / "run_status.json").read_text(encoding="utf-8"))
         assert status["status"] == "SUCCESS", (stage, status)

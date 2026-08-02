@@ -1215,7 +1215,7 @@ class Interpretation:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         dest = out / "interpretation.json"
-        dest.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True))
+        dest.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
         return dest
 
 

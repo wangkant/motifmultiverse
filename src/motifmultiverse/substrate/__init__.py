@@ -139,7 +139,9 @@ def write_manifest(manifest: HitSubstrateManifest, path: str | Path) -> Path:
     _assert_identity(manifest)
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(json.dumps(_manifest_payload(manifest), indent=2, sort_keys=True) + "\n")
+    dest.write_text(
+        json.dumps(_manifest_payload(manifest), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
     return dest
 
 
@@ -156,7 +158,7 @@ def read_manifest(path: str | Path) -> HitSubstrateManifest:
     """Load and verify a manifest before a consumer trusts its substrate id."""
     p = Path(path)
     try:
-        payload = json.loads(p.read_text())
+        payload = json.loads(p.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise SubstrateError(f"{p}: invalid manifest JSON") from exc
     expected = {

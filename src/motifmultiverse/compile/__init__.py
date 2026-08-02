@@ -1415,7 +1415,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                 json.dumps({**asdict(manifest), "index": index[tier],
                             "project": meta.project,
                             "cross_model_claims_restricted": meta.cross_model_claims_restricted},
-                           indent=2, sort_keys=True))
+                           indent=2, sort_keys=True), encoding="utf-8")
             manifests[tier] = manifest
 
             if verify == "skip":
@@ -1455,7 +1455,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
             ),
         ).raise_if_failed()
         (staging / "combination_operations.json").write_text(
-            json.dumps(operations, indent=2, sort_keys=True))
+            json.dumps(operations, indent=2, sort_keys=True), encoding="utf-8")
 
         rows = ["\t".join(["tier", "index", "pattern_tag", "node_id", "variant_id",
                            "metacluster", "lexicon_content_hash"])]
@@ -1464,7 +1464,7 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                 rows.append("\t".join([tier, str(row["index"]), row["pattern_tag"],
                                        row["node_id"], row["variant_id"], row["metacluster"],
                                        manifests[tier].lexicon_content_hash]))
-        (staging / "manifest.tsv").write_text("\n".join(rows) + "\n")
+        (staging / "manifest.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
         # Publication. Every refusal this function can raise has already had its
         # chance, so nothing above this line was ever visible under `out`; from

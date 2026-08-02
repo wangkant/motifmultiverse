@@ -719,7 +719,7 @@ def load_criteria(path: str | Path) -> dict[str, Criterion]:
     later release grew a field. The stricter contract applies only to files that
     declare themselves v2 and therefore opted into it.
     """
-    text = Path(path).read_text()
+    text = Path(path).read_text(encoding="utf-8")
     payload = yaml.safe_load(text) or {}
     if not isinstance(payload, Mapping):
         raise CriteriaError(f"{path}: a criteria file must be a mapping at the top level")

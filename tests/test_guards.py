@@ -683,9 +683,9 @@ def test_the_package_passes_its_own_no_key_parsing_guard():
     """
     import pathlib
     src = pathlib.Path(__file__).resolve().parents[1] / "src"
-    offenders = [f"{p}: {guards.no_key_parsing(p.read_text()).detail}"
-                 for p in sorted(src.rglob("*.py"))
-                 if not guards.no_key_parsing(p.read_text()).passed]
+    checked = [(p, guards.no_key_parsing(p.read_text(encoding="utf-8")))
+               for p in sorted(src.rglob("*.py"))]
+    offenders = [f"{p}: {outcome.detail}" for p, outcome in checked if not outcome.passed]
     assert not offenders, offenders
 
 
@@ -786,7 +786,7 @@ def test_every_guard_is_called_or_declared_pending():
     names = [n for n in guards.__all__
              if inspect.isfunction(getattr(guards, n, None)) and n != "run_all"]
     body = "\n".join(
-        p.read_text() for p in src.rglob("*.py") if p.name != "__init__.py" or "guards" not in p.parts
+        p.read_text(encoding="utf-8") for p in src.rglob("*.py") if p.name != "__init__.py" or "guards" not in p.parts
     )
     orphans, stale = [], []
     for name in names:

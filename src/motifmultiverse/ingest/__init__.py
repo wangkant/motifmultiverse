@@ -316,7 +316,8 @@ def _write_registry(out: Path, meta: RegistryMetadata, nodes: list[MotifNode],
         "nodes": [{k: v for k, v in n.to_dict().items()
                    if k not in {"cwm", "hypothetical_cwm", "ppm"}} for n in nodes],
     }
-    (out / "registry.json").write_text(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    (out / "registry.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str), encoding="utf-8")
     with h5py.File(out / "arrays.h5", "w") as h5:
         for node_id, mats in arrays.items():
             grp = h5.create_group(node_id)
@@ -330,7 +331,7 @@ def load_registry(registry_dir: str | os.PathLike[str]) -> tuple[RegistryMetadat
     import h5py
 
     d = Path(registry_dir)
-    blob = json.loads((d / "registry.json").read_text())
+    blob = json.loads((d / "registry.json").read_text(encoding="utf-8"))
     try:
         if "schema_version" not in blob["registry_metadata"]:
             raise SchemaError(

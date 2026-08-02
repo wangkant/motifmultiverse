@@ -172,7 +172,7 @@ class ProvenanceRecord:
         existing: list[dict[str, Any]] = []
         if dest.exists():
             try:
-                existing = json.loads(dest.read_text())
+                existing = json.loads(dest.read_text(encoding="utf-8"))
             except ValueError as exc:
                 raise ProvenanceError(
                     f"{dest} is not readable provenance ({exc}) and will not be "
@@ -190,7 +190,7 @@ class ProvenanceRecord:
         # which one the log ends up holding.
         staged = dest.with_name(f".{dest.name}.{os.getpid()}.partial")
         try:
-            staged.write_text(json.dumps(existing, indent=2, sort_keys=True))
+            staged.write_text(json.dumps(existing, indent=2, sort_keys=True), encoding="utf-8")
             os.replace(staged, dest)
         except BaseException:
             staged.unlink(missing_ok=True)

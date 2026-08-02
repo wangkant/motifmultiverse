@@ -65,6 +65,23 @@ def _probe_symlink_permission() -> bool:
     return True
 
 
+def _target_without_extended_prefix(link):
+    """``link``'s stored target, with Windows' ``\\\\?\\`` prefix removed if present.
+
+    ``os.symlink`` with an absolute target stores it in the extended-length form
+    on Windows, so ``readlink()`` returns ``\\\\?\\C:\\...\\x`` where POSIX returns
+    ``/.../x``. Both name the same location; only one spelling is the OS's. A
+    test comparing the raw result asserts which spelling was chosen, which is not
+    a property this package has any stake in.
+    """
+    import os
+    from pathlib import Path as _Path
+
+    text = os.fspath(link.readlink())
+    prefix = "\\\\?\\"
+    return _Path(text[len(prefix):] if text.startswith(prefix) else text)
+
+
 _CAN_CREATE_SYMLINKS = _probe_symlink_permission()
 
 
@@ -2024,7 +2041,15 @@ def test_stability_writer_treats_a_dangling_output_symlink_as_existing(tmp_path)
         )
 
     assert out.is_symlink()
-    assert out.readlink() == tmp_path / "missing-target"
+    # Windows stores an absolute symlink target in the `\\?\` extended-length
+    # form, so `readlink()` there returns `\\?\C:\...\missing-target` where POSIX
+    # returns the path as given. The claim is that the link still points where it
+    # did -- that the refusal did not quietly replace it -- and that claim is
+    # about the location, not about which of two spellings the OS chose to store.
+    # Observed on the GitHub windows-latest runner; it could not be reproduced on
+    # the development machine, where creating any symlink needs a privilege that
+    # is not held and the whole test skips.
+    assert _target_without_extended_prefix(out) == tmp_path / "missing-target"
 
 
 def _staged_directory(tmp_path, name="stage"):

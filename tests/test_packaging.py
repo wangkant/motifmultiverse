@@ -140,3 +140,56 @@ def test_the_bias_ledger_exists_exactly_once_in_the_repository():
     found = sorted(p.relative_to(root).as_posix() for p in root.rglob("bias_ledger.tsv")
                    if ".git" not in p.parts and "build" not in p.parts)
     assert found == ["src/motifmultiverse/report/bias_ledger.tsv"], found
+
+
+def test_no_product_code_reads_or_writes_text_at_the_locale_codepage():
+    """Every text file this package touches is UTF-8, and says so at the call.
+
+    Python opens text at `locale.getpreferredencoding()` when nothing overrides
+    it, which is UTF-8 on the Linux runners and a regional codepage on Windows --
+    cp1252 on the GitHub runner, GBK on a Chinese-locale workstation. Eleven
+    calls in `src/` left it unstated, and the package therefore could not reliably
+    read the artifacts it had itself written: `schema.criteria` on the criteria
+    YAML whose bytes are hashed into `criteria_sha256`, `ingest` on
+    `registry.json`, `substrate` on the manifest, `provenance` on an existing
+    record. Any non-ASCII character in any of them is a `UnicodeDecodeError` on
+    one machine and fine on another.
+
+    The quiet half is worse than the crash. cp1252 decodes almost every byte to
+    *something*, so instead of raising it silently produces different text, which
+    is how this surfaced: on cp1252 CI a document read back as mojibake and a
+    regex over it simply stopped matching, reporting an assertion failure about
+    the document's content rather than about the codec. On GBK the same read
+    raised outright.
+
+    This scans the AST rather than the text, so a call spanning several lines is
+    not missed and one mentioning "encoding" in a comment is not excused. It is
+    deliberately scoped to `src/`: a test that writes ASCII to a temp file is
+    unaffected by the platform, but a package whose artifacts change meaning with
+    the host's regional settings has no stable identity at all.
+    """
+    import ast
+
+    root = _repo_root() / "src"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if "encoding" in {kw.arg for kw in node.keywords}:
+                continue
+            if name in {"read_text", "write_text"}:
+                offenders.append(f"{path.relative_to(root).as_posix()}:{node.lineno} {name}")
+            elif name == "open":
+                mode = node.args[1].value if (
+                    len(node.args) > 1 and isinstance(node.args[1], ast.Constant)) else ""
+                if "b" not in str(mode):
+                    offenders.append(f"{path.relative_to(root).as_posix()}:{node.lineno} open")
+
+    assert offenders == [], (
+        "text I/O in product code without an explicit encoding, so its result "
+        "depends on the host's locale: " + ", ".join(offenders)
+    )
