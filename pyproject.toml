@@ -14,9 +14,17 @@ license = { file = "LICENSE" }
 # `CITATION.cff` carries the ORCID, which is the durable identifier anyway.
 authors = [{ name = "Qiankang Wang" }]
 keywords = ["regulatory-genomics", "motifs", "attribution", "tf-modisco", "multiverse-analysis"]
+# One rule for both axes: a classifier nothing runs is a claim, not a fact, so
+# this names exactly what the `core` matrix executes. macOS is deliberately
+# absent. It is not known broken -- `ctypes.CDLL(None)` works there and the
+# absence of `renameat2` sends it down the symlink publish fallback -- but that
+# is a code path no job has ever run, and claiming it would be the same
+# unverified-reads-as-verified shape the Python entries were added to end.
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
