@@ -1670,6 +1670,52 @@ def test_the_discovery_file_is_hashed_once_per_analysis_not_once_per_pattern(
     assert len([c for c in calls if c.endswith("a.h5")]) == 1
 
 
+def test_a_verified_round_trip_names_the_backend_release_that_verified_it(tmp_path):
+    """A VERIFIED under one loader generation and one under the other were the same bytes.
+
+    `_loader_call_kwargs` binds to whichever generation is installed and passes a
+    different argument set to each -- and the generation that produced the frozen
+    hit tables this project's audit reads is no longer installable from PyPI, so
+    `pip install -e ".[finemo]"` verifies against a loader that is not the one the
+    data came from. The record of a round trip that cannot say which loader
+    performed it cannot be re-run, and `loader_backend` was the only backend
+    outcome in this package carrying no version at all.
+    """
+    require_finemo_backend()
+
+    from motifmultiverse import guard_log
+
+    out = tmp_path / "lex"
+    compile_mod.compile_lexicons(_registry(tmp_path), out, verify="require")
+
+    release = compile_mod.loader_backend_release()
+    assert release.startswith("finemo "), release
+    # Discriminating without the older release installed: the spelling is read off
+    # the signature that is present, not inferred from the version string.
+    assert any(alias in release for alias in compile_mod._LOADER_TRIM_THRESHOLD_ALIASES), release
+
+    recorded = [row for row in json.loads((out / guard_log.GUARD_OUTCOMES_FILENAME).read_text())
+                if row["guard_id"] == "index_order_matches_loader"]
+    assert recorded, "no round trip was recorded"
+    assert all(release in row["subject"] for row in recorded), \
+        [row["subject"] for row in recorded]
+
+    prov = json.loads((out / "provenance.json").read_text())
+    entry = prov[0] if isinstance(prov, list) else prov
+    assert entry["software"]["finemo"] == release
+
+
+def test_the_backend_release_is_reported_and_never_raised_when_it_cannot_be_read(
+        no_finemo_backend):
+    """A version lookup runs inside verification reporting and must not fail it.
+
+    An unrecordable release is reported as unrecorded. Raising here would let a
+    metadata lookup break the round trip it is only describing.
+    """
+    release = compile_mod.loader_backend_release()
+    assert release.startswith("finemo ") and "not importable" in release
+
+
 def test_compile_records_the_round_trip_outcome_beside_the_lexicons(tmp_path):
     """The round trip is what `compile` exists to guarantee; the directory now says so.
 

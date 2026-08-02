@@ -1052,6 +1052,49 @@ def _resolve_loader_parameters(loader_parameters: dict[str, Any] | None) -> dict
 #: apart until the call itself failed.
 _LOADER_TRIM_THRESHOLD_ALIASES = ("trim_threshold_default", "trim_threshold")
 
+
+def loader_backend_release(loader: Callable[..., Any] | None = None) -> str:
+    """Name the installed loader release, and which trim-threshold spelling it takes.
+
+    ``loader_backend`` was the one backend outcome in this package that carried no
+    version. The guard subject, the probe's sentence and ``provenance.json`` came
+    out byte-identical whether the round trip had been performed by the 0.30
+    generation -- the loader that produced the frozen hit tables this package's
+    own audit reads, and no longer installable from PyPI -- or by 0.41. Those two
+    are not interchangeable: :func:`_loader_call_kwargs` binds a different
+    argument set to each, and a VERIFIED that cannot say which one it verified
+    against cannot be re-run.
+
+    The parameter spelling is part of the record because it is what makes the
+    record discriminating without the older release having to be installed: it is
+    read off the signature that is actually present, not inferred from a version
+    string that a fork or a vendored copy could carry unchanged.
+
+    Never raises. An unrecordable release is reported as unrecorded -- this
+    function is called from inside verification reporting, and a version lookup
+    that failed must not be able to fail the verification it is describing.
+    """
+    try:
+        from importlib.metadata import version
+
+        release = version("finemo")
+    except Exception:  # noqa: BLE001 - see docstring: reporting must not raise
+        release = "version not recorded"
+    if loader is None:
+        try:
+            from finemo.data_io import load_modisco_motifs as loader
+        except ImportError:
+            return f"finemo {release} (not importable)"
+    try:
+        params = inspect.signature(loader).parameters
+        spelling = next(
+            (n for n in _LOADER_TRIM_THRESHOLD_ALIASES if n in params),
+            "trim-threshold parameter not resolved")
+    except (TypeError, ValueError):
+        spelling = "trim-threshold parameter not resolved"
+    return f"finemo {release} ({spelling})"
+
+
 #: Loader parameters this package deliberately leaves unset, because a compiled
 #: lexicon declares no *per-motif* overrides: every motif in it is read under the
 #: single manifest-recorded configuration. They carry no default in the backend's
@@ -1226,7 +1269,8 @@ def probe_backend(trim_threshold: float = 0.3, motif_type: str = "cwm",
             "compiled here could be verified against it."
         )
     return (f"compiled a one-motif lexicon and read it back with the real loader; "
-            f"the loader returned {names}, matching the order the manifest records")
+            f"the loader returned {names}, matching the order the manifest records "
+            f"[{loader_backend_release()}]")
 
 
 def verify_roundtrip(h5_path: str | os.PathLike[str],
@@ -1299,6 +1343,12 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
     loader_parameters = _resolve_loader_parameters(loader_parameters)
 
     prov = record("compile", seed=seed)
+    # The verifying backend belongs in the provenance of the run that verified, not in
+    # the lexicon's identity: the H5 bytes do not depend on the loader release, so folding
+    # it into `lexicon_content_hash` would hand two labs different identities for the same
+    # lexicon. Recorded unconditionally -- "which loader" is as much a fact when the answer
+    # is "none was installed" as when a round trip ran.
+    prov.software["finemo"] = loader_backend_release()
     # Bound to `out`, not to the staging directory: the outcome of a round trip is
     # a fact about the run whether or not the tier it verified is ever published,
     # and staging is deleted on refusal. Same reason the provenance record above
@@ -1426,7 +1476,8 @@ def compile_lexicons(registry_dir: str | os.PathLike[str], out_dir: str | os.Pat
                     subject=(
                         f"tier {tier!r}: the pattern order recorded in its manifest "
                         f"(lexicon_content_hash={manifest.lexicon_content_hash}) against the "
-                        f"order the real {loader_backend} loader returns for {tier}.h5"
+                        f"order the real {loader_backend} loader returns for {tier}.h5 "
+                        f"[{loader_backend_release()}]"
                     ),
                 ).raise_if_failed()
             except BackendMissing:

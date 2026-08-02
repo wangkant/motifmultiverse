@@ -756,6 +756,39 @@ def test_every_cell_and_family_pair_has_an_explicit_state(dataset, tmp_path):
     )
 
 
+def test_a_family_less_row_is_not_admitted_as_a_family_called_NA(dataset, tmp_path):
+    """A region nothing was searched in names no family. `NA` is the sentinel, not a motif.
+
+    `interpret.peak_universe` excludes the sentinel on purpose -- admitting it puts
+    `NA` in a composition table as though it were a family, which is the
+    fabrication `HitRecord.__post_init__` refuses outright for USED rows. The
+    grid's own coverage index was building its family list straight off
+    `hit.family_id` and so did admit it, which is how a hole reached
+    `family_cells.tsv` wearing a family's name.
+    """
+    from motifmultiverse.schema import MISSING_SENTINEL
+
+    rows = _hit_rows()
+    rows += [{"region_id": f"peak{i}", "chrom": "chr2",
+              "start": 1000 + i * 10_000, "end": 1000 + i * 10_000 + 200,
+              "missingness": "not_searched", "input_scale": 90,
+              "lexicon_id": LEXICON, "substrate_id": SUBSTRATE,
+              "variant_id": "", "family_id": "", "hit_coefficient": ""}
+             for i in range(80, 90)]
+    _write_hits(dataset / "hits_core.tsv", rows)
+
+    out = tmp_path / "out"
+    result = multiverse.run_multiverse(_design(dataset), out)
+
+    import csv
+    with open(out / "family_cells.tsv", newline="", encoding="utf-8") as handle:
+        families = {r["family_id"] for r in csv.DictReader(handle, delimiter="\t")}
+    assert MISSING_SENTINEL not in families, (
+        f"the missing-family sentinel was admitted as a family: {sorted(families)}")
+    assert families == set(FAMILIES), sorted(families)
+    assert result.cells, "the fixture produced no cells to check"
+
+
 def test_a_refused_cell_marks_every_family_refused_not_absent(dataset, tmp_path):
     design = _design(dataset, statistical=[_statistical("impossible",
                                                         floor_blocks=10_000.0)])

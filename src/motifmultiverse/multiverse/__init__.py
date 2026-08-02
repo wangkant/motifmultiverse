@@ -57,7 +57,12 @@ from typing import Any
 
 from motifmultiverse import guards, interpret
 from motifmultiverse.guard_log import GuardLog
-from motifmultiverse.schema import PeakSetQuery, SchemaError, SelectionProvenance
+from motifmultiverse.schema import (
+    MISSING_SENTINEL,
+    PeakSetQuery,
+    SchemaError,
+    SelectionProvenance,
+)
 from motifmultiverse.substrate import read_opportunity_ledger
 
 __all__ = [
@@ -718,6 +723,16 @@ def run_multiverse(design: MultiverseDesign, out_dir: str | os.PathLike[str],
                 searched: dict[str, set[str]] = {}
                 for hit in hits:
                     family = str(hit.family_id)
+                    # The sentinel is not a family, and this index is the grid's
+                    # answer to "which families exist to be asked about". Admitting
+                    # it puts a row named `NA` in the coverage tables as though a
+                    # family had been measured -- the same fabrication
+                    # `interpret.peak_universe` excludes it for, and the one
+                    # `HitRecord.__post_init__` already refuses on USED rows. A
+                    # measured row that names no family is a gap in the family
+                    # assignment; it is not a family.
+                    if family == MISSING_SENTINEL:
+                        continue
                     families.add(family)
                     if str(hit.missingness) != "not_searched":
                         searched.setdefault(family, set()).add(hit.region_id)
