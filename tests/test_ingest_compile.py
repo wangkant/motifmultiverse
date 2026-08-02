@@ -1603,6 +1603,54 @@ def test_ingest_reads_lexically_and_compile_renumbers_across_the_nine_ten_bounda
                                              emitted).passed
 
 
+def test_the_real_loader_returns_manifest_order_across_the_nine_ten_boundary(tmp_path):
+    """The 9-10 boundary, asked of the REAL loader instead of of our model of it.
+
+    The test above compiles with ``verify="skip"`` and then recomputes, inside the test,
+    "what the loader would hand back". That is the structural assertion this module's
+    docstring says proves nothing: it shows the package agrees with its own model of the
+    loader, which is exactly what held while the backend renamed the argument underneath it.
+
+    Every round trip that does reach the real loader has run on a small fixture -- five
+    motifs for the recorded-outcome test, and ``probe_backend`` uses ONE -- so no test has
+    ever handed the loader a group in which numeric and lexicographic order disagree. A
+    union lexicon compiled from real discovery has dozens of motifs per group and crosses
+    that boundary on the first one. Ten patterns is the smallest case that does.
+    """
+    require_finemo_backend()
+
+    many = tmp_path / "many.h5"
+    with h5py.File(many, "w") as h5:
+        for i in range(12):
+            _pattern(h5, "pos_patterns", f"pattern_{i}", seed=i)
+        for i in range(11):
+            _pattern(h5, "neg_patterns", f"pattern_{i}", seed=100 + i)
+    project = _project(tmp_path, analyses=[{
+        "id": "wide", "model": "m", "readout": "r", "union_id": "MA",
+        "context": "promoter", "modisco_h5": str(many)}])
+    ingest.ingest_project(project, tmp_path / "registry")
+
+    # verify="require" makes compile itself do the round trip; it raises rather than write
+    # a lexicon the loader disagrees with, so reaching the next line is already the claim.
+    manifests = compile_mod.compile_lexicons(
+        tmp_path / "registry", tmp_path / "lex", tiers=("core",), verify="require")
+    manifest = manifests["core"]
+    assert manifest.n_motifs == 23
+
+    names = compile_mod.load_back(
+        tmp_path / "lex" / "core.h5", trim_threshold=manifest.trim_threshold,
+        motif_type=manifest.motif_type, include_rc=manifest.include_rc,
+        loader_parameters=manifest.loader_parameters)
+    assert names == manifest.pattern_order
+
+    # Both groups cross the boundary. Under a lexicographic sort anywhere in the chain,
+    # pattern_10 would sit between pattern_1 and pattern_2 in whichever group did it.
+    for group, n in (("pos_patterns", 12), ("neg_patterns", 11)):
+        suffixes = [int(name.rsplit("_", 1)[1])
+                    for name in names if name.startswith(f"{group}.")]
+        assert suffixes == list(range(n)), group
+
+
 # --- regression: one discovery file, one checksum ------------------------------
 # The digest was recomputed inside the per-pattern loop, so a 17 MB real
 # modisco.h5 with 33 patterns was read 33 times to re-derive a value that cannot
